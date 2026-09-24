@@ -437,6 +437,18 @@ JSON mode: `payload`.
 
 - Distinct from `claude desktop show`, which reports what this machine WOULD write; this reports what is actually in effect, which only the running proxy knows.
 
+### `ocx claude desktop picker status`
+
+First-party picker mode: whether Claude Desktop's Code tab lists opencodex models, and what is missing if not.
+
+| Method | Route |
+|---|---|
+| GET | `/api/claude-desktop/picker` |
+
+JSON mode: `none`.
+
+- Reports desired, effective, keychain trust, the Desktop egress profile, the model count and a reason with the next command to run.
+
 ## State-changing capabilities
 
 Each of these writes. Check the flags column before running one unattended.
@@ -869,6 +881,43 @@ JSON mode: `none`.
 
 - Removing an id that is not bound is a no-op; the remaining bindings are printed.
 
+### `ocx claude desktop picker on`
+
+Turn first-party picker mode on and remember the choice.
+
+| Method | Route |
+|---|---|
+| PUT | `/api/claude-desktop/picker` |
+
+JSON mode: `none`.
+
+- Needs a running proxy, first-party mode and macOS. The first time, macOS asks to trust a local certificate authority limited to claude.ai; when the server cannot show that prompt the command runs the trust step in this terminal.
+- Claude Desktop then reaches the network through opencodex; fully quit and reopen Desktop afterwards.
+
+### `ocx claude desktop picker off`
+
+Turn first-party picker mode off, remove its Desktop egress profile and certificate trust, and remember the choice.
+
+| Method | Route |
+|---|---|
+| PUT | `/api/claude-desktop/picker` |
+
+JSON mode: `none`.
+
+- Works without a running proxy: the preference is saved and the picker profile and trust are removed locally.
+
+### `ocx claude desktop picker trust`
+
+Run the macOS keychain step for picker mode in this terminal, then ask the server to finish enabling it.
+
+| Method | Route |
+|---|---|
+| PUT | `/api/claude-desktop/picker` |
+
+JSON mode: `none`.
+
+- The server removes trust this command added if the enable is refused; if the request is lost, trust is left alone and picker status tells what happened.
+
 ### `ocx integration native`
 
 Show or toggle the native Claude, Claude Desktop, Codex, and Grok integrations, and read the Cursor status (which builds are installed, gateway values, last request seen).
@@ -956,6 +1005,6 @@ JSON mode: `payload`.
 
 ## Counts
 
-- declared capabilities: 52
-- of those, state-changing: 27
+- declared capabilities: 56
+- of those, state-changing: 30
 - head-resolved invocations: 2

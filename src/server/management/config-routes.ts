@@ -216,36 +216,40 @@ export async function syncEnabledClientIntegrations(
       const { desktopVisibleNativeSlugs, filterCatalogVisibleModels } = await import("../../codex/catalog");
       const { fetchAllModels } = await import("../management-api");
       const models = await (deps.fetchAllModels ?? fetchAllModels)(config);
-      // Discovery admits a concurrent OFF or settings edit. Re-read outside C:
-      // the writer facade owns L and its final desired-state check under L→C.
-      const latest = loadConfig();
-      // Discovery awaited: the mode may have changed meanwhile. Re-resolve on the fresh read,
-      // immediately before the writer, so a first-party switch during fetchAllModels still wins.
-      if (claudeDesktopIntegrationEnabled(latest) && resolveClaudeDesktopMode(latest, observeClaudeDesktopMode(latest)) !== "first-party") {
-        const routed = filterCatalogVisibleModels(models, latest)
-          .map(model => ({ provider: model.provider, id: model.id, contextWindow: model.contextWindow }));
-        const writtenProfile = latest.claudeCode?.desktopProfile;
-        const markerBaseline = captureDesktopAppliedMarker(writtenProfile);
-        const r = (deps.writeDesktop3pConfig ?? writeDesktop3pConfig)(
-          port,
-          [...desktopVisibleNativeSlugs(latest)],
-          routed,
-          latest.apiKeys?.[0]?.key,
-          "static",
-          writtenProfile,
-          nativeContextLimits(latest),
-        );
-        if (!r.written || !r.fingerprint) {
-          out.push({ client: "claude-desktop", ok: false, reason: r.reason ?? "Claude Desktop write failed" });
-        } else {
-          const marked = commitDesktopAppliedMarker(markerBaseline, r.fingerprint);
-          out.push(marked.status === "unavailable"
-            ? { client: "claude-desktop", ok: false, reason: "Claude Desktop applied marker was not saved (" + marked.reason + ")" }
-            : marked.value === false
-            ? { client: "claude-desktop", ok: false, reason: "Claude Desktop desired profile changed during sync; applied marker skipped" }
-            : { client: "claude-desktop", ok: true, changed: true });
+      // Serialized with Desktop mode transitions (picker lock): a first-party switch cannot interleave.
+      const { runPickerTransition } = await import("./claude-desktop-picker-routes");
+      await runPickerTransition(config, async () => {
+        // Discovery admits a concurrent OFF or settings edit. Re-read outside C:
+        // the writer facade owns L and its final desired-state check under L→C.
+        const latest = loadConfig();
+        // Discovery awaited: the mode may have changed meanwhile. Re-resolve on the fresh read,
+        // immediately before the writer, so a first-party switch during fetchAllModels still wins.
+        if (claudeDesktopIntegrationEnabled(latest) && resolveClaudeDesktopMode(latest, observeClaudeDesktopMode(latest)) !== "first-party") {
+          const routed = filterCatalogVisibleModels(models, latest)
+            .map(model => ({ provider: model.provider, id: model.id, contextWindow: model.contextWindow }));
+          const writtenProfile = latest.claudeCode?.desktopProfile;
+          const markerBaseline = captureDesktopAppliedMarker(writtenProfile);
+          const r = (deps.writeDesktop3pConfig ?? writeDesktop3pConfig)(
+            port,
+            [...desktopVisibleNativeSlugs(latest)],
+            routed,
+            latest.apiKeys?.[0]?.key,
+            "static",
+            writtenProfile,
+            nativeContextLimits(latest),
+          );
+          if (!r.written || !r.fingerprint) {
+            out.push({ client: "claude-desktop", ok: false, reason: r.reason ?? "Claude Desktop write failed" });
+          } else {
+            const marked = commitDesktopAppliedMarker(markerBaseline, r.fingerprint);
+            out.push(marked.status === "unavailable"
+              ? { client: "claude-desktop", ok: false, reason: "Claude Desktop applied marker was not saved (" + marked.reason + ")" }
+              : marked.value === false
+              ? { client: "claude-desktop", ok: false, reason: "Claude Desktop desired profile changed during sync; applied marker skipped" }
+              : { client: "claude-desktop", ok: true, changed: true });
+          }
         }
-      }
+      });
     } catch (error) {
       out.push({ client: "claude-desktop", ok: false, reason: error instanceof Error ? error.message : String(error) });
     }

@@ -1,11 +1,13 @@
 import type { Server } from "bun";
 import type { OcxConfig } from "../../types";
 import { getConfigDir } from "../../config/paths";
+import type { DesktopPickerController } from "../desktop-picker";
 import { CLAUDE_INTERCEPT_HOSTS, startConnectProxy, type ConnectProxyHandle } from "./connect-proxy";
 import { startClaudeInterceptListener } from "./listener";
 import { claudeInterceptCaCertPath, ensureLocalInterceptCaForStartup, issueLocalInterceptLeaf } from "./local-ca";
 import type { PickerRouteInput } from "./picker-models";
 import { createPickerRuntime, type CreatePickerRuntimeOptions, type PickerRuntime } from "./picker-runtime";
+import type { SecurityRunner } from "./picker-trust";
 
 /**
  * Lifecycle for the Claude intercept pair (CONNECT proxy + TLS listener).
@@ -56,6 +58,7 @@ export interface ClaudeInterceptHandle<T = undefined> extends ClaudeInterceptSta
 
 let activeState: ClaudeInterceptState | null = null;
 let activePicker: PickerRuntime | null = null;
+let activeController: DesktopPickerController | null = null;
 
 /** Live intercept endpoints, or `null` when the pair is not running in this process. */
 export function getClaudeInterceptState(): ClaudeInterceptState | null {
@@ -65,6 +68,31 @@ export function getClaudeInterceptState(): ClaudeInterceptState | null {
 /** The running picker runtime, or `null` when picker mode is not wired in this process. */
 export function getClaudePickerRuntime(): PickerRuntime | null {
   return activePicker;
+}
+
+/** The picker controller that owns every picker mutation while this server runs, or `null`. */
+export function getClaudePickerController(): DesktopPickerController | null {
+  return activeController;
+}
+
+/**
+ * Persist `claudeCode.intercept.picker` through the field-scoped writer and adopt the committed
+ * subtree into the live config, so a later whole-config save neither reverts nor re-applies it.
+ */
+export async function createPickerPreferenceWriter(live: OcxConfig): Promise<(value: boolean) => boolean> {
+  const { adoptPersistedClaudeCode, mutatePersistedConfig } = await import("../../config");
+  return value => {
+    const outcome = mutatePersistedConfig(persisted => {
+      const claudeCode = persisted.claudeCode ?? {};
+      const intercept = claudeCode.intercept ?? {};
+      if (intercept.picker === value) return { changed: false, value: structuredClone(persisted.claudeCode) };
+      persisted.claudeCode = { ...claudeCode, intercept: { ...intercept, picker: value } };
+      return { changed: true, value: structuredClone(persisted.claudeCode) };
+    });
+    if (outcome.status === "unavailable") return false;
+    adoptPersistedClaudeCode(live, outcome.value);
+    return true;
+  };
 }
 
 export interface StartClaudeInterceptOptions<T> {
@@ -83,6 +111,9 @@ export interface StartClaudeInterceptOptions<T> {
   loadPickerRoutes?: () => Promise<PickerRouteInput>;
   /** Test seam: builds the picker runtime. */
   createPicker?: (options: CreatePickerRuntimeOptions) => PickerRuntime;
+  /** Test seams: the macOS `security` runner and platform for the picker runtime and controller. */
+  pickerSecurity?: SecurityRunner;
+  pickerPlatform?: NodeJS.Platform;
 }
 
 /**
@@ -114,9 +145,19 @@ export async function startClaudeIntercept<T>(options: StartClaudeInterceptOptio
   // Widened on purpose: assignments happen in nested awaits the catch below must still see.
   let picker = null as PickerRuntime | null;
   let pickerProxy = null as ConnectProxyHandle | null;
+  let controller = null as DesktopPickerController | null;
+  let pickerProxyLive = false;
   try {
     if (options.loadPickerRoutes) {
-      picker = (options.createPicker ?? createPickerRuntime)({ config: options.config, configDir, loadRoutes: options.loadPickerRoutes });
+      picker = (options.createPicker ?? createPickerRuntime)({
+        config: options.config,
+        configDir,
+        loadRoutes: options.loadPickerRoutes,
+        // The controller's lock: while it is held, periodic refreshes never arm.
+        isBusy: () => controller?.busy() ?? false,
+        ...(options.pickerSecurity ? { security: options.pickerSecurity } : {}),
+        ...(options.pickerPlatform ? { platform: options.pickerPlatform } : {}),
+      });
       const runtime = picker;
       try {
         pickerProxy = await startConnectProxy(claudePickerProxyPort(options.config, options.publicPort), {
@@ -125,17 +166,38 @@ export async function startClaudeIntercept<T>(options: StartClaudeInterceptOptio
           interceptHosts: [],
           selectTunnel: (host, port) => runtime.selectTunnel(host, port),
         });
+        pickerProxyLive = true;
       } catch (error) {
         // Picker mode is optional: a busy port leaves the intercept pair running without it.
         console.warn(`⚠ Claude Desktop picker proxy could not start: ${error instanceof Error ? error.message : String(error)}`);
         await runtime.stop();
         picker = null;
       }
-      if (picker) await picker.start();
+      if (picker) {
+        // Dynamic: the controller reaches desktop-first-party, which imports this module.
+        const [{ createDesktopPickerController }, { loadConfig }, persistPreference] = await Promise.all([
+          import("../desktop-picker"),
+          import("../../config"),
+          createPickerPreferenceWriter(options.config),
+        ]);
+        const boundProxy = pickerProxy;
+        controller = createDesktopPickerController({
+          runtime: picker,
+          readConfig: loadConfig,
+          persistPreference,
+          proxyPort: () => (pickerProxyLive && boundProxy ? boundProxy.port : null),
+          configDir,
+          ...(options.pickerSecurity ? { security: options.pickerSecurity } : {}),
+          ...(options.pickerPlatform ? { platform: options.pickerPlatform } : {}),
+        });
+        await picker.start();
+      }
     }
   } catch (error) {
     // Construction or start failed after the CONNECT proxy bound: release every socket first,
     // so the lifecycle's catch never leaves a bound port without a handle.
+    pickerProxyLive = false;
+    controller = null;
     await picker?.stop();
     await pickerProxy?.close();
     await proxy.close();
@@ -149,13 +211,17 @@ export async function startClaudeIntercept<T>(options: StartClaudeInterceptOptio
   };
   activeState = state;
   activePicker = picker;
+  activeController = controller;
   const ownPicker = picker;
+  const ownController = controller;
   return {
     ...state,
     listener,
     stop: async () => {
       if (activeState === state) activeState = null;
       if (activePicker === ownPicker) activePicker = null;
+      if (activeController === ownController) activeController = null;
+      pickerProxyLive = false;
       await ownPicker?.stop();
       await pickerProxy?.close();
       await proxy.close();

@@ -275,7 +275,7 @@ test("native toggle: enabling into gateway saves the gateway mode marker like th
   expect(resolveClaudeDesktopMode(saved)).toBe("gateway");
 });
 
-test("ensure warns instead of touching a gateway profile that contradicts an explicit first-party marker", () => {
+test("ensure warns instead of touching a gateway profile that contradicts an explicit first-party marker", async () => {
   const logs: string[] = [];
   const deps = {
     loadConfig: () => config({ claudeCode: { desktopMode: "first-party" } }),
@@ -287,7 +287,7 @@ test("ensure warns instead of touching a gateway profile that contradicts an exp
     log: (message: string) => { logs.push(message); },
     error: (message: string) => { logs.push(message); },
   };
-  ensureClaudeDesktopMatchesDesired(deps as unknown as Parameters<typeof ensureClaudeDesktopMatchesDesired>[0]);
+  await ensureClaudeDesktopMatchesDesired(deps as unknown as Parameters<typeof ensureClaudeDesktopMatchesDesired>[0]);
   expect(logs.some(line => line.includes("gateway profile is still applied"))).toBe(true);
 });
 
@@ -433,7 +433,7 @@ test("failed committed gateway persistence does not adopt into the live snapshot
   expect(snapshot).toEqual(before);
 });
 
-test("ensure reconciles first-party env: refreshes when ON and stale, removes when OFF", () => {
+test("ensure reconciles first-party env: refreshes when ON and stale, removes when OFF", async () => {
   const applied = applyDesktopFirstParty(config({ port: 10300 }));
   expect(applied.ok).toBe(true);
   expect(settings().env?.HTTPS_PROXY).toBe("http://127.0.0.1:10400");
@@ -447,14 +447,31 @@ test("ensure reconciles first-party env: refreshes when ON and stale, removes wh
     log: (message: string) => { logs.push(message); },
     error: (message: string) => { logs.push(message); },
   };
-  ensureClaudeDesktopMatchesDesired(deps);
+  await ensureClaudeDesktopMatchesDesired(deps);
   expect(settings().env?.HTTPS_PROXY).toBe("http://127.0.0.1:10200");
   expect(logs.some(line => line.includes("first-party env refreshed"))).toBe(true);
 
   expect(setIntegrationEnabled("claude-desktop", false).ok).toBe(true);
-  ensureClaudeDesktopMatchesDesired({ ...deps, loadConfig: () => config({ clientIntegrations: { "claude-desktop": false } }) });
+  await ensureClaudeDesktopMatchesDesired({ ...deps, loadConfig: () => config({ clientIntegrations: { "claude-desktop": false } }) });
   expect(settings().env?.HTTPS_PROXY).toBeUndefined();
   expect(settings().env?.NODE_EXTRA_CA_CERTS).toBeUndefined();
+});
+
+test("ensure durable OFF disables the picker through the live proxy", async () => {
+  const requests: Array<{ path: string; body: unknown }> = [];
+  await ensureClaudeDesktopMatchesDesired({
+    loadConfig: () => config({ clientIntegrations: { "claude-desktop": false } }),
+    stripGrokConfig: () => ({ ok: true, changed: false, message: "" }),
+    syncGrokConfig: async () => ({ ok: true, changed: false, message: "" }),
+    removeDesktop3pStandardPivot: () => ({ ok: true as const, changed: false, kind: "noop" as const, libraryPath: library }),
+    findLiveProxyImpl: async () => ({ pid: 42, port: 10100, hostname: "127.0.0.1", source: "runtime" }),
+    runtimeRequestImpl: async (path, init) => {
+      requests.push({ path, body: JSON.parse(String(init.body)) });
+      return { ok: true };
+    },
+    removeDesktopFirstParty: () => ({ ok: true, changed: false, path: "" }),
+  });
+  expect(requests).toEqual([{ path: "/api/claude-desktop/picker", body: { enabled: false, persist: false } }]);
 });
 
 for (const surface of ["cli", "api"] as const) {
@@ -477,7 +494,7 @@ for (const surface of ["cli", "api"] as const) {
           ? "{broken" : JSON.stringify({ env: { HTTPS_PROXY: "http://corporate.example:3128" } }));
       }
       if (surface === "cli") {
-        expect(await applyDesktop(undefined, { kind: "first-party" })).toMatchObject({ ok: false, reason: failure });
+        expect(await applyDesktop(undefined, { kind: "first-party" }, { findLiveProxyImpl: async () => null })).toMatchObject({ ok: false, reason: failure });
       } else {
         const reply = await dispatch("/api/claude-desktop/apply", { method: "POST", body: JSON.stringify({ mode: "first-party" }) }, saved);
         expect(reply.body.reason).toBe(failure);
