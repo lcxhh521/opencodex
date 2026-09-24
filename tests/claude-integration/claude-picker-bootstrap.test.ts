@@ -87,3 +87,24 @@ test("rewritten headers remove stale encoding, length, validators and transfer m
     "Set-Cookie", "a=1", "Set-Cookie", "b=2",
   ], 7)).toEqual(["Content-Type", "application/json", "Set-Cookie", "a=1", "Set-Cookie", "b=2", "Content-Length", "7"]);
 });
+
+test("the injection outcome names why a bootstrap stayed unchanged, never its values", () => {
+  const outcomes: string[] = [];
+  const explain = (outcome: { kind: string; reason?: string; added?: number }) => {
+    outcomes.push(outcome.kind === "rewritten" ? `rewritten:${outcome.added}` : `unchanged:${outcome.reason}`);
+  };
+  expect(injectPickerModels({}, models, explain)).toBe(0);
+  expect(injectPickerModels({ model_selector_config: [{ id: "cowork", models: [] }, { id: "chat", models: [] }] }, models, explain)).toBe(0);
+  expect(injectPickerModels({ model_selector_config: [{ id: "code", models: [{ id: "not-claude" }] }] }, models, explain)).toBe(0);
+  expect(injectPickerModels(fixture(), [], explain)).toBe(0);
+  expect(injectPickerModels(fixture(), models, explain)).toBe(1);
+  expect(rewriteBootstrapBody(Buffer.from("{"), undefined, models, explain)).toBeNull();
+  expect(outcomes).toEqual([
+    "unchanged:no_model_selector_config",
+    "unchanged:no_code_surface(cowork,chat)",
+    "unchanged:no_template(models=1)",
+    "unchanged:no_routes",
+    "rewritten:1",
+    "unchanged:decode_or_parse_failed",
+  ]);
+});

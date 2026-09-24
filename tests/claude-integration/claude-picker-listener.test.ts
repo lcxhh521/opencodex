@@ -109,7 +109,7 @@ test("bootstrap JSON is injected and emitted with identity headers", async () =>
     expect(received.headers.etag).toBeUndefined();
     expect(Number(received.headers["content-length"])).toBe(received.body.length);
     expect(JSON.parse(received.body.toString()).model_selector_config[0].models[1].id).toBe("ocx-model");
-    expect(f.logs).toEqual(["picker GET bootstrap 200"]);
+    expect(f.logs).toEqual(["picker GET bootstrap 200", "picker GET bootstrap rewritten(+1)"]);
   } finally { await f.close(); }
 });
 

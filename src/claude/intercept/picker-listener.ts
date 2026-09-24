@@ -123,8 +123,12 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
       upRes.once("end", () => {
         if (handedOff) return;
         const original = Buffer.concat(held, size);
-        const rewritten = rewriteBootstrapBody(original, contentEncoding(upRes.rawHeaders), options.models());
+        let outcome = "unchanged";
+        const rewritten = rewriteBootstrapBody(original, contentEncoding(upRes.rawHeaders), options.models(), result => {
+          outcome = result.kind === "rewritten" ? `rewritten(+${result.added})` : `unchanged:${result.reason}`;
+        });
         sendHead(rewritten === null ? originalHeaders : rewrittenHeaders(originalHeaders, rewritten.length));
+        options.log?.(`picker ${method} bootstrap ${outcome}`);
         res.end(rewritten ?? original);
       });
     });

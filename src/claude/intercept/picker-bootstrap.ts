@@ -32,16 +32,30 @@ function record(value: unknown): Record<string, unknown> | null {
     ? value as Record<string, unknown> : null;
 }
 
-export function injectPickerModels(bootstrap: unknown, models: readonly PickerModelEntry[]): number {
+/** Why a bootstrap was left unchanged, for the metadata-only picker log. Never carries values. */
+export type PickerInjectionOutcome =
+  | { kind: "rewritten"; added: number }
+  | { kind: "unchanged"; reason: string };
+
+export function injectPickerModels(
+  bootstrap: unknown,
+  models: readonly PickerModelEntry[],
+  explain?: (outcome: PickerInjectionOutcome) => void,
+): number {
+  const unchanged = (reason: string): number => { explain?.({ kind: "unchanged", reason }); return 0; };
   const surfaces = record(bootstrap)?.model_selector_config;
-  if (!Array.isArray(surfaces)) return 0;
+  if (!Array.isArray(surfaces)) return unchanged("no_model_selector_config");
   const surface = surfaces.map(record).find(entry => entry?.id === PICKER_SURFACE_ID);
-  if (!surface || !Array.isArray(surface.models)) return 0;
+  if (!surface || !Array.isArray(surface.models)) {
+    // Surface ids are Anthropic's fixed names (for example "code"), not user data.
+    const ids = surfaces.map(record).map(entry => typeof entry?.id === "string" ? entry.id.slice(0, 32) : "?");
+    return unchanged(`no_code_surface(${ids.join(",")})`);
+  }
   const entries = surface.models as unknown[];
   const template = entries.map(record).find(entry =>
     typeof entry?.id === "string" && entry.id.startsWith("claude-")
     && !entry.disabled && !entry.disabled_reason && entry.section !== "deprecated");
-  if (!template) return 0;
+  if (!template) return unchanged(`no_template(models=${entries.length})`);
   const existing = new Set(entries.map(record).map(entry => entry?.id));
   let added = 0;
   for (const model of models) {
@@ -60,13 +74,19 @@ export function injectPickerModels(bootstrap: unknown, models: readonly PickerMo
     existing.add(model.id);
     added++;
   }
+  if (added === 0) return unchanged(models.length === 0 ? "no_routes" : "all_present");
+  explain?.({ kind: "rewritten", added });
   return added;
 }
 
 export function rewriteBootstrapBody(
-  encoded: Buffer, contentEncoding: string | undefined, models: readonly PickerModelEntry[],
+  encoded: Buffer,
+  contentEncoding: string | undefined,
+  models: readonly PickerModelEntry[],
+  explain?: (outcome: PickerInjectionOutcome) => void,
 ): Buffer | null {
-  if (encoded.length > BOOTSTRAP_MAX_ENCODED_BYTES) return null;
+  const unchanged = (reason: string): null => { explain?.({ kind: "unchanged", reason }); return null; };
+  if (encoded.length > BOOTSTRAP_MAX_ENCODED_BYTES) return unchanged("encoded_cap");
   const encoding = contentEncoding?.trim().toLowerCase() || "identity";
   let decoded: Buffer;
   try {
@@ -76,14 +96,14 @@ export function rewriteBootstrapBody(
       case "x-gzip": decoded = gunzipSync(encoded, { maxOutputLength: BOOTSTRAP_MAX_DECODED_BYTES }); break;
       case "deflate": decoded = inflateSync(encoded, { maxOutputLength: BOOTSTRAP_MAX_DECODED_BYTES }); break;
       case "br": decoded = brotliDecompressSync(encoded, { maxOutputLength: BOOTSTRAP_MAX_DECODED_BYTES }); break;
-      default: return null;
+      default: return unchanged("unsupported_encoding");
     }
-    if (decoded.length > BOOTSTRAP_MAX_DECODED_BYTES) return null;
+    if (decoded.length > BOOTSTRAP_MAX_DECODED_BYTES) return unchanged("decoded_cap");
     const parsed: unknown = JSON.parse(decoded.toString("utf8"));
-    if (injectPickerModels(parsed, models) === 0) return null;
+    if (injectPickerModels(parsed, models, explain) === 0) return null;
     return Buffer.from(JSON.stringify(parsed), "utf8");
   } catch {
-    return null;
+    return unchanged("decode_or_parse_failed");
   }
 }
 

@@ -155,6 +155,8 @@ export async function startClaudeIntercept<T>(options: StartClaudeInterceptOptio
         loadRoutes: options.loadPickerRoutes,
         // The controller's lock: while it is held, periodic refreshes never arm.
         isBusy: () => controller?.busy() ?? false,
+        // Metadata only: method, bootstrap or other, status, and the rewrite outcome.
+        log: line => console.log(`[claude-picker] ${line}`),
         ...(options.pickerSecurity ? { security: options.pickerSecurity } : {}),
         ...(options.pickerPlatform ? { platform: options.pickerPlatform } : {}),
       });
