@@ -102,9 +102,31 @@ test("the injection outcome names why a bootstrap stayed unchanged, never its va
   expect(outcomes).toEqual([
     "unchanged:no_model_selector_config",
     "unchanged:no_code_surface(cowork,chat)",
-    "unchanged:no_template(models=1)",
+    "unchanged:code:no_template(models=1)",
     "unchanged:no_routes",
     "rewritten:1",
     "unchanged:decode_or_parse_failed",
   ]);
+});
+
+test("the Desktop Code surfaces ccd and code both gain the routes; remote ccr and cowork stay untouched", () => {
+  const native = { id: "claude-native", name: "Native", section: "main" };
+  const body = {
+    model_selector_config: [
+      { id: "ccd", models: [{ ...native }] },
+      { id: "code", models: [{ ...native }] },
+      { id: "ccr", models: [{ ...native }] },
+      { id: "cowork", models: [{ ...native }] },
+    ],
+  };
+  expect(injectPickerModels(body, models)).toBe(2);
+  const ids = (surface: number) => body.model_selector_config[surface]!.models.map(row => row.id);
+  expect(ids(0)).toEqual(["claude-native", "ocx-model"]);
+  expect(ids(1)).toEqual(["claude-native", "ocx-model"]);
+  expect(ids(2)).toEqual(["claude-native"]);
+  expect(ids(3)).toEqual(["claude-native"]);
+  // Desktop falls back to "code" when "ccd" is absent.
+  const fallback = { model_selector_config: [{ id: "code", models: [{ ...native }] }, { id: "ccr", models: [{ ...native }] }] };
+  expect(injectPickerModels(fallback, models)).toBe(1);
+  expect(fallback.model_selector_config[1]!.models).toHaveLength(1);
 });

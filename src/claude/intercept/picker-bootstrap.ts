@@ -13,7 +13,6 @@ export interface PickerModelEntry {
 
 export const BOOTSTRAP_MAX_ENCODED_BYTES = 4 * 1024 * 1024;
 export const BOOTSTRAP_MAX_DECODED_BYTES = 16 * 1024 * 1024;
-export const PICKER_SURFACE_ID = "code";
 const BOOTSTRAP_PATH = /^\/(?:edge-api|api)\/bootstrap(?:\/[A-Za-z0-9-]+\/app_start)?\/?$/;
 const REWRITE_REMOVED_HEADERS = new Set([
   "content-encoding", "content-length", "etag", "digest", "content-md5", "transfer-encoding",
@@ -37,25 +36,20 @@ export type PickerInjectionOutcome =
   | { kind: "rewritten"; added: number }
   | { kind: "unchanged"; reason: string };
 
-export function injectPickerModels(
-  bootstrap: unknown,
-  models: readonly PickerModelEntry[],
-  explain?: (outcome: PickerInjectionOutcome) => void,
-): number {
-  const unchanged = (reason: string): number => { explain?.({ kind: "unchanged", reason }); return 0; };
-  const surfaces = record(bootstrap)?.model_selector_config;
-  if (!Array.isArray(surfaces)) return unchanged("no_model_selector_config");
-  const surface = surfaces.map(record).find(entry => entry?.id === PICKER_SURFACE_ID);
-  if (!surface || !Array.isArray(surface.models)) {
-    // Surface ids are Anthropic's fixed names (for example "code"), not user data.
-    const ids = surfaces.map(record).map(entry => typeof entry?.id === "string" ? entry.id.slice(0, 32) : "?");
-    return unchanged(`no_code_surface(${ids.join(",")})`);
-  }
+/**
+ * Surfaces whose picker the local Desktop Code tab can show. Desktop reads "ccd" and falls back to
+ * "code" only when "ccd" carries no catalog; "ccr" (remote sessions) is left alone because a
+ * remote session never reaches this machine's proxy, so an opencodex route could not run there.
+ */
+export const PICKER_SURFACE_IDS = ["ccd", "code"] as const;
+
+function injectIntoSurface(surface: Record<string, unknown>, models: readonly PickerModelEntry[]): number | string {
+  if (!Array.isArray(surface.models)) return "no_models";
   const entries = surface.models as unknown[];
   const template = entries.map(record).find(entry =>
     typeof entry?.id === "string" && entry.id.startsWith("claude-")
     && !entry.disabled && !entry.disabled_reason && entry.section !== "deprecated");
-  if (!template) return unchanged(`no_template(models=${entries.length})`);
+  if (!template) return `no_template(models=${entries.length})`;
   const existing = new Set(entries.map(record).map(entry => entry?.id));
   let added = 0;
   for (const model of models) {
@@ -74,7 +68,33 @@ export function injectPickerModels(
     existing.add(model.id);
     added++;
   }
-  if (added === 0) return unchanged(models.length === 0 ? "no_routes" : "all_present");
+  return added;
+}
+
+export function injectPickerModels(
+  bootstrap: unknown,
+  models: readonly PickerModelEntry[],
+  explain?: (outcome: PickerInjectionOutcome) => void,
+): number {
+  const unchanged = (reason: string): number => { explain?.({ kind: "unchanged", reason }); return 0; };
+  const surfaces = record(bootstrap)?.model_selector_config;
+  if (!Array.isArray(surfaces)) return unchanged("no_model_selector_config");
+  const rows = surfaces.map(record);
+  const targets = rows.filter((entry): entry is Record<string, unknown> =>
+    entry !== null && (PICKER_SURFACE_IDS as readonly unknown[]).includes(entry.id));
+  if (targets.length === 0) {
+    // Surface ids are Anthropic's fixed names (for example "ccd"), not user data.
+    const ids = rows.map(entry => typeof entry?.id === "string" ? entry.id.slice(0, 32) : "?");
+    return unchanged(`no_code_surface(${ids.join(",")})`);
+  }
+  let added = 0;
+  const skipped: string[] = [];
+  for (const surface of targets) {
+    const result = injectIntoSurface(surface, models);
+    if (typeof result === "number") added += result;
+    else skipped.push(`${String(surface.id)}:${result}`);
+  }
+  if (added === 0) return unchanged(skipped.length > 0 ? skipped.join(";") : models.length === 0 ? "no_routes" : "all_present");
   explain?.({ kind: "rewritten", added });
   return added;
 }

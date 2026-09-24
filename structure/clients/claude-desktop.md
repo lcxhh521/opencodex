@@ -130,7 +130,8 @@ trusted in the login keychain (`picker-trust.ts`). The picker CA (`picker-ca.ts`
 `<OPENCODEX_HOME>/claude-picker/`, 0600 key) carries critical name constraints permitting only
 `claude.ai` and is regenerated on reload when they are missing. The relay verifies the upstream
 certificate, streams every body and upgrade unchanged, and rewrites only the bootstrap response's
-Code picker surface (`picker-bootstrap.ts`), failing open to the original bytes; the model list
+local Code picker surfaces, `ccd` (what the Desktop Code tab reads) and its `code` fallback, never the
+remote `ccr` (`picker-bootstrap.ts`), failing open to the original bytes; the model list
 comes from a persisted snapshot (`picker-models.ts`), so a bootstrap never waits on discovery. A
 CONNECT to claude.ai that arrives before the first refresh waits at most 3 s, then goes blind. A
 picker proxy bind failure only disables picker mode; a picker construction or start failure closes
