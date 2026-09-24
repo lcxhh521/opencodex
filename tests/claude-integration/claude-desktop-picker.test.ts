@@ -207,7 +207,31 @@ test("disable disarms, optionally persists, removes the profile, and untrusts", 
   expect(result.reason).toBe("disabled");
   expect(result.effective).toBe(false);
   expect(events).toEqual(["disarm", "persist:false", "remove"]);
-  expect(trust.calls.at(-2)?.[0]).toBe("remove-trusted-cert");
+  expect(trust.calls.slice(-4).map(call => call[0])).toEqual(["find-certificate", "remove-trusted-cert", "delete-certificate", "find-certificate"]);
+});
+
+test("disable keeps the CA trusted while Desktop still selects the picker profile", async () => {
+  const events: string[] = [];
+  const trust = pickerSecurity({ trusted: true });
+  const base = profileFake(events);
+  let failRemove = false;
+  const profile = {
+    ...base,
+    remove: () => failRemove
+      ? ({ ok: false, reason: "write_failed" } as never)
+      : base.remove(),
+  };
+  const runtimeParts = fakeRuntime(events);
+  const controller = controllerFor({ events, security: trust.run, profile, runtime: runtimeParts.runtime });
+  await controller.enable({ persist: false, context: "server" });
+  // The metadata write fails: the profile stays selected.
+  failRemove = true;
+  const callsBefore = trust.calls.length;
+  const result = await controller.disable({ persist: false });
+  expect(profile.selected()).toBe(true);
+  expect(result.residual).toEqual(["profile"]);
+  expect(result.effective).toBe(false);
+  expect(trust.calls.slice(callsBefore).some(call => call[0] === "remove-trusted-cert")).toBe(false);
 });
 
 test("one lock serializes a pending enable and a queued disable", async () => {

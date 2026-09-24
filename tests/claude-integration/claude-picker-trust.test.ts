@@ -43,16 +43,31 @@ test("exit 1 is untrusted; other command failures are unknown", async () => {
 });
 
 test("trust and untrust pass the exact security argv", async () => {
-  const f = fake(ok, ok, ok);
+  const listed = { ...ok, stdout: `SHA-1 hash: ${sha1}\n` };
+  const find = ["find-certificate", "-a", "-Z", "-c", PICKER_CA_COMMON_NAME, loginKeychainPath()];
+  const f = fake(ok, listed, ok, ok, { ...ok, code: 1 });
   expect(await trustPickerCa("/ca.pem", f.run, "darwin")).toEqual({ ok: true });
   expect(await untrustPickerCa("/ca.pem", sha1, f.run, "darwin")).toEqual({ ok: true });
   expect(f.calls).toEqual([
     ["add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-s", "claude.ai", "-k", loginKeychainPath(), "/ca.pem"],
+    find,
     ["remove-trusted-cert", "/ca.pem"],
     ["delete-certificate", "-Z", sha1, loginKeychainPath()],
+    find,
   ]);
   expect(await trustPickerCa("/ca.pem", fake({ ...ok, code: 1 }).run, "darwin"))
     .toEqual({ ok: false, reason: "declined_or_failed" });
+});
+
+test("untrust is a no-op success when the current CA is not in the login keychain", async () => {
+  for (const found of [{ ...ok, code: 1 }, { ...ok, stdout: `SHA-1 hash: ${"B".repeat(40)}\n` }]) {
+    const f = fake(found);
+    expect(await untrustPickerCa("/ca.pem", sha1, f.run, "darwin")).toEqual({ ok: true });
+    expect(f.calls.map(call => call[0])).toEqual(["find-certificate"]);
+  }
+  // A removal that leaves the certificate listed is not success.
+  const listed = { ...ok, stdout: `SHA-1 hash: ${sha1}\n` };
+  expect(await untrustPickerCa("/ca.pem", sha1, fake(listed, ok, ok, listed).run, "darwin")).toEqual({ ok: false });
 });
 
 test("non-darwin never invokes the runner", async () => {

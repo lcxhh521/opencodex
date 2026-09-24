@@ -22,6 +22,11 @@ import {
 } from "./desktop-picker-profile";
 import { resolveClaudeDesktopMode, observeClaudeDesktopMode } from "./desktop-first-party";
 
+/** Desktop no longer selects the picker profile, so removing the CA's trust cannot strand it. */
+function profileReleased(profile: DesktopPickerProfileInspection): boolean {
+  return profile.kind === "absent" || profile.kind === "not_selected";
+}
+
 export type DesktopPickerReason = "active" | "restart_required" | "unsupported_platform" | "not_first_party"
   | "integration_off" | "disabled" | "proxy_unavailable" | "mode_not_committed" | "trust_pending"
   | "trust_declined" | "profile_failed";
@@ -266,8 +271,15 @@ export function createDesktopPickerController(deps: DesktopPickerControllerDeps)
       const removed = removeProfile(profileOptions(deps));
       if (!removed.ok) residual.push("profile");
     } catch { residual.push("profile"); }
-    const trustRemoved = await untrustCurrentCa();
-    if (!trustRemoved) residual.push("trust");
+    // Trust goes only once Desktop no longer selects the picker profile: a selected profile without
+    // trust pins Desktop to a proxy whose certificate it rejects. Disarmed, the proxy only tunnels.
+    let trustRemoved = false;
+    if (profileReleased(inspect())) {
+      trustRemoved = await untrustCurrentCa();
+      if (!trustRemoved) residual.push("trust");
+    } else if (!residual.includes("profile")) {
+      residual.push("profile");
+    }
     let trustAfter = deps.runtime.status().trust;
     try { trustAfter = await deps.runtime.refreshTrust(); } catch { /* status below retains the runtime's cached trust */ }
     const result = runtimeStatus(trustRemoved ? trustAfter === "trusted" ? "trusted" : "untrusted" : trustAfter);
@@ -299,6 +311,13 @@ export async function removeDesktopPickerArtifacts(options: { configDir?: string
     const removed = removeDesktopPickerProfile({ configDir, ...(platform ? { platform } : {}) });
     if (!removed.ok) residual.push("profile");
   } catch { residual.push("profile"); }
+  let released = false;
+  try { released = profileReleased(inspectDesktopPickerProfile({ configDir, ...(platform ? { platform } : {}) })); } catch { /* unknown: keep trust */ }
+  if (!released) {
+    // Still selected (or unknown): keep trust so Desktop is not pinned to a CA it rejects.
+    if (!residual.includes("profile")) residual.push("profile");
+    return { ok: false, residual };
+  }
   const caPath = pickerCaCertPath(configDir);
   if (platform === "darwin" && existsSync(caPath)) {
     try {

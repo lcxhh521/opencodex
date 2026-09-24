@@ -9,7 +9,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { atomicWriteFile, getConfigDir } from "../config";
+import { withClientLifecycleSync } from "../client/lifecycle-lock";
+import { atomicWriteFile, getConfigDir, withConfigMutationLockSync } from "../config";
 import {
   DESKTOP_PICKER_ENTRY_NAME,
   isOwnedDesktopGatewayEntry,
@@ -119,8 +120,34 @@ export function pickerEgressUrl(proxyPort: number): string {
   return `http://127.0.0.1:${proxyPort}`;
 }
 
-export function applyDesktopPickerProfile(options: { proxyPort: number } & DesktopPickerProfileOptions):
-  { ok: true; changed: boolean; path: string } | { ok: false; reason: "gateway_selected" | "foreign_unreadable" | "write_failed" } {
+type ApplyPickerProfileResult =
+  | { ok: true; changed: boolean; path: string }
+  | { ok: false; reason: "gateway_selected" | "foreign_unreadable" | "write_failed" };
+type RemovePickerProfileResult = { ok: true; changed: boolean } | { ok: false; reason: string; residualPaths?: string[] };
+
+/**
+ * Select the picker profile. Runs under the client lifecycle lock and the config mutation lock,
+ * the same boundary as the gateway writer (src/claude/desktop-3p.ts), so another process cannot
+ * interleave a gateway or catalog write with the selection.
+ */
+export function applyDesktopPickerProfile(options: { proxyPort: number } & DesktopPickerProfileOptions): ApplyPickerProfileResult {
+  try {
+    return withClientLifecycleSync(() => withConfigMutationLockSync(() => applyDesktopPickerProfileLocked(options)));
+  } catch {
+    return { ok: false, reason: "write_failed" };
+  }
+}
+
+/** Remove the picker profile under the same locks as `applyDesktopPickerProfile`. */
+export function removeDesktopPickerProfile(options: DesktopPickerProfileOptions = {}): RemovePickerProfileResult {
+  try {
+    return withClientLifecycleSync(() => withConfigMutationLockSync(() => removeDesktopPickerProfileLocked(options)));
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : "lock_unavailable" };
+  }
+}
+
+function applyDesktopPickerProfileLocked(options: { proxyPort: number } & DesktopPickerProfileOptions): ApplyPickerProfileResult {
   const libraryPath = resolveDesktop3pConfigLibraryPath(options);
   const configDir = options.configDir ?? getConfigDir();
   const metaPath = metadataPath(libraryPath);
@@ -188,8 +215,7 @@ export function applyDesktopPickerProfile(options: { proxyPort: number } & Deskt
   }
 }
 
-export function removeDesktopPickerProfile(options: DesktopPickerProfileOptions = {}):
-  { ok: true; changed: boolean } | { ok: false; reason: string; residualPaths?: string[] } {
+function removeDesktopPickerProfileLocked(options: DesktopPickerProfileOptions): RemovePickerProfileResult {
   const libraryPath = resolveDesktop3pConfigLibraryPath(options);
   const configDir = options.configDir ?? getConfigDir();
   const statePath = pickerStatePath(configDir);

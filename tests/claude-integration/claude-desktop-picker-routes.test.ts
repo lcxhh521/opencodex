@@ -189,7 +189,8 @@ describe("first-party turns picker mode on by default", () => {
     await dispatch("/api/claude-desktop/picker");
     keychain.trusted = true;
     const refused = await put({ enabled: true, persist: false, trustedLocally: true, callerAddedTrust: true });
-    expect(refused.status).toBe(200);
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({ ok: false, code: "picker_enable_refused", reason: "mode_not_committed" });
     expect(refused.body.picker.effective).toBe(false);
     expect(keychain.calls).toContain("remove-trusted-cert");
     expect(keychain.trusted).toBe(false);

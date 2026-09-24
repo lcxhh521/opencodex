@@ -558,6 +558,10 @@ async function handleClaudeDesktopPickerCommand(
         const response = await requestPicker({ enabled: false, persist: true });
         printPickerStatus(response.picker, false);
       } catch (error) {
+        if (isAnsweredPickerRefusal(error)) {
+          const body = (error as RuntimeApiError).body as PickerRouteResponse;
+          printPickerStatus(body.picker, false);
+        }
         console.error(error instanceof Error ? error.message : String(error));
         return 1;
       }
@@ -569,6 +573,7 @@ async function handleClaudeDesktopPickerCommand(
       const removed = await (deps.removeDesktopPickerArtifacts ?? removeDesktopPickerArtifacts)({ configDir: getConfigDir(), security: deps.security, platform: deps.platform });
       if (!removed.ok) console.error(`picker cleanup incomplete${removed.residual?.length ? `: ${removed.residual.join(", ")}` : ""}`);
       printPickerStatus(offlinePickerStatus(loadConfig(), deps.platform), false);
+      if (!removed.ok) return 1;
     }
     console.log("Fully quit and reopen Claude Desktop");
     return 0;
@@ -619,7 +624,8 @@ async function handleClaudeDesktopPickerCommand(
     }
     printPickerStatus(response.picker, false);
     if (response.picker?.reason === "restart_required") console.log("Fully quit and reopen Claude Desktop");
-    return response.ok === false ? 1 : 0;
+    const reason = response.picker?.reason;
+    return response.ok === false || (reason !== "active" && reason !== "restart_required") ? 1 : 0;
   } catch (error) {
     if (isAnsweredPickerRefusal(error)) {
       const body = (error as RuntimeApiError).body as PickerRouteResponse;

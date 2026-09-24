@@ -71,10 +71,20 @@ export async function untrustPickerCa(
   platform: NodeJS.Platform = process.platform,
 ): Promise<{ ok: boolean }> {
   if (platform !== "darwin") return { ok: false };
+  const keychain = loginKeychainPath();
+  // Listed means the current picker CA is in the login keychain; unlisted means nothing to remove,
+  // which is success, so a machine that never trusted it never sees a keychain prompt for it.
+  const listed = async (): Promise<boolean> => {
+    const found = await run(["find-certificate", "-a", "-Z", "-c", PICKER_CA_COMMON_NAME, keychain]);
+    if (found.code === 1) return false;
+    if (found.code !== 0) throw new Error("find-certificate failed");
+    return hasFingerprint(found.stdout, fingerprintSha1);
+  };
   try {
+    if (!(await listed())) return { ok: true };
     const removed = await run(["remove-trusted-cert", caPath]);
-    const deleted = await run(["delete-certificate", "-Z", fingerprintSha1, loginKeychainPath()]);
-    return { ok: removed.code === 0 && deleted.code === 0 };
+    const deleted = await run(["delete-certificate", "-Z", fingerprintSha1, keychain]);
+    return { ok: removed.code === 0 && deleted.code === 0 && !(await listed()) };
   } catch { // no-excuse-ok: catch -- failed removal must be visible to the caller.
     return { ok: false };
   }

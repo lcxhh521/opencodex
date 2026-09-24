@@ -43,6 +43,8 @@ export function pickerPreferenceOn(config: Pick<OcxConfig, "claudeCode">): boole
 }
 
 const PICKER_BODY_KEYS = new Set(["enabled", "persist", "trustedLocally", "callerAddedTrust"]);
+/** Enable outcomes that are progress, not refusal: on, waiting for a Desktop restart, or for the keychain step. */
+const ENABLE_ACCEPTED = new Set(["active", "restart_required", "trust_pending"]);
 
 interface PickerRequestBody { enabled: boolean; persist: boolean; trustedLocally?: boolean; callerAddedTrust?: boolean }
 
@@ -90,9 +92,25 @@ export async function handleClaudeDesktopPickerRoutes(ctx: ManagementContext): P
         context: body.trustedLocally ? "cli-trusted" : "server",
         ...(body.callerAddedTrust !== undefined ? { callerAddedTrust: body.callerAddedTrust } : {}),
       });
-      return jsonResponse({ ok: true, picker });
+      if (ENABLE_ACCEPTED.has(picker.reason) && !picker.residual?.length) return jsonResponse({ ok: true, picker });
+      return jsonResponse({
+        ok: false,
+        code: "picker_enable_refused",
+        reason: picker.reason,
+        error: `Picker mode was not enabled (${picker.reason}).`,
+        picker,
+      }, 409);
     }
-    if (controller) return jsonResponse({ ok: true, picker: await controller.disable({ persist: body.persist }) });
+    if (controller) {
+      const picker = await controller.disable({ persist: body.persist });
+      if (!picker.residual?.length) return jsonResponse({ ok: true, picker });
+      return jsonResponse({
+        ok: false,
+        code: "picker_disable_incomplete",
+        error: `Picker mode cleanup is incomplete (${picker.residual.join(", ")}).`,
+        picker,
+      }, 500);
+    }
     // No controller: nothing can terminate claude.ai here, so cleanup is local.
     if (body.persist) {
       const { createPickerPreferenceWriter } = await import("../../claude/intercept/runtime");
