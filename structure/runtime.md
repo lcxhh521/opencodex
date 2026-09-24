@@ -255,6 +255,26 @@ degrades to a startup warning rather than a startup failure; stop joins both soc
 for an ephemeral public port (`startServer(0)`, the shape every in-process test fixture uses) has no
 stable port to derive from, so the pair stays off unless `claudeCode.intercept.port` is explicit. Requests on this ingress also honour first-party model bindings (`claudeCode.intercept.modelMap`); see [Claude Desktop](clients/claude-desktop.md#first-party-model-bindings).
 
+When the lifecycle passes `loadPickerRoutes` (the server always does), `startClaudeIntercept` also
+wires Claude Desktop picker mode: a second loopback CONNECT proxy on the intercept proxy port + 1
+(`claudePickerProxyPort`), used only as Desktop's egress proxy, whose per-connection
+`selectTunnel` comes from the picker runtime (`src/claude/intercept/picker-runtime.ts`). The two
+proxies never share clients: Claude Code trusts only the intercept CA and Desktop trusts only the
+login keychain. On the egress proxy every target is a blind tunnel except `claude.ai:443`, which is
+terminated by a `node:https` HTTP/1.1 relay (`picker-listener.ts`) only while the runtime's cached
+decision is armed: macOS, persisted resolved Desktop mode first-party, Desktop intent on,
+`claudeCode.intercept.picker !== false`, no disarm latch, listener up, and the current picker CA
+trusted in the login keychain (`picker-trust.ts`). The picker CA (`picker-ca.ts`, under
+`<OPENCODEX_HOME>/claude-picker/`, 0600 key) carries critical name constraints permitting only
+`claude.ai` and is regenerated on reload when they are missing. The relay verifies the upstream
+certificate, streams every body and upgrade unchanged, and rewrites only the bootstrap response's
+Code picker surface (`picker-bootstrap.ts`), failing open to the original bytes; the model list
+comes from a persisted snapshot (`picker-models.ts`), so a bootstrap never waits on discovery. A
+CONNECT to claude.ai that arrives before the first refresh waits at most 3 s, then goes blind. A
+picker proxy bind failure only disables picker mode; a picker construction or start failure closes
+every socket the start had bound before rethrowing. Nothing is logged but method, bootstrap or
+other, and status.
+
 Auxiliary listener bind failures carry the listener key and effective address through `AuxiliaryListenerBindError` in `src/server/ports.ts`. `src/cli/index.ts` reports them without retrying the public port. Startup still rolls back every earlier socket synchronously.
 
 A failed optional bind initiates rollback of every earlier socket; normal stop joins all bound
