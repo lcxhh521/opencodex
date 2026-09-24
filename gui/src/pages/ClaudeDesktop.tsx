@@ -9,6 +9,7 @@ import { readSessionListCacheEntry, writeSessionListCacheEntry } from "../sessio
 import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
 import ClaudeFirstPartyBindings from "../components/ClaudeFirstPartyBindings";
+import ClaudeDesktopPicker, { type DesktopPickerStatus } from "../components/ClaudeDesktopPicker";
 
 const FAMILIES = ["opus", "fable", "sonnet", "haiku"] as const;
 type Family = typeof FAMILIES[number];
@@ -46,6 +47,23 @@ interface DesktopModel {
 type DesktopMode = "first-party" | "gateway";
 const DESKTOP_MODES: readonly DesktopMode[] = ["first-party", "gateway"];
 
+function isDesktopPickerStatus(value: unknown): value is DesktopPickerStatus {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.desired === "boolean"
+    && typeof v.supported === "boolean"
+    && ["trusted", "untrusted", "unsupported", "unknown"].includes(v.trust as string)
+    && ["absent", "applied", "not_selected", "unsafe"].includes(v.profile as string)
+    && typeof v.listenerReady === "boolean"
+    && typeof v.effective === "boolean"
+    && ["active", "restart_required", "unsupported_platform", "not_first_party", "integration_off", "disabled", "proxy_unavailable", "mode_not_committed", "trust_pending", "trust_declined", "profile_failed"].includes(v.reason as string)
+    && typeof v.models === "number" && Number.isFinite(v.models) && v.models >= 0
+    && (v.snapshotAt === null || typeof v.snapshotAt === "number")
+    && (v.lastBootstrapAt === null || typeof v.lastBootstrapAt === "number")
+    && (v.hint === undefined || typeof v.hint === "string")
+    && (v.residual === undefined || (Array.isArray(v.residual) && v.residual.every(item => typeof item === "string")));
+}
+
 interface DesktopFirstPartyStatus {
   applied: boolean;
   stale: boolean;
@@ -53,6 +71,7 @@ interface DesktopFirstPartyStatus {
   interceptRunning: boolean;
   proxyPort: number;
   caCertPath: string;
+  picker?: DesktopPickerStatus;
   /** Desktop picker model id → OpenCodex route. Absent on servers that predate bindings. */
   modelBindings?: Record<string, string>;
   /** Common Desktop picker ids offered as add-row suggestions. */
@@ -97,6 +116,7 @@ function isDesktopStatus(value: unknown): value is DesktopStatus {
       || typeof fp.applied !== "boolean" || typeof fp.stale !== "boolean"
       || typeof fp.interceptEnabled !== "boolean" || typeof fp.interceptRunning !== "boolean"
       || typeof fp.proxyPort !== "number" || typeof fp.caCertPath !== "string") return false;
+    if (fp.picker !== undefined && !isDesktopPickerStatus(fp.picker)) return false;
     if (fp.modelBindings !== undefined) {
       const mb = fp.modelBindings;
       if (typeof mb !== "object" || mb === null || Array.isArray(mb)
@@ -607,6 +627,17 @@ export default function ClaudeDesktop({
       {message && <Notice tone={message.tone}>{message.text}</Notice>}
       {loadState.showError && <Notice tone="err">{t("claudeDesktop.loadFail")}</Notice>}
       {statusFailed && status && <Notice tone="err">{t("claudeDesktop.loadFail")}</Notice>}
+
+      {effectiveMode === "first-party" && (
+        status?.firstParty?.picker && (
+          <ClaudeDesktopPicker
+            key={`${status.firstParty.picker.reason}:${status.firstParty.picker.desired}:${status.firstParty.picker.effective}:${status.firstParty.picker.models}:${status.firstParty.picker.hint ?? ""}`}
+            apiBase={apiBase}
+            picker={status.firstParty.picker}
+            onUpdated={() => void statusResource.refresh()}
+          />
+        )
+      )}
 
       {effectiveMode === "first-party" && (
         <ClaudeFirstPartyBindings
