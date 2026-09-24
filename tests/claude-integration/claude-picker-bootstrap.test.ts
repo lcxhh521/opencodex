@@ -1,0 +1,89 @@
+import { expect, test } from "bun:test";
+import { brotliCompressSync, deflateSync, gzipSync } from "node:zlib";
+import {
+  BOOTSTRAP_MAX_DECODED_BYTES, injectPickerModels, isPickerBootstrapRequest,
+  narrowBootstrapAcceptEncoding, rewriteBootstrapBody, rewrittenHeaders,
+} from "../../src/claude/intercept/picker-bootstrap";
+
+const models = [{ id: "ocx-model", name: "Routed", contextWindow: 128_000 }];
+function fixture() {
+  return {
+    model_selector_config: [
+      { id: "cowork", models: [{ id: "cowork-original" }] },
+      { id: "code", models: [{ id: "claude-native", name: "Native", section: "main",
+        thinking: { enabled: true }, capabilities: ["image"], fast_mode: true,
+        min_version: "1", clientVersionGate: "2", badge: "old", tooltip: "old",
+        description: "old", context_window: 100 }] },
+    ],
+    model_selector_state: { current: "claude-native" },
+  };
+}
+
+test("request matcher accepts only GET bootstrap paths", () => {
+  for (const prefix of ["edge-api", "api"]) {
+    expect(isPickerBootstrapRequest("GET", `/${prefix}/bootstrap`)).toBe(true);
+    expect(isPickerBootstrapRequest("GET", `/${prefix}/bootstrap/org-123/app_start/`)).toBe(true);
+    expect(isPickerBootstrapRequest("POST", `/${prefix}/bootstrap`)).toBe(false);
+    expect(isPickerBootstrapRequest("HEAD", `/${prefix}/bootstrap`)).toBe(false);
+    expect(isPickerBootstrapRequest("GET", `/${prefix}/bootstrap/other`)).toBe(false);
+  }
+  expect(narrowBootstrapAcceptEncoding()).toBe("gzip, deflate, br");
+});
+
+test("injection clones an eligible native row only into Code", () => {
+  const body = fixture();
+  const before = structuredClone(body);
+  expect(injectPickerModels(body, [...models, models[0]!])).toBe(1);
+  const code = body.model_selector_config[1]!.models;
+  expect(code).toHaveLength(2);
+  const inserted = code[1] as unknown as Record<string, unknown>;
+  expect(inserted.id).toBe("ocx-model");
+  expect(inserted.name).toBe("Routed");
+  expect(inserted.context_window).toBe(128_000);
+  expect(inserted.thinking).toEqual({ enabled: true });
+  expect(inserted.capabilities).toEqual(["image"]);
+  for (const key of ["fast_mode", "min_version", "clientVersionGate", "badge", "tooltip", "description"]) {
+    expect(inserted).not.toHaveProperty(key);
+  }
+  expect(body.model_selector_config[0]).toEqual(before.model_selector_config[0]);
+  expect(body.model_selector_state).toEqual(before.model_selector_state);
+  expect(injectPickerModels(body, models)).toBe(0);
+});
+
+test("disabled or deprecated native rows cannot serve as templates", () => {
+  for (const property of [{ disabled: true }, { disabled_reason: "blocked" }, { section: "deprecated" }]) {
+    const body = fixture();
+    Object.assign(body.model_selector_config[1]!.models[0]!, property);
+    expect(injectPickerModels(body, models)).toBe(0);
+  }
+});
+
+test("supported encodings become identity encoded JSON", () => {
+  const plain = Buffer.from(JSON.stringify(fixture()));
+  for (const [encoding, encoded] of [
+    [undefined, plain], ["identity", plain], ["gzip", gzipSync(plain)],
+    ["x-gzip", gzipSync(plain)], ["deflate", deflateSync(plain)], ["br", brotliCompressSync(plain)],
+  ] as const) {
+    const output = rewriteBootstrapBody(encoded, encoding, models);
+    expect(output).not.toBeNull();
+    expect(JSON.parse(output!.toString()).model_selector_config[1].models[1].id).toBe("ocx-model");
+  }
+});
+
+test("invalid, oversized and inapplicable bodies stay untouched", () => {
+  const plain = Buffer.from(JSON.stringify(fixture()));
+  expect(rewriteBootstrapBody(Buffer.from("not-json"), undefined, models)).toBeNull();
+  expect(rewriteBootstrapBody(plain, "zstd", models)).toBeNull();
+  expect(rewriteBootstrapBody(Buffer.from("{}"), undefined, models)).toBeNull();
+  expect(rewriteBootstrapBody(Buffer.from(" ".repeat(BOOTSTRAP_MAX_DECODED_BYTES + 1)), undefined, models)).toBeNull();
+  const hugeCompressed = gzipSync(Buffer.from(" ".repeat(BOOTSTRAP_MAX_DECODED_BYTES + 1)));
+  expect(rewriteBootstrapBody(hugeCompressed, "gzip", models)).toBeNull();
+});
+
+test("rewritten headers remove stale encoding, length, validators and transfer metadata", () => {
+  expect(rewrittenHeaders([
+    "Content-Type", "application/json", "Content-Encoding", "gzip", "Content-Length", "19",
+    "ETag", "x", "Digest", "x", "Content-MD5", "x", "Transfer-Encoding", "chunked",
+    "Set-Cookie", "a=1", "Set-Cookie", "b=2",
+  ], 7)).toEqual(["Content-Type", "application/json", "Set-Cookie", "a=1", "Set-Cookie", "b=2", "Content-Length", "7"]);
+});
