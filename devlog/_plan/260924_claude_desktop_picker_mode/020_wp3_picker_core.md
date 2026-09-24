@@ -320,6 +320,22 @@ Verifier: `bun test` on the files above plus `tests/claude-integration/claude-in
 `tests/test-layout.test.ts`, `tests/test-layout-tooling.test.ts`,
 `tests/ci-workflows/file-size-ratchet.test.ts`; `bun run typecheck`; `bun run structure:check`.
 
+
+## Desktop egress proxy (B-phase amendment)
+
+Found while wiring: one CONNECT proxy cannot serve both clients. The Code tab's Claude Code trusts
+only the intercept CA (`NODE_EXTRA_CA_CERTS`), so a claude.ai connection it opens through that proxy
+would fail against the picker terminator; Desktop trusts only the login keychain, so its own
+api.anthropic.com connections would fail against the intercept listener. Picker mode therefore gets
+its own CONNECT proxy on `claudePickerProxyPort` (the intercept proxy port + 1, or − 1 at 65535),
+started by `startClaudeIntercept` only when `loadPickerRoutes` is given (the server lifecycle always
+passes `loadPickerRoutes`), with `interceptHosts: []` and `selectTunnel` from the picker runtime. On
+it every host is blind except claude.ai while armed. The Claude Code proxy keeps its exact current
+behaviour and gets no `selectTunnel`. `ClaudeInterceptState.pickerProxyPort` (null when unwired or
+unbound) is what wp4 writes into `egressProxyUrl`. A bind failure on that port logs a warning, stops
+the picker and leaves the intercept pair running. Tests: the Claude Code proxy never consults the
+picker; the egress proxy blind-tunnels api.anthropic.com.
+
 ## Audit record
 
 - wp3 round 1 (reviewer, FAIL, 3 High): persisted picker CA reload lacked constraint validation; the CONNECT diff awaited inside a synchronous callback and missed the options plumbing; picker startup failure could leave bound sockets. All three folded above. Round 2 GO-WITH-FIXES (1 High): a picker construction failure before assignment; folded as a nullable handle with a createPicker-throws test. Architect reflection ALIGNED, with the legacy first-party upgrade case added to the runtime tests.

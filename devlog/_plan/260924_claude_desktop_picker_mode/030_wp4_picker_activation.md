@@ -10,6 +10,11 @@ server runs is the keychain trust step, because the password dialog belongs to t
 terminal session. With no server running, nothing can terminate claude.ai, so the CLI may remove
 picker artifacts locally, and enabling is refused.
 
+> B-phase amendment from wp3 (see 020, "Desktop egress proxy"): Desktop's `egressProxyUrl` names
+> `getClaudeInterceptState().pickerProxyPort`, the dedicated picker CONNECT proxy, never the Claude
+> Code proxy port. Every "proxy bound" check below means `pickerProxyPort !== null`, and
+> `applyDesktopPickerProfile({ proxyPort })` receives that port.
+
 ## Files
 
 | Path | Change |
