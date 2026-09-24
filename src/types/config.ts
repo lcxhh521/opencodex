@@ -180,10 +180,12 @@ export interface OcxClaudeCodeConfig {
   desktopProfile?: OcxClaudeDesktopProfile;
   /**
    * How Claude Desktop reaches opencodex (src/claude/desktop-first-party.ts).
-   * `first-party` (default) leaves the app on its normal claude.ai login and redirects only the
-   * Code tab's Claude Code process through the intercept pair via settings.json env.
-   * `gateway` installs the third-party deployment profile (desktop-3p) for the whole app.
-   * Unset on an install that already applied a gateway profile resolves to `gateway`.
+   * `gateway` (default) installs the third-party deployment profile (desktop-3p) for the whole app.
+   * `first-party` leaves the app on its normal claude.ai login and redirects only the Code tab's
+   * Claude Code process through the intercept pair via settings.json env; it sends Claude
+   * subscription traffic through a local interception proxy and carries an account-risk warning
+   * (src/claude/desktop-risk.ts). Unset: a gateway row or apply marker resolves to `gateway`, and
+   * first-party env that opencodex wrote resolves to `first-party` (observeClaudeDesktopMode).
    */
   desktopMode?: "first-party" | "gateway";
   /** Auto-reconcile Desktop 3P config when provider catalog changes. Default: enabled. */

@@ -31,11 +31,13 @@ import {
   applyDesktopFirstParty,
   captureDesktopFirstPartyRollback,
   inspectDesktopFirstParty,
+  observeClaudeDesktopMode,
   recordClaudeDesktopMode,
   removeDesktopFirstParty,
   resolveClaudeDesktopApplyMode,
   type ClaudeDesktopMode,
 } from "../../claude/desktop-first-party";
+import { FIRST_PARTY_ACCOUNT_RISK } from "../../claude/desktop-risk";
 import { projectGrokCatalog } from "../../grok/catalog";
 import { injectGrokConfig, stripGrokConfig } from "../../grok/inject";
 import { inspectGrokConfig } from "../../grok/inspect";
@@ -150,7 +152,7 @@ function desktopStatus(config: ManagementContext["config"]): NativeStatus {
     : null;
   // First-party mode lives in Claude Code's settings.json, not in Desktop's library. A leftover
   // gateway profile still counts as current (it is what Desktop is actually running).
-  const firstParty = resolveClaudeDesktopApplyMode(config) === "first-party" && gatewayState === "absent"
+  const firstParty = resolveClaudeDesktopApplyMode(config, observeClaudeDesktopMode(config)) === "first-party" && gatewayState === "absent"
     ? inspectDesktopFirstParty(config)
     : null;
   const state: NativeStatus["state"] = firstParty
@@ -707,7 +709,7 @@ async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Respon
       } satisfies NativeToggleEnvelope);
     }
 
-    if (resolveClaudeDesktopApplyMode(current) === "first-party") {
+    if (resolveClaudeDesktopApplyMode(current, observeClaudeDesktopMode(current)) === "first-party") {
       const rollback = captureDesktopFirstPartyRollback(current);
       const applied = applyDesktopFirstParty(current);
       if (!applied.ok) {
@@ -744,6 +746,7 @@ async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Respon
           changed
             ? "Claude Desktop integration enabled (first-party). Fully quit and reopen Claude Desktop."
             : "Claude Desktop integration is already on.",
+          FIRST_PARTY_ACCOUNT_RISK.message,
           modeSaved ? "" : "The first-party mode marker could not be saved to config; status may report the mode as unsaved.",
         ].filter(Boolean).join(" "),
       } satisfies NativeToggleEnvelope);

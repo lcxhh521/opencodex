@@ -14,6 +14,7 @@ import { inspectDesktop3pConfigLibrary, removeDesktop3pStandardPivot } from "../
 import {
   applyDesktopFirstParty,
   inspectDesktopFirstParty,
+  observeClaudeDesktopMode,
   removeDesktopFirstParty,
   resolveClaudeDesktopMode,
 } from "../claude/desktop-first-party";
@@ -44,6 +45,7 @@ export interface EnsureDesiredIntegrationsDeps {
   removeDesktopFirstParty?: typeof removeDesktopFirstParty;
   applyDesktopFirstParty?: typeof applyDesktopFirstParty;
   inspectDesktopFirstParty?: typeof inspectDesktopFirstParty;
+  observeClaudeDesktopMode?: typeof observeClaudeDesktopMode;
   inspectDesktop3pConfigLibrary?: typeof inspectDesktop3pConfigLibrary;
   log?: (message: string) => void;
   error?: (message: string) => void;
@@ -136,7 +138,7 @@ export function ensureClaudeDesktopMatchesDesired(
   const config = deps.loadConfig();
   const { log, error } = io(deps);
   if (claudeDesktopIntegrationEnabled(config)) {
-    if (resolveClaudeDesktopMode(config) !== "first-party") return;
+    if (resolveClaudeDesktopMode(config, (deps.observeClaudeDesktopMode ?? observeClaudeDesktopMode)(config)) !== "first-party") return;
     const library = (deps.inspectDesktop3pConfigLibrary ?? inspectDesktop3pConfigLibrary)({
       appliedFingerprint: config.claudeCode?.desktopProfile?.appliedFingerprint ?? null,
     });

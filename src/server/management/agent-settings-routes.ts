@@ -214,6 +214,9 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       const { claudeDesktopIntegrationEnabled } = await import("../../codex/desired-state");
       const admitted = loadConfig();
       if (!claudeDesktopIntegrationEnabled(admitted)) return;
+      // A first-party Desktop must never get a gateway profile written and selected behind it.
+      const { observeClaudeDesktopMode, resolveClaudeDesktopMode } = await import("../../claude/desktop-first-party");
+      if (resolveClaudeDesktopMode(admitted, observeClaudeDesktopMode(admitted)) === "first-party") return;
       if (admitted.claudeCode?.desktopAutoApply === false) return;
       if (!admitted.claudeCode?.desktopProfile) return;
       const { inspectDesktop3pConfigLibrary, writeDesktop3pConfig } = await import("../../claude/desktop-3p");
@@ -226,6 +229,8 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       const current = loadConfig();
       // This is the real guard: the catalog await admits a concurrent explicit OFF.
       if (!claudeDesktopIntegrationEnabled(current)) return;
+      // …and a concurrent switch to first-party.
+      if (resolveClaudeDesktopMode(current, observeClaudeDesktopMode(current)) === "first-party") return;
       if (current.claudeCode?.desktopAutoApply === false || !current.claudeCode?.desktopProfile) return;
       const afterKind = inspectDesktop3pConfigLibrary({
         appliedFingerprint: current.claudeCode.desktopProfile.appliedFingerprint ?? null,
@@ -1068,9 +1073,9 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         rethrowManagementBodyTooLarge(error);
         return jsonResponse({ error: "invalid JSON body" }, 400);
       }
-      const { resolveClaudeDesktopApplyMode, applyDesktopFirstParty, captureDesktopFirstPartyRollback, removeDesktopFirstParty } = await import("../../claude/desktop-first-party");
+      const { resolveClaudeDesktopApplyMode, observeClaudeDesktopMode, applyDesktopFirstParty, captureDesktopFirstPartyRollback, removeDesktopFirstParty } = await import("../../claude/desktop-first-party");
       const requested = (parsed as { mode?: unknown } | null)?.mode;
-      let desktopMode: "first-party" | "gateway" = resolveClaudeDesktopApplyMode(config);
+      let desktopMode: "first-party" | "gateway" = resolveClaudeDesktopApplyMode(config, observeClaudeDesktopMode(config));
       if (requested !== undefined) {
         if (requested === "static" || requested === "hybrid" || requested === "discovery") {
           mode = requested;
@@ -1135,6 +1140,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
           gatewayRemoved = removed.changed;
         }
         const modeSaved = await persistDesktopModeField(config, "first-party");
+        const { firstPartyAccountRisk } = await import("../../claude/desktop-risk");
         return jsonResponse({
           ok: true,
           mode: "first-party",
@@ -1145,6 +1151,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
           path: applied.path,
           proxyPort: applied.proxyPort,
           caCertPath: applied.env.NODE_EXTRA_CA_CERTS,
+          riskWarning: firstPartyAccountRisk(),
           ...(modeSaved.ok ? {} : { warning: `First-party env was applied, but the mode marker was not saved (${modeSaved.reason}).` }),
         });
       }
@@ -1238,7 +1245,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     try {
       const { claudeDesktopIntegrationEnabled } = await import("../../codex/desired-state");
       const { inspectDesktop3pConfigLibrary } = await import("../../claude/desktop-3p");
-      const { resolveClaudeDesktopApplyMode, inspectDesktopFirstParty } = await import("../../claude/desktop-first-party");
+      const { resolveClaudeDesktopApplyMode, inspectDesktopFirstParty, observeClaudeDesktopMode } = await import("../../claude/desktop-first-party");
       const { getClaudeInterceptState } = await import("../../claude/intercept/runtime");
       const { DESKTOP_PICKER_ID_SUGGESTIONS, readInterceptBindings } = await import("../../claude/intercept/model-bindings");
       const persisted = loadConfig();
@@ -1247,7 +1254,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       const desiredEnabled = claudeDesktopIntegrationEnabled(persisted);
       const gatewayApplied = observed.kind === "gateway_ours" || observed.kind === "gateway_drifted";
       // A gateway profile on disk is what Desktop actually runs, whatever the saved mode says.
-      const mode = gatewayApplied ? "gateway" : resolveClaudeDesktopApplyMode(persisted);
+      const mode = gatewayApplied ? "gateway" : resolveClaudeDesktopApplyMode(persisted, observeClaudeDesktopMode(persisted));
       const firstPartySeen = inspectDesktopFirstParty(persisted);
       const intercept = getClaudeInterceptState();
       const firstParty = {
@@ -1294,6 +1301,10 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       return jsonResponse({
         desiredEnabled,
         mode,
+        // Shown wherever first-party is selected or its env is still applied (account-risk notice).
+        riskWarning: mode === "first-party" || firstPartySeen.applied || firstPartySeen.stale
+          ? (await import("../../claude/desktop-risk")).firstPartyAccountRisk()
+          : null,
         firstParty,
         installed: observed.kind !== "not_installed",
         observedKind: observed.kind,

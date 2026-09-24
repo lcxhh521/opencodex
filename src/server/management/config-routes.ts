@@ -208,7 +208,9 @@ export async function syncEnabledClientIntegrations(
     }
   }
 
-  if (claudeDesktopIntegrationEnabled(config)) {
+  const { observeClaudeDesktopMode, resolveClaudeDesktopMode } = await import("../../claude/desktop-first-party");
+  // A first-party Desktop must never get a gateway profile written and selected by a sync.
+  if (claudeDesktopIntegrationEnabled(config) && resolveClaudeDesktopMode(config, observeClaudeDesktopMode(config)) !== "first-party") {
     try {
       const { writeDesktop3pConfig } = await import("../../claude/desktop-3p");
       const { desktopVisibleNativeSlugs, filterCatalogVisibleModels } = await import("../../codex/catalog");
@@ -217,7 +219,9 @@ export async function syncEnabledClientIntegrations(
       // Discovery admits a concurrent OFF or settings edit. Re-read outside C:
       // the writer facade owns L and its final desired-state check under L→C.
       const latest = loadConfig();
-      if (claudeDesktopIntegrationEnabled(latest)) {
+      // Discovery awaited: the mode may have changed meanwhile. Re-resolve on the fresh read,
+      // immediately before the writer, so a first-party switch during fetchAllModels still wins.
+      if (claudeDesktopIntegrationEnabled(latest) && resolveClaudeDesktopMode(latest, observeClaudeDesktopMode(latest)) !== "first-party") {
         const routed = filterCatalogVisibleModels(models, latest)
           .map(model => ({ provider: model.provider, id: model.id, contextWindow: model.contextWindow }));
         const writtenProfile = latest.claudeCode?.desktopProfile;
