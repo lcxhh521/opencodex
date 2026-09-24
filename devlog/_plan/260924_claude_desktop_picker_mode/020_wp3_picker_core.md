@@ -293,8 +293,9 @@ to `src/server/index.ts`.
 Startup settlement (audit wp3 r1, High). `refresh()` catches its own failures (trust runner, CA,
 listener bind, snapshot load), records them as `status().reason` and leaves the decision blind, so
 `start()` resolves. `startClaudeIntercept` awaits `picker.start()` inside the same `try` that
-guards `startConnectProxy`. If creating the picker or `start()` still throws or rejects, it awaits
-`picker.stop()` (picker listener and interval), `proxy.close()` and `listener.stop(true)` before
+guards `startConnectProxy`. The picker handle is nullable (`let picker: PickerRuntime | null = null`). If creating the picker
+or `start()` still throws or rejects, it awaits `picker?.stop()` (picker listener and interval, only
+when construction returned), then always `proxy.close()` and `listener.stop(true)`, before
 rethrowing, so the lifecycle's catch never leaves a bound socket without a handle. `stop()` closes
 the picker, then the proxy, then the listener. A `createPicker` option on
 `StartClaudeInterceptOptions` is the test seam.
@@ -311,7 +312,7 @@ the picker, then the proxy, then the listener. A `createPicker` option on
 | `tests/claude-integration/claude-picker-runtime.test.ts` | startup: with a pre-existing selected picker profile, trusted current CA, persisted first-party and intent on, the first CONNECT to claude.ai after `start()` resolves (`await picker.ready`) is `intercept`, with no timer tick; |
 | (same file, continued) | a claude.ai CONNECT arriving while the first refresh is pending waits and is intercepted once `ready` resolves; with `ready` held past the 3 s bound it is blind; a snapshot persisted to `models.json` is injected into the first bootstrap after a restart before discovery completes; |
 | (same file, continued) | selectTunnel: claude.ai blind until desired+trusted+listening, intercept after; trust loss flips back on refresh; non-claude hosts → null; non-darwin never intercepts |
-| (same file, continued) | legacy install: owned first-party env in Claude Code settings, no saved `desktopMode`, picker intent unset → `pickerDesired` is true, so picker mode stays on by default across the upgrade; a `createPicker` whose `start()` rejects makes `startClaudeIntercept` reject and the proxy port binds again at once |
+| (same file, continued) | legacy install: owned first-party env in Claude Code settings, no saved `desktopMode`, picker intent unset → `pickerDesired` is true, so picker mode stays on by default across the upgrade; a `createPicker` that throws, and one whose `start()` rejects, each make `startClaudeIntercept` reject, and the proxy port binds again at once |
 | `tests/claude-integration/claude-intercept-proxy.test.ts` (MODIFY) | a selectTunnel override is consulted per connection; an async decision keeps the client socket paused and pipelined bytes are delivered after it settles; a rejected decision is blind; loopback/405 refusals unchanged; a client that closes while the decision is pending causes no upstream dial |
 
 Verifier: `bun test` on the files above plus `tests/claude-integration/claude-intercept*.test.ts`,
@@ -321,4 +322,4 @@ Verifier: `bun test` on the files above plus `tests/claude-integration/claude-in
 
 ## Audit record
 
-- wp3 round 1 (reviewer, FAIL, 3 High): persisted picker CA reload lacked constraint validation; the CONNECT diff awaited inside a synchronous callback and missed the options plumbing; picker startup failure could leave bound sockets. All three folded above. Architect reflection ALIGNED, with the legacy first-party upgrade case added to the runtime tests.
+- wp3 round 1 (reviewer, FAIL, 3 High): persisted picker CA reload lacked constraint validation; the CONNECT diff awaited inside a synchronous callback and missed the options plumbing; picker startup failure could leave bound sockets. All three folded above. Round 2 GO-WITH-FIXES (1 High): a picker construction failure before assignment; folded as a nullable handle with a createPicker-throws test. Architect reflection ALIGNED, with the legacy first-party upgrade case added to the runtime tests.
