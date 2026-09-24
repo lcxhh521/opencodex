@@ -71,6 +71,14 @@ export function ensurePickerCa(configDir: string): PickerCa;         // permitte
 export function issuePickerLeaf(ca: PickerCa, configDir: string): PemKeyPair; // SAN claude.ai; writes leaf.pem 0644
 ```
 
+Reload validation (audit wp3 r1, High). The shared loader only checks CA status, key pairing and
+self-signature, so `ensurePersistedAuthority` gains `accept?: (cert: X509Certificate) => boolean`,
+and `ensurePickerCa` passes one that requires subject CN `PICKER_CA_COMMON_NAME` and a **critical**
+nameConstraints extension whose permittedSubtrees hold exactly one dNSName, `claude.ai`, and no
+excludedSubtrees. A persisted CA that fails it (for example a valid, key-matching CA without
+constraints) is regenerated under the lease. The new fingerprint makes trust `untrusted` until the
+operator trusts it again, so an unconstrained root is never loaded and trusted as the picker CA.
+
 ## picker-trust.ts
 
 ```ts
@@ -258,6 +266,15 @@ is up, and the cached trust is `trusted` for the current CA fingerprint; `{ kind
 Loopback 403 and non-CONNECT 405 stay before the choice. The header comment names claude.ai as the
 only host that picker mode may terminate.
 
+Callback shape (audit wp3 r1, High). The diff above is the decision logic, not the literal code:
+`onData` stays synchronous. After the 405/403 checks it calls `dialFor(choice)` in the same tick
+when `selectTunnel` is absent or returns a non-promise, so the default path is unchanged; otherwise
+it runs `void Promise.resolve(decision).catch(() => blind).then(dialFor)`. `dialFor` returns
+without dialing when `socket.destroyed` (the client left while the decision was pending) and then
+runs today's dial, connect-timeout, error and splice block unchanged. `handleConnection` takes a
+`ResolvedConnectProxyOptions` type that adds the optional `selectTunnel`, and `startConnectProxy`
+copies `options.selectTunnel` into the resolved object.
+
 ## runtime.ts / lifecycle
 
 `startClaudeIntercept` gains `loadPickerRoutes?: () => Promise<PickerRouteInput>`; it creates the
@@ -273,11 +290,20 @@ loader built from `fetchAllModels`, `filterCatalogVisibleModels`, `desktopVisibl
 src/server/management/config-routes.ts:213–231). `startServer` stays synchronous; no line is added
 to `src/server/index.ts`.
 
+Startup settlement (audit wp3 r1, High). `refresh()` catches its own failures (trust runner, CA,
+listener bind, snapshot load), records them as `status().reason` and leaves the decision blind, so
+`start()` resolves. `startClaudeIntercept` awaits `picker.start()` inside the same `try` that
+guards `startConnectProxy`. If creating the picker or `start()` still throws or rejects, it awaits
+`picker.stop()` (picker listener and interval), `proxy.close()` and `listener.stop(true)` before
+rethrowing, so the lifecycle's catch never leaves a bound socket without a handle. `stop()` closes
+the picker, then the proxy, then the listener. A `createPicker` option on
+`StartClaudeInterceptOptions` is the test seam.
+
 ## Tests (NEW unless noted; every new file registered in layout.json and test-layout-expected.json)
 
 | File | Cases (activation → observable) |
 | --- | --- |
-| `tests/claude-integration/claude-picker-ca.test.ts` | CA has critical nameConstraints permitting only claude.ai (parse extension bytes); leaf SAN is exactly claude.ai and chains (`X509Certificate.verify`); a TLS handshake through Bun (BoringSSL) with the picker CA as the only root accepts the claude.ai leaf and rejects a test-only leaf for `example.com` issued by the same CA; key file 0600; corrupt key regenerates; intercept CA has no nameConstraints (unchanged) |
+| `tests/claude-integration/claude-picker-ca.test.ts` | CA has critical nameConstraints permitting only claude.ai (parse extension bytes); leaf SAN is exactly claude.ai and chains (`X509Certificate.verify`); a TLS handshake through Bun (BoringSSL) with the picker CA as the only root accepts the claude.ai leaf and rejects a test-only leaf for `example.com` issued by the same CA; key file 0600; corrupt key regenerates; intercept CA has no nameConstraints (unchanged); a valid key-matching CA without the claude.ai constraint in the picker directory is regenerated with a new fingerprint |
 | `tests/claude-integration/claude-picker-trust.test.ts` | fake runner receives the exact argv for find/verify/trust/untrust; a verified leaf whose SHA-1 record is missing or different → untrusted; exit 0/1/other → trusted/untrusted/unknown; non-darwin → unsupported without spawning |
 | `tests/claude-integration/claude-picker-bootstrap.test.ts` | path matcher (both prefixes, org app_start, rejects others and POST); injection clones template, skips existing ids, drops fast_mode and version gates, leaves cowork and model_selector_state; gzip/br/deflate/identity round trip; malformed JSON, missing surface, unknown encoding and oversize → `null`; headers rewritten |
 | `tests/claude-integration/claude-picker-models.test.ts` | routed alias `ocx-claude-xai--grok-4.7` and native alias; profile order/labels match the gateway render; anthropic/claude routes skipped; snapshot keeps last good on loader failure |
@@ -285,9 +311,14 @@ to `src/server/index.ts`.
 | `tests/claude-integration/claude-picker-runtime.test.ts` | startup: with a pre-existing selected picker profile, trusted current CA, persisted first-party and intent on, the first CONNECT to claude.ai after `start()` resolves (`await picker.ready`) is `intercept`, with no timer tick; |
 | (same file, continued) | a claude.ai CONNECT arriving while the first refresh is pending waits and is intercepted once `ready` resolves; with `ready` held past the 3 s bound it is blind; a snapshot persisted to `models.json` is injected into the first bootstrap after a restart before discovery completes; |
 | (same file, continued) | selectTunnel: claude.ai blind until desired+trusted+listening, intercept after; trust loss flips back on refresh; non-claude hosts → null; non-darwin never intercepts |
-| `tests/claude-integration/claude-intercept-proxy.test.ts` (MODIFY) | a selectTunnel override is consulted per connection; an async decision keeps the client socket paused and pipelined bytes are delivered after it settles; a rejected decision is blind; loopback/405 refusals unchanged |
+| (same file, continued) | legacy install: owned first-party env in Claude Code settings, no saved `desktopMode`, picker intent unset → `pickerDesired` is true, so picker mode stays on by default across the upgrade; a `createPicker` whose `start()` rejects makes `startClaudeIntercept` reject and the proxy port binds again at once |
+| `tests/claude-integration/claude-intercept-proxy.test.ts` (MODIFY) | a selectTunnel override is consulted per connection; an async decision keeps the client socket paused and pipelined bytes are delivered after it settles; a rejected decision is blind; loopback/405 refusals unchanged; a client that closes while the decision is pending causes no upstream dial |
 
 Verifier: `bun test` on the files above plus `tests/claude-integration/claude-intercept*.test.ts`,
 `tests/server/claude-intercept-integration.test.ts`, `tests/lab/core-lab-boundary.test.ts`,
 `tests/test-layout.test.ts`, `tests/test-layout-tooling.test.ts`,
 `tests/ci-workflows/file-size-ratchet.test.ts`; `bun run typecheck`; `bun run structure:check`.
+
+## Audit record
+
+- wp3 round 1 (reviewer, FAIL, 3 High): persisted picker CA reload lacked constraint validation; the CONNECT diff awaited inside a synchronous callback and missed the options plumbing; picker startup failure could leave bound sockets. All three folded above. Architect reflection ALIGNED, with the legacy first-party upgrade case added to the runtime tests.
