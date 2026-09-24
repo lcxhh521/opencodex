@@ -1,6 +1,7 @@
 import { recordCommittedDesktopGateway } from "../claude/desktop-gateway-state";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { getConfigDir } from "../config/paths";
 import { loadConfig, mutatePersistedConfig, withConfigMutationLockSync } from "../config";
 import { claudeDesktopIntegrationEnabledNow, setIntegrationEnabled } from "../codex/desired-state";
 import { readClientConnectionState, assertClientConnectionUnchanged, assertNoClientDisconnectPending, type ClientConnectionState } from "../client/state";
@@ -31,11 +32,14 @@ import {
 } from "../claude/desktop-first-party";
 import { FIRST_PARTY_ACCOUNT_RISK } from "../claude/desktop-risk";
 import { claudeInterceptEnabled } from "../claude/intercept/runtime";
+import { ensurePickerCa, pickerCaCertPath, pickerCaFingerprints, pickerLeafCertPath } from "../claude/intercept/picker-ca";
+import { inspectPickerTrust, trustPickerCa, untrustPickerCa, type SecurityRunner } from "../claude/intercept/picker-trust";
+import { offlinePickerStatus, removeDesktopPickerArtifacts, type DesktopPickerStatus } from "../claude/desktop-picker";
 import { claudeDesktopPolicyWarning, probeClaudeDesktopPolicy } from "../claude/desktop-policy";
 import { filterCatalogVisibleModels, desktopVisibleNativeSlugs, nativeContextLimits } from "../codex/catalog";
 import { buildClaudeDesktopState, fetchAllModels } from "../server/management-api";
 import { findLiveProxy } from "../server/proxy-liveness";
-import { CliUsageError, runtimeRequest, takeJsonFlag } from "./runtime-api";
+import { CliUsageError, RuntimeApiError, runtimeRequest, takeJsonFlag, type RuntimeApiDeps } from "./runtime-api";
 import { OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
 import type { OcxConfig } from "../types";
 
@@ -55,6 +59,7 @@ function printDesktopHelp(): void {
                      may suspend the account.
   ocx claude desktop show [--json]
   ocx claude desktop status [--json]
+  ocx claude desktop picker on|off|status|trust
   ocx claude desktop bind <picker-model-id> <provider/model|native/slug>
       first-party: serve a Code tab picker model (e.g. claude-sonnet-4-6) with an opencodex model;
       the picker keeps Anthropic's label, and only Claude Code traffic through the local proxy uses it
@@ -73,8 +78,109 @@ export interface ApplyProfileDeps {
   postApplyImpl?: (
     mode: Desktop3pConfigMode,
     profile: DesktopProfile,
-  ) => Promise<{ ok?: boolean; path?: string; error?: string; warning?: string }>;
+  ) => Promise<{ ok?: boolean; path?: string; error?: string; warning?: string; picker?: DesktopPickerStatus }>;
+  runtimeRequestImpl?: typeof runtimeRequest;
+  ensurePickerCaImpl?: typeof ensurePickerCa;
+  inspectPickerTrustImpl?: typeof inspectPickerTrust;
+  trustPickerCaImpl?: typeof trustPickerCa;
+  untrustPickerCaImpl?: typeof untrustPickerCa;
+  removeDesktopPickerArtifacts?: typeof removeDesktopPickerArtifacts;
+  security?: SecurityRunner;
+  platform?: NodeJS.Platform;
   probeClaudeDesktopPolicy?: typeof import("../claude/desktop-policy").probeClaudeDesktopPolicy;
+}
+
+type DesktopApplyResult = {
+  ok: boolean;
+  path: string;
+  reason?: string;
+  warning?: string;
+  picker?: DesktopPickerStatus;
+  delegated?: boolean;
+};
+
+type PickerRouteResponse = {
+  ok?: boolean;
+  code?: string;
+  reason?: string;
+  hint?: string;
+  picker?: DesktopPickerStatus;
+};
+
+function pickerRuntimeRequest<T>(
+  path: string,
+  init: RequestInit,
+  deps: ApplyProfileDeps,
+): Promise<T> {
+  const request = deps.runtimeRequestImpl ?? runtimeRequest;
+  const requestDeps: RuntimeApiDeps = deps.findLiveProxyImpl
+    ? { findLiveProxy: deps.findLiveProxyImpl }
+    : {};
+  return request<T>(path, init, requestDeps);
+}
+
+async function liveDesktopProxy(deps: ApplyProfileDeps): Promise<boolean> {
+  return !!await (deps.findLiveProxyImpl ?? findLiveProxy)();
+}
+
+function persistPickerPreference(value: boolean): boolean {
+  const outcome = mutatePersistedConfig(current => {
+    const claudeCode = current.claudeCode ?? {};
+    const intercept = claudeCode.intercept ?? {};
+    if (intercept.picker === value) return { changed: false, value: structuredClone(current.claudeCode) };
+    current.claudeCode = { ...claudeCode, intercept: { ...intercept, picker: value } };
+    return { changed: true, value: structuredClone(current.claudeCode) };
+  });
+  return outcome.status !== "unavailable";
+}
+
+function pickerTrustPaths(deps: ApplyProfileDeps, configDir = getConfigDir()): { caPath: string; leafPath: string; sha1: string } {
+  const ca = (deps.ensurePickerCaImpl ?? ensurePickerCa)(configDir);
+  return {
+    caPath: pickerCaCertPath(configDir),
+    leafPath: pickerLeafCertPath(configDir),
+    sha1: pickerCaFingerprints(ca.certPem).sha1,
+  };
+}
+
+async function trustPickerLocally(deps: ApplyProfileDeps): Promise<{ ok: true; callerAddedTrust: boolean; caPath: string; sha1: string } | { ok: false; reason: string }> {
+  try {
+    const configDir = getConfigDir();
+    const paths = pickerTrustPaths(deps, configDir);
+    const inspect = deps.inspectPickerTrustImpl ?? inspectPickerTrust;
+    const before = await inspect(paths.leafPath, paths.sha1, deps.security, deps.platform);
+    if (before === "trusted") return { ok: true, callerAddedTrust: false, caPath: paths.caPath, sha1: paths.sha1 };
+    const trust = await (deps.trustPickerCaImpl ?? trustPickerCa)(paths.caPath, deps.security, deps.platform);
+    if (!trust.ok) return { ok: false, reason: trust.reason ?? "trust_declined" };
+    return { ok: true, callerAddedTrust: true, caPath: paths.caPath, sha1: paths.sha1 };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : "trust_failed" };
+  }
+}
+
+async function compensateLocalPickerTrust(
+  trust: { callerAddedTrust: boolean; caPath: string; sha1: string },
+  deps: ApplyProfileDeps,
+): Promise<void> {
+  if (!trust.callerAddedTrust) return;
+  await (deps.untrustPickerCaImpl ?? untrustPickerCa)(trust.caPath, trust.sha1, deps.security, deps.platform);
+}
+
+function printPickerStatus(status: DesktopPickerStatus | undefined, json = false): void {
+  if (!status) return;
+  if (json) console.log(JSON.stringify(status, null, 2));
+  else console.log(`picker: ${JSON.stringify(status)}`);
+}
+
+function isAmbiguousPickerTransport(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /timeout|timed out|abort|aborted|lost response|socket hang up|reset/i.test(message);
+}
+
+function isAnsweredPickerRefusal(error: unknown): boolean {
+  if (!(error instanceof RuntimeApiError)) return false;
+  const body = error.body;
+  return !!body && typeof body === "object" && ("picker" in body || (body as Record<string, unknown>).code === "picker_proxy_unavailable");
 }
 
 /** Persist only the requested local profile, never an await-old whole configuration. */
@@ -260,11 +366,23 @@ export function gatewayModeExplanation(input: {
  */
 async function applyFirstPartyDesktop(
   deps: ApplyProfileDeps,
-): Promise<{ ok: boolean; path: string; reason?: string; warning?: string }> {
+): Promise<DesktopApplyResult> {
   try { assertNoClientDisconnectPending(); } catch { return { ok: false, path: "", reason: "client_disconnect_pending" }; }
   const connection = readClientConnectionState();
   if (connection.kind === "connected") return { ok: false, path: "", reason: "first_party_requires_local_hub" };
   if (connection.kind !== "disconnected") return { ok: false, path: "", reason: "client_connection_invalid" };
+  if (await liveDesktopProxy(deps)) {
+    try {
+      const applied = await pickerRuntimeRequest<DesktopApplyResult>(
+        "/api/claude-desktop/apply",
+        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "first-party" }) },
+        deps,
+      );
+      return { ...applied, path: applied.path ?? "", delegated: true };
+    } catch (error) {
+      return { ok: false, path: "", reason: error instanceof Error ? error.message : "daemon apply failed" };
+    }
+  }
   const config = loadConfig();
   const desired = setIntegrationEnabled("claude-desktop", true);
   if (!desired.ok) return { ok: false, path: "", reason: desired.message };
@@ -290,6 +408,7 @@ async function applyFirstPartyDesktop(
   return {
     ok: true,
     path: applied.path,
+    picker: offlinePickerStatus(loadConfig(), deps.platform),
     ...(saved ? {} : { warning: "desktop mode marker was not saved" }),
   };
 }
@@ -298,10 +417,11 @@ export async function applyDesktop(
   profile: DesktopProfile | undefined,
   target: DesktopApplyTarget,
   deps: ApplyProfileDeps = {},
-): Promise<{ ok: boolean; path: string; reason?: string; warning?: string }> {
+): Promise<DesktopApplyResult> {
   if (target.kind === "first-party") return applyFirstPartyDesktop(deps);
   const result = await applyProfile(profile, target.mode, deps);
   if (!result.ok) return result;
+  if (result.delegated) return result;
   const modeSaved = saveDesktopMode("gateway", deps);
   const warning = [result.warning, modeSaved ? "" : "desktop mode marker was not saved"].filter(Boolean).join(" ");
   // The gateway mode is committed before retiring first-party settings.
@@ -316,7 +436,7 @@ export async function applyProfile(
   profile: DesktopProfile | undefined,
   mode: Desktop3pConfigMode,
   deps: ApplyProfileDeps = {},
-): Promise<{ ok: boolean; path: string; reason?: string; warning?: string }> {
+): Promise<DesktopApplyResult> {
   try { assertNoClientDisconnectPending(); } catch { return { ok: false, path: "", reason: "client_disconnect_pending" }; }
   const connection = readClientConnectionState();
   if (connection.kind === "connected") return applyConnectedDesktopProfile(mode, connection, deps);
@@ -336,7 +456,7 @@ export async function applyProfile(
     // serving process installs the map there; a local-only write leaves the
     // daemon unable to decode aliases, and the provider rejects them (400).
     const post = deps.postApplyImpl ?? (async (m: Desktop3pConfigMode, p: DesktopProfile) =>
-      runtimeRequest<{ ok?: boolean; path?: string; error?: string; saved?: boolean; warning?: string }>(
+      runtimeRequest<{ ok?: boolean; path?: string; error?: string; saved?: boolean; warning?: string; picker?: DesktopPickerStatus }>(
         "/api/claude-desktop/apply",
         // The daemon's config may be older than what we just saved, so the
         // profile travels with the request instead of being re-read there.
@@ -352,6 +472,8 @@ export async function applyProfile(
       return {
         ok: true,
         path: applied.path ?? "",
+        picker: applied.picker,
+        delegated: true,
         ...(warning ? { warning } : partial ? { warning: "applied marker was not saved" } : {}),
       };
     } catch (error) {
@@ -397,6 +519,124 @@ export async function applyProfile(
   };
 }
 
+async function handleClaudeDesktopPickerCommand(
+  argv: string[],
+  config: OcxConfig,
+  deps: ApplyProfileDeps,
+): Promise<number> {
+  const action = argv[1];
+  const rest = argv.slice(2);
+  const usage = "Usage: ocx claude desktop picker on|off|status|trust [--json]";
+  if (!action || !["on", "off", "status", "trust"].includes(action)) throw new CliUsageError(usage);
+  const wantsJson = takeJsonFlag(rest);
+  if (rest.length > 0 || (action !== "status" && wantsJson)) throw new CliUsageError(usage);
+
+  const requestPicker = (body: Record<string, unknown>) => pickerRuntimeRequest<PickerRouteResponse>(
+    "/api/claude-desktop/picker",
+    { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+    deps,
+  );
+
+  if (action === "status") {
+    if (await liveDesktopProxy(deps)) {
+      try {
+        const response = await pickerRuntimeRequest<{ ok?: boolean; picker?: DesktopPickerStatus }>("/api/claude-desktop/picker", {}, deps);
+        printPickerStatus(response.picker, wantsJson);
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
+    } else {
+      printPickerStatus(offlinePickerStatus(config, deps.platform), wantsJson);
+    }
+    return 0;
+  }
+
+  if (action === "off") {
+    if (await liveDesktopProxy(deps)) {
+      try {
+        const response = await requestPicker({ enabled: false, persist: true });
+        printPickerStatus(response.picker, false);
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
+    } else {
+      if (!persistPickerPreference(false)) {
+        console.error("Could not persist claudeCode.intercept.picker=false");
+        return 1;
+      }
+      const removed = await (deps.removeDesktopPickerArtifacts ?? removeDesktopPickerArtifacts)({ configDir: getConfigDir(), security: deps.security, platform: deps.platform });
+      if (!removed.ok) console.error(`picker cleanup incomplete${removed.residual?.length ? `: ${removed.residual.join(", ")}` : ""}`);
+      printPickerStatus(offlinePickerStatus(loadConfig(), deps.platform), false);
+    }
+    console.log("Fully quit and reopen Claude Desktop");
+    return 0;
+  }
+
+  if (action === "on" && !(await liveDesktopProxy(deps))) {
+    console.error("proxy_unavailable");
+    return 1;
+  }
+
+  let localTrust: { callerAddedTrust: boolean; caPath: string; sha1: string } | undefined;
+  const sendEnable = async (trustedLocally = false): Promise<PickerRouteResponse> => requestPicker({
+    enabled: true,
+    persist: action === "on",
+    ...(trustedLocally ? { trustedLocally: true, callerAddedTrust: localTrust?.callerAddedTrust ?? false } : {}),
+  });
+
+  if (action === "trust") {
+    const trusted = await trustPickerLocally(deps);
+    if (!trusted.ok) {
+      console.error(trusted.reason);
+      return 1;
+    }
+    localTrust = trusted;
+    if (!(await liveDesktopProxy(deps))) {
+      await compensateLocalPickerTrust(localTrust, deps);
+      console.error("proxy_unavailable");
+      return 1;
+    }
+  }
+
+  let response: PickerRouteResponse;
+  try {
+    response = await sendEnable(action === "trust");
+    if (response.ok === false) {
+      printPickerStatus(response.picker, false);
+      console.error(response.reason ?? response.code ?? "picker_enable_refused");
+      return 1;
+    }
+    if (action === "on" && response.picker?.reason === "trust_pending") {
+      const trusted = await trustPickerLocally(deps);
+      if (!trusted.ok) {
+        console.error(trusted.reason);
+        return 1;
+      }
+      localTrust = trusted;
+      response = await sendEnable(true);
+    }
+    printPickerStatus(response.picker, false);
+    if (response.picker?.reason === "restart_required") console.log("Fully quit and reopen Claude Desktop");
+    return response.ok === false ? 1 : 0;
+  } catch (error) {
+    if (isAnsweredPickerRefusal(error)) {
+      const body = (error as RuntimeApiError).body as PickerRouteResponse;
+      printPickerStatus(body.picker, false);
+      console.error(body.reason ?? body.code ?? (error instanceof Error ? error.message : String(error)));
+      return 1;
+    }
+    if (isAmbiguousPickerTransport(error)) {
+      console.error("state unknown - run ocx claude desktop picker status");
+      return 1;
+    }
+    if (localTrust) await compensateLocalPickerTrust(localTrust, deps);
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
 export async function handleClaudeDesktopCommand(argv: string[], deps: ApplyProfileDeps = {}): Promise<number> {
   const command = argv[0];
   if (command === "help" || command === "--help" || command === "-h") {
@@ -433,6 +673,7 @@ export async function handleClaudeDesktopCommand(argv: string[], deps: ApplyProf
         console.log(`Claude Desktop first-party 설정을 적용했습니다: ${result.path}`);
         console.log("Desktop 앱 설정은 그대로이며, Code 탭의 Claude Code만 로컬 프록시를 거칩니다.");
         console.warn(`⚠️  ${FIRST_PARTY_ACCOUNT_RISK.message}`);
+        printPickerStatus(result.picker, false);
       } else {
         console.log(`Claude Desktop gateway 설정을 적용했습니다: ${result.path}`);
         for (const line of gatewayModeExplanation({
@@ -466,6 +707,7 @@ export async function handleClaudeDesktopCommand(argv: string[], deps: ApplyProf
       console.warn("Local client profile only; connected Desktop apply uses the hub profile.");
     }
     const config = loadConfig();
+    if (command === "picker") return await handleClaudeDesktopPickerCommand(argv, config, deps);
     // `status` is API-backed and must NOT build local state first: the whole point of the
     // route the GUI polls (/api/claude-desktop/status) is the applied-vs-desired comparison,
     // including staleness, drift and health, which only the running proxy knows. `show`
