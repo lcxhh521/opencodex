@@ -21,7 +21,9 @@ for the proof window, then returns it to `dev` if the PR does not merge.
    exit code. Non-zero → the PR may state that macOS enforces the constraint; zero → the PR states
    that only the key's confidentiality protects other names on this OS. Delete the ephemeral leaf.
 4. Quit and reopen Claude Desktop (Computer Use). Check `main.log` for the egress pin line pointing
-   at the intercept port and the picker log line `picker GET bootstrap 200`.
+   at the picker proxy port (`pickerProxyPort`, the intercept port + 1, never the Claude Code proxy
+   port), record the applied profile's exact `egressProxyUrl`, and find the picker log line
+   `picker GET bootstrap 200`.
 5. Code tab → model picker: screenshot showing opencodex models by name next to Anthropic's.
 6. Pick one (e.g. the xai Grok route), send "Reply with exactly: OCX-PICKER-PROBE. Do not use any
    tools." Screenshot the reply; `usage.jsonl` must show the routed provider on the `messages`
