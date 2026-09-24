@@ -13,6 +13,12 @@ Consumes: D1, D2 in [000](000_plan.md). Produces the mode contract wp4 builds on
 | `src/server/management/agent-settings-routes.ts` | MODIFY: apply default + status `riskWarning` |
 | `src/server/management/native-integration-routes.ts` | MODIFY: status/enable observe; enable message carries the risk |
 | `src/server/management/config-routes.ts` | MODIFY: `/api/sync` skips the gateway writer when the resolved mode is first-party |
+| `src/server/management/agent-settings-routes.ts` (also) | MODIFY: `autoApplyDesktopBestEffort` (:212, the roster-update gateway writer) returns early when the resolved mode is first-party, both before and after its model discovery await |
+| `src/types/config.ts` | MODIFY: the `desktopMode` doc comment (:183) names gateway as the default and first-party's risk |
+| `tests/claude-integration/claude-desktop-mode-explanation.test.ts` | MODIFY: explanation cases for the new default |
+| `structure/gui-and-management-api.md` | MODIFY: the Desktop apply default (:182) is gateway; `riskWarning` in the status payload |
+| `gui/src/styles/claude-desktop-mode-picker.css` | MODIFY: header comment (:1) — gateway is the default, first-party is the opt-in with the risk callout (plus the callout style if it fits here) |
+| `gui/src/pages/ClaudeDesktop.tsx` (also) | MODIFY: stale comments at :240 and :351 that call first-party the default |
 | `gui/src/pages/ClaudeDesktop.tsx` | MODIFY: default badge + fallback mode = gateway; first-party risk callout |
 | `gui/src/pages/ClaudeDesktop.tsx` (Desktop status type lives here) | MODIFY: `riskWarning` in the status type |
 | `gui/src/i18n/{en,de,fr,ko,zh,zh-TW,ru,ja,tr,vi}.ts` | MODIFY: `claudeDesktop.mode.firstPartyRisk`; hints no longer call first-party the default |
@@ -122,6 +128,13 @@ export type FirstPartyAccountRisk = typeof FIRST_PARTY_ACCOUNT_RISK;
 +        console.warn(`⚠️  ${FIRST_PARTY_ACCOUNT_RISK.message}`);
 ```
 
+`gatewayModeExplanation` (src/cli/claude-desktop.ts:212–247) is rewritten for the new default: when gateway
+was applied without an explicit flag and first-party can run here (not a connected client, intercept
+enabled), it prints "Gateway is the default.", the first-party alternative
+(`ocx claude desktop apply --first-party`) and `FIRST_PARTY_ACCOUNT_RISK.message`; explicit gateway
+requests and machines that cannot run first-party get nothing. Its doc comment drops the "help calls
+first-party the default" premise.
+
 The bindings gateway warning (`resolveClaudeDesktopMode(config) === "gateway"`) also passes the
 observation. `status` prints the payload, which now carries `riskWarning`. `parseDesktopApplyArgs`
 (the only caller of `defaultDesktopApplyMode`) widens its config type the same way; its callers
@@ -181,6 +194,17 @@ resumes while a first-party apply is between gateway cleanup and its mode commit
 lock and then sees first-party. wp2 lands the re-resolve; wp4 adds the lock.
 
 A first-party Desktop no longer gets a gateway profile written and selected by a catalog sync.
+
+`autoApplyDesktopBestEffort` (agent-settings-routes.ts:212) gets the same guard twice: after
+`loadConfig()` into `admitted` and again after the `fetchAllModels` await on `current`:
+
+```diff
+       if (!claudeDesktopIntegrationEnabled(admitted)) return;
++      if (resolveClaudeDesktopMode(admitted, observeClaudeDesktopMode(admitted)) === "first-party") return;
+ …
+       if (!claudeDesktopIntegrationEnabled(current)) return;
++      if (resolveClaudeDesktopMode(current, observeClaudeDesktopMode(current)) === "first-party") return;
+```
 
 `gui/src/pages/ClaudeDesktop.tsx`
 
@@ -247,6 +271,13 @@ and the dashboard recap line (`claude-code.md:760` in English) names gateway as 
    `foreign` → gateway).
 9. NEW "a selected owned gateway row outranks legacy first-party settings" (both observed →
    gateway).
+10. NEW "a roster update does not write a gateway profile on an explicit first-party install" and
+   "… nor when the mode switches to first-party while its discovery is pending" (fake
+   `fetchAllModels` resolves after the switch; fake `writeDesktop3pConfig` must not be called).
+
+`tests/claude-integration/claude-desktop-mode-explanation.test.ts`: implicit gateway where
+first-party can run → the default line, the first-party command and the risk text; explicit
+`--gateway` → nothing; connected client or disabled intercept → nothing.
 
 Verifier (run at P of wp2, before writing it into the plan as proof):
 `bun test tests/claude-integration/claude-desktop-first-party.test.ts tests/claude-integration/claude-desktop-cli.test.ts tests/claude-integration/claude-desktop-mode-explanation.test.ts`,
