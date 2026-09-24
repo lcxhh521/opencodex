@@ -23,6 +23,7 @@ picker artifacts locally, and enabling is refused.
 | `src/claude/desktop-picker-profile.ts` | NEW: apply/remove/inspect the owned egress profile; state in `<configDir>/claude-picker/profile-state.json` |
 | `src/claude/desktop-picker.ts` | NEW: `DesktopPickerController` (server) with `enable`/`disable`/`status` under one async lock; `removeDesktopPickerArtifacts` (local cleanup when no server runs) |
 | `src/claude/desktop-first-party.ts` | MODIFY: nothing picker-specific beyond exports used by the controller |
+| `src/claude/intercept/runtime.ts` | MODIFY (audit wp4 pre-audit, Medium 5): create the controller next to the picker runtime (`isBusy: () => controller?.busy() ?? false`), expose `getClaudePickerController()`, clear it on stop and on a failed start |
 | `src/cli/claude-desktop.ts` | MODIFY: first-party apply delegates to the server when one runs; gateway apply and removal ask the server to clean up; `picker on|off|status|trust` subcommand; help |
 | `src/cli/ensure-desired-integrations.ts` | MODIFY: `ensureClaudeDesktopMatchesDesired` async and awaited by reconcile; durable-OFF picker cleanup |
 | `tests/providers/xai/grok-lifecycle.test.ts` | MODIFY: source-boundary assertions (:61, :79) expect the async declaration and (:86) the awaited call |
@@ -72,7 +73,7 @@ export interface DesktopPickerStatus { desired: boolean; supported: boolean; tru
   reason: DesktopPickerReason; models: number; snapshotAt: number | null;
   hint?: string; residual?: string[] }
 export interface DesktopPickerController {
-  enable(options: { persist: boolean; context: "cli-trusted" | "server" }): Promise<DesktopPickerStatus>;
+  enable(options: { persist: boolean; context: "cli-trusted" | "server"; callerAddedTrust?: boolean }): Promise<DesktopPickerStatus>;
   disable(options: { persist: boolean }): Promise<DesktopPickerStatus>;
   /**
    * Run a whole Desktop mode transition under the controller lock: callers stage slow work
@@ -80,7 +81,7 @@ export interface DesktopPickerController {
    * with the lock-free inner helpers `ops.disableLocked` / `ops.enableLocked`.
    */
   transition<T>(fn: (ops: { disableLocked(o: { persist: boolean }): Promise<DesktopPickerStatus>;
-    enableLocked(o: { persist: boolean; context: "cli-trusted" | "server" }): Promise<DesktopPickerStatus> }) => Promise<T>): Promise<T>;
+    enableLocked(o: { persist: boolean; context: "cli-trusted" | "server"; callerAddedTrust?: boolean }): Promise<DesktopPickerStatus> }) => Promise<T>): Promise<T>;
   status(): Promise<DesktopPickerStatus>;
   busy(): boolean;
 }
@@ -128,14 +129,16 @@ picker back on.
 
 ## Callers
 
+Every server-side Desktop mode change goes through `runDesktopTransition(fn)` (audit wp4 pre-audit, High 2): with a controller it is `controller.transition(fn)`; with none (intercept disabled, client role, failed intercept or picker proxy bind) it calls `fn` with offline ops, where `disableLocked` runs `removeDesktopPickerArtifacts` (no runtime exists, so nothing can terminate claude.ai) and `enableLocked` returns `proxy_unavailable` without writing anything. Gateway apply, first-party removal, native enable and disable, and `/api/sync` therefore keep today's behaviour when no controller exists, plus leftover-artifact cleanup. Tests: with the intercept disabled, gateway apply and native disable succeed and remove a leftover picker row; with the picker proxy unbound, first-party apply succeeds and reports the picker as `proxy_unavailable`.
+
 | Caller | Runs where | Picker call |
 | --- | --- | --- |
-| Management first-party apply (`POST /api/claude-desktop/apply`) | server | the whole transition inside `controller.transition`: gateway cleanup, env write, committed and adopted mode, then `enableLocked({ persist: false, context: "server" })` when the preference is not false; a partial apply whose mode write failed does not enable |
-| `/api/sync` Claude Desktop writer (src/server/management/config-routes.ts:211–237) | server | discovery (`fetchAllModels`) staged first; then inside `controller.transition`: re-read, re-resolve (010), and `writeDesktop3pConfig` only when the resolved mode is not first-party; no controller (intercept not running) → unchanged behaviour |
-| Management first-party removal / gateway apply | server | model discovery staged first; then inside `controller.transition`: `disableLocked({ persist: false })`, the gateway write or env removal, and the mode commit |
-| Native enable (first-party branch) / native disable | server | inside `controller.transition`: enable after `persistDesktopModeMarker` returns the committed subtree and it is adopted; disable before OFF cleanup and the intent commit |
+| Management first-party apply (`POST /api/claude-desktop/apply`) | server | the whole transition inside `runDesktopTransition`, in today's order (audit wp4 pre-audit, High 1): env write with its rollback, then gateway cleanup with today's partial-cleanup reporting, then the committed and adopted mode, then `enableLocked({ persist: false, context: "server" })` when the preference is not false; a partial apply whose mode write failed does not enable |
+| `/api/sync` Claude Desktop writer (src/server/management/config-routes.ts:211–237) | server | discovery (`fetchAllModels`) staged first; then inside `runDesktopTransition`: re-read, re-resolve (010), and `writeDesktop3pConfig` only when the resolved mode is not first-party; no controller (intercept not running) → unchanged behaviour |
+| Management first-party removal / gateway apply | server | model discovery staged first; then inside `runDesktopTransition`: `disableLocked({ persist: false })`, the gateway write or env removal, and the mode commit |
+| Native enable (first-party branch) / native disable | server | inside `runDesktopTransition`: enable after `persistDesktopModeMarker` returns the committed subtree and it is adopted; disable before OFF cleanup and the intent commit |
 | `GET/PUT /api/claude-desktop/picker` | server | `PUT { enabled, persist }` → `enable({ persist, context })` with `context: "cli-trusted"` when the request carries `trustedLocally: true` (sent only by the CLI after its trust step), else `"server"`; or `disable({ persist })` |
-| CLI `ocx claude desktop apply --first-party` | CLI | with a live proxy: delegate to `POST /api/claude-desktop/apply { mode: "first-party" }` (the gateway path already delegates, src/cli/claude-desktop.ts:326); without one: apply locally as today and report the picker as `proxy_unavailable` |
+| CLI `ocx claude desktop apply --first-party` | CLI | on the local hub path with a live proxy, the same branch where gateway apply already delegates (src/cli/claude-desktop.ts:326), delegate to `POST /api/claude-desktop/apply { mode: "first-party" }` (audit wp4 pre-audit, High 3: the connected-client branch before it stays unchanged and never touches the picker); without one: apply locally as today and report the picker as `proxy_unavailable` |
 | CLI gateway apply / first-party removal | CLI | with a live proxy: the delegated server apply performs the disable; without one: `removeDesktopPickerArtifacts` locally |
 | CLI `picker on` | CLI | requires a live proxy (else `proxy_unavailable`); `PUT { enabled: true, persist: true }`; if the answer is `trust_pending`, run `picker trust` below and repeat the PUT with `trustedLocally: true` |
 | CLI `picker trust` | CLI | local `ensurePickerCa` read + `trustPickerCa` (operator's dialog), recording whether this run added trust; then `PUT { enabled: true, persist: false, trustedLocally: true, callerAddedTrust }`. Compensation for trust the CLI added is done by the server inside the lock: enable treats `callerAddedTrust: true` like trust added by the attempt itself, so any refusal or failure after its trust check untrusts it (residual reported if that fails), and success keeps it. The CLI compensates locally only when the PUT could not be delivered at all (connection refused: no server, so nothing can race). A timeout or lost response is ambiguous: the CLI does not touch trust and prints "state unknown — run `ocx claude desktop picker status`" |
@@ -185,3 +188,7 @@ models,offlineNote}` in all ten catalogs.
 Verifier: the files above plus `tests/providers/xai/grok-lifecycle.test.ts`, `bun run typecheck`,
 `bun run skill:surface:check`, `bun run structure:check`, `bun run lint:gui`, `bun run build:gui`,
 `cd gui && bun test --isolate tests`.
+
+## Audit record
+
+- wp4 pre-audit (reviewer, FAIL: 3 High, 2 Medium) folded: first-party apply keeps its env-first order inside the transition; runDesktopTransition defines the no-controller path; CLI delegation is limited to the local hub branch; callerAddedTrust is in the enable signatures and forwarded by the route (test in claude-desktop-picker-routes); runtime.ts is in the file inventory.
