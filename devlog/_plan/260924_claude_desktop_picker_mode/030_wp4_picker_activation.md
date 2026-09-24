@@ -70,7 +70,7 @@ export type DesktopPickerReason = "active" | "restart_required" | "unsupported_p
   | "trust_declined" | "profile_failed";
 export interface DesktopPickerStatus { desired: boolean; supported: boolean; trust: PickerTrustState;
   profile: DesktopPickerProfileInspection["kind"]; listenerReady: boolean; effective: boolean;
-  reason: DesktopPickerReason; models: number; snapshotAt: number | null;
+  reason: DesktopPickerReason; models: number; snapshotAt: number | null; lastBootstrapAt: number | null;
   hint?: string; residual?: string[] }
 export interface DesktopPickerController {
   enable(options: { persist: boolean; context: "cli-trusted" | "server"; callerAddedTrust?: boolean }): Promise<DesktopPickerStatus>;
@@ -86,7 +86,7 @@ export interface DesktopPickerController {
   busy(): boolean;
 }
 export function createDesktopPickerController(deps: { runtime: PickerRuntime; readConfig: () => OcxConfig;
-  persistPreference: (value: boolean) => boolean; configDir: string; security?: SecurityRunner;
+  persistPreference: (value: boolean) => boolean; proxyPort: () => number | null; configDir: string; security?: SecurityRunner;
   platform?: NodeJS.Platform }): DesktopPickerController;
 export function removeDesktopPickerArtifacts(options: { configDir?: string; security?: SecurityRunner }): Promise<{ ok: boolean; residual?: string[] }>;
 ```
@@ -191,4 +191,4 @@ Verifier: the files above plus `tests/providers/xai/grok-lifecycle.test.ts`, `bu
 
 ## Audit record
 
-- wp4 pre-audit (reviewer, FAIL: 3 High, 2 Medium) folded: first-party apply keeps its env-first order inside the transition; runDesktopTransition defines the no-controller path; CLI delegation is limited to the local hub branch; callerAddedTrust is in the enable signatures and forwarded by the route (test in claude-desktop-picker-routes); runtime.ts is in the file inventory.
+- wp4 pre-audit (reviewer, FAIL: 3 High, 2 Medium) folded: first-party apply keeps its env-first order inside the transition; runDesktopTransition defines the no-controller path; CLI delegation is limited to the local hub branch; callerAddedTrust is in the enable signatures and forwarded by the route (test in claude-desktop-picker-routes); runtime.ts is in the file inventory. Round 2 GO-WITH-FIXES (2): the controller gets a late-bound proxyPort accessor; DesktopPickerStatus carries lastBootstrapAt.
