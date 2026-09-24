@@ -29,29 +29,35 @@ Native OpenAI pool routing also accepts
 [Orca-linked accounts](../codex-home.md#orca-source-owned-account-import), whose source resolution
 belongs to the shared account store. The import CLI adds pool rows independently of Desktop profiles.
 
-## Desktop modes: first-party and gateway
+## Desktop modes: gateway and first-party
 
 `src/claude/desktop-first-party.ts` owns the Desktop mode contract. Two modes exist and are
 mutually exclusive on one machine:
 
-- **first-party** (default): Claude Desktop itself is left on claude.ai — login, Chat tab,
+- **first-party** (opt-in, with account risk): Claude Desktop itself is left on claude.ai — login, Chat tab,
   connectors and remote control are untouched and no config-library profile is written. The apply
   writes only `HTTPS_PROXY=http://127.0.0.1:<port+100>` and `NODE_EXTRA_CA_CERTS=<config>/claude-intercept/ca.pem`
   into the `env` block of Claude Code's `settings.json` (via `src/claude/intercept/settings.ts`),
   creating the local authority first. Only the Claude Code process Desktop spawns for the Code tab
   (and its subagents, and any standalone `claude` CLI) reads that env, so only their
   `api.anthropic.com` traffic reaches the [Claude intercept pair](../runtime.md#claude-intercept-pair).
-- **gateway**: the existing third-party profile written by `src/claude/desktop-3p.ts`; the whole
-  app switches to the local gateway. It is selected explicitly (`--gateway`, dashboard, or the
-  legacy `--static|--hybrid|--discovery-only` shape flags, which imply it).
+- **gateway** (default for new installs): the existing third-party profile written by
+  `src/claude/desktop-3p.ts`; the whole app switches to the local gateway. The dashboard,
+  `--gateway`, and legacy `--static|--hybrid|--discovery-only` shape flags also select it.
 
-`resolveClaudeDesktopMode` returns the explicit `claudeCode.desktopMode` when set; otherwise a
-persisted `desktopProfile.appliedFingerprint` (an existing gateway install) keeps `gateway`, and a
-fresh install resolves to `first-party`. Updates therefore never flip a working gateway install
-silently, while new installs land on first-party. `resolveClaudeDesktopApplyMode` narrows an
-*implied* first-party to gateway where the intercept pair cannot run (client role or
-`claudeCode.intercept.enabled: false`); an explicit `first-party` is refused with
-`intercept_disabled` instead of being rewritten.
+`resolveClaudeDesktopMode` uses observations from `observeClaudeDesktopMode` in this order:
+explicit `claudeCode.desktopMode` → selected owned gateway row → persisted
+`desktopProfile.appliedFingerprint` → owned first-party env in `~/.claude/settings.json` →
+gateway. The owned env observation preserves first-party installs applied before mode persistence;
+foreign proxy settings do not count. `resolveClaudeDesktopApplyMode` preserves the resolved mode.
+An apply for a first-party install with `claudeCode.intercept.enabled: false` is refused with
+`intercept_disabled` rather than switched to gateway. New installs apply gateway.
+`src/claude/desktop-risk.ts` owns the account-suspension warning: first-party sends subscription
+traffic through a local interception proxy, which Anthropic may treat as a terms violation.
+`GET /api/claude-desktop/status` exposes it as `riskWarning` when first-party is resolved or its
+owned settings are still observed; otherwise the field is `null`.
+`/api/sync` and roster-update auto-apply never write a gateway profile while the resolved mode is
+first-party; both re-resolve after model discovery before writing.
 
 Mode switches establish the replacement before removing the previous connection. A failed
 first-party apply (disabled intercept, CA failure, unreadable settings or foreign env) preserves
@@ -70,7 +76,7 @@ re-applies a stale env (the proxy port follows the public port).
 
 Surfaces: `ocx claude desktop apply [--first-party|--gateway]` in `src/cli/claude-desktop.ts`;
 `POST /api/claude-desktop/apply` with `mode` ∈ `first-party|gateway|static|hybrid|discovery` and
-`GET /api/claude-desktop/status` (`mode`, `firstParty.{applied,stale,interceptEnabled,interceptRunning,proxyPort,caCertPath}`)
+`GET /api/claude-desktop/status` (`mode`, `riskWarning`, `firstParty.{applied,stale,interceptEnabled,interceptRunning,proxyPort,caCertPath}`)
 in `src/server/management/agent-settings-routes.ts`; the native toggle in
 `src/server/management/native-integration-routes.ts` applies the resolved mode on enable. Managed
 Windows policy health only applies in gateway mode, because first-party never touches Desktop's own

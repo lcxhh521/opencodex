@@ -120,26 +120,40 @@ hook을 제거해요. Claude Desktop은 별도 profile을 사용하며 shell hoo
 `claudeCode.nativePassthrough: false`로 끌 수 있고, `claudeCode.anthropicBaseUrl`로 다른 주소를
 지정할 수 있어요.
 
-## Claude Desktop 모드: 1P(기본값)와 게이트웨이
+## Claude Desktop 모드: 게이트웨이(기본값)와 1P
 
-Claude Desktop은 서로 배타적인 두 모드 중 하나로 OpenCodex를 사용해요. 대시보드의
-**Claude → Desktop → 연결 모드** 또는 `ocx claude desktop apply --first-party|--gateway`로 선택합니다.
+대시보드의 **Claude → Desktop → 연결 모드** 또는
+`ocx claude desktop apply --first-party|--gateway`로 서로 배타적인 두 모드 중 하나를 선택해요.
 
-- **1P(퍼스트파티, 기본값)**: Desktop 자체는 건드리지 않아요. claude.ai 로그인, 채팅 탭, 커넥터,
-  원격 제어가 그대로 유지됩니다. OpenCodex는 `~/.claude/settings.json`의 `env`에
-  `HTTPS_PROXY=http://127.0.0.1:<공개 포트+100>`과 `NODE_EXTRA_CA_CERTS=~/.opencodex/claude-intercept/ca.pem`
-  두 값만 씁니다. Desktop이 Code 탭용으로 실행하는 Claude Code(서브에이전트 포함)와 터미널의
-  `claude` CLI만 이 값을 읽어 로컬 인터셉트 프록시를 거치고, `POST /v1/messages`·`count_tokens`만
-  OpenCodex가 처리하며 나머지 `api.anthropic.com` 경로는 그대로 Anthropic으로 전달돼요. CA는 OS
-  신뢰 저장소에 설치되지 않습니다.
-- **게이트웨이(3P)**: 기존 방식으로, 아래 프로필을 써서 앱 전체가 OpenCodex를 게이트웨이로
-  사용해요. `--gateway`(또는 기존 `--static`/`--hybrid`/`--discovery-only`)로 명시적으로 선택합니다.
+### 게이트웨이(기본값)
 
-모드는 `claudeCode.desktopMode`에 저장돼요. 이미 게이트웨이 프로필을 적용한 설치는 업데이트 후에도
-게이트웨이를 유지하고, 새 설치만 1P가 기본이에요. 모드를 바꾸면 다른 모드의 설정(OpenCodex가 쓴
-값만)이 제거되며, 회사 프록시 같은 외부 `HTTPS_PROXY`/`NODE_EXTRA_CA_CERTS` 값은 덮어쓰지 않고 적용을
-거부해요. 전환 후에는 Desktop을 완전히 종료하고 다시 열어 주세요. 자세한 내용과 Claude Code CLI
-호환성은 영어 문서를 참고하세요.
+새 설치는 게이트웨이 프로필을 적용해요. 채팅 탭을 포함한 앱 전체가 OpenCodex를 사용하며,
+claude.ai 전용 기능은 사용할 수 없어요. 기존 `--static`, `--hybrid`, `--discovery-only` 옵션도
+게이트웨이를 선택해요.
+
+### 1P(직접 선택)
+
+:::caution[계정 위험]
+1P 모드에서는 Claude 구독 트래픽이 로컬 인터셉트 프록시를 거쳐요.
+Anthropic이 이를 약관 위반으로 판단해 계정을 정지할 수 있어요. 기본값은 게이트웨이예요.
+이 위험을 받아들일 때만 1P를 선택하세요.
+:::
+
+Desktop은 claude.ai에 로그인된 채로 남아 채팅, 커넥터, 원격 제어를 계속 사용할 수 있어요.
+OpenCodex는 `~/.claude/settings.json`(`CLAUDE_CONFIG_DIR` 지원)의 `env`에
+`HTTPS_PROXY`와 `NODE_EXTRA_CA_CERTS`만 써요. Code 탭이 실행한 Claude Code와 그
+서브에이전트, 터미널의 `claude` CLI만 로컬 프록시를 거쳐요. 그 밖의 `api.anthropic.com`
+경로는 Anthropic으로 전달돼요. CA는 OS 신뢰 저장소에 설치하지 않고,
+`NODE_EXTRA_CA_CERTS`를 읽는 Node 프로세스만 신뢰해요.
+
+모드는 `claudeCode.desktopMode`에 저장돼요. 명시적으로 1P를 적용했거나 이번 업데이트 전에
+적용한 설치는 1P를 유지하고, 기존 게이트웨이 설치도 그대로 유지해요. 명시 설정이 없다면
+OpenCodex 소유의 선택된 게이트웨이 항목, 저장된 게이트웨이 지문, `settings.json`의 소유된
+1P 설정 순으로 확인하고, 아무 증거도 없으면 게이트웨이를 선택해요. 카탈로그 동기화와 모델
+목록 업데이트는 1P 설치 위에 게이트웨이 프로필을 쓰지 않아요.
+`claudeCode.intercept.enabled: false`라면 기존 1P 설치의 apply는 `intercept_disabled`로
+거절되고, 새 설치는 게이트웨이를 적용해요. 회사 프록시 같은 외부 설정은 덮어쓰지 않아요.
+모드 전환 후에는 Desktop을 완전히 종료하고 다시 열어 주세요.
 
 ### Code 탭에서 opencodex 모델 쓰기 (1P 바인딩)
 

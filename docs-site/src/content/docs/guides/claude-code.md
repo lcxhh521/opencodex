@@ -147,13 +147,28 @@ the proxy starts or you save settings, while `ocx claude` always resolves live.
 
 ## System environment integration (macOS)
 
-## Claude Desktop modes: first-party (default) and gateway
+## Claude Desktop modes: gateway (default) and first-party
 
 Claude Desktop can use OpenCodex in one of two mutually exclusive modes. Pick it in
 **Claude → Desktop → Connection mode** in the dashboard or with `ocx claude desktop apply
 --first-party|--gateway`.
 
-**First-party** is the default for new installs. Desktop itself is not reconfigured: it stays
+### Gateway (default)
+
+New installs use **gateway** by default. Its third-party profile, described below, switches the
+whole app to OpenCodex as its inference gateway. Chat runs locally through OpenCodex and the
+claude.ai-only features are unavailable. The legacy `--static` / `--hybrid` /
+`--discovery-only` flags also select gateway.
+
+### First-party (opt-in)
+
+:::caution[Account risk]
+First-party mode sends your Claude subscription traffic through a local interception proxy.
+Anthropic may treat this as a violation of its terms and suspend the account. Gateway is the
+default; choose first-party only if you accept that risk.
+:::
+
+Desktop itself is not reconfigured: it stays
 signed in to claude.ai, and the Chat tab, connectors, cloud sessions and remote control keep
 working. OpenCodex only writes two variables into the `env` block of `~/.claude/settings.json`
 (honoured by `CLAUDE_CONFIG_DIR`):
@@ -178,13 +193,12 @@ usage) is relayed byte-for-byte to Anthropic, and unrelated hosts are tunnelled 
 subscription login keeps working. Existing OpenCodex features — `modelMap`, aliases, native
 passthrough, sidecars, auto-context — apply the same way they do for `ocx claude`.
 
-**Gateway** is the previous third-party mode: the profile described in the next section switches
-the whole app to OpenCodex as its inference gateway. Chat runs locally through OpenCodex and the
-claude.ai-only features are unavailable. Select it explicitly (`--gateway`, the dashboard
-selector, or the legacy `--static` / `--hybrid` / `--discovery-only` flags, which imply it).
-
-Mode is persisted as `claudeCode.desktopMode`. Installs that already applied a gateway profile
-keep gateway after updating; nothing is switched silently. Switching first applies the replacement,
+Mode is persisted as `claudeCode.desktopMode`. Installs that already applied either mode retain it,
+including first-party installs from before the mode was persisted. An explicit mode takes priority;
+otherwise an owned selected gateway row, an applied gateway fingerprint, or owned first-party
+settings in `~/.claude/settings.json` determine the existing mode before the gateway default.
+A catalog sync or roster update never writes a gateway profile over a resolved first-party install.
+Switching first applies the replacement,
 then removes the other mode's configuration (only values OpenCodex wrote — a foreign `HTTPS_PROXY` or
 `NODE_EXTRA_CA_CERTS`, for example a corporate proxy, is never overwritten and the apply is
 refused instead). A failed replacement preserves the previous connection. If retiring the old
@@ -193,7 +207,8 @@ resolve that error before restarting Desktop. A committed gateway keeps its save
 marker even when first-party settings cleanup fails. Fully quit and reopen Desktop after a successful switch. `ocx ensure` refreshes a stale
 first-party env when the integration is ON and removes it when OFF. Set
 `claudeCode.intercept.enabled: false` to disable the proxy entirely; first-party then cannot be
-applied and an implicit apply falls back to gateway. On a connected client the proxy runs on the
+applied. An apply for an existing first-party install is refused when the intercept is disabled;
+new installs apply gateway. On a connected client the proxy runs on the
 hub, so `ocx claude desktop apply` there uses the gateway profile.
 
 ### Use opencodex models from the Desktop Code tab (first-party bindings)
@@ -757,7 +772,7 @@ Claude debug immediately clears the ring.
 The dashboard sidebar has a dedicated **Claude** page (below API) and a **Claude ON** toggle
 (label intentionally identical in every language). The page shows:
 
-- Desktop tab: **Connection mode** selector — first-party (default) or gateway — with the
+- Desktop tab: **Connection mode** selector — gateway (default) or first-party — with the
   running proxy port in first-party mode. Only **Save & apply** switches modes; **Save** alone
   stores the gateway profile lanes for a later gateway apply and leaves the current mode as is
 - Inbound kill switch (enabled toggle)

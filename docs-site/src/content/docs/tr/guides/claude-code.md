@@ -145,7 +145,44 @@ görüntüdür; `ocx claude` ise her zaman canlı olarak çözümler.
 
 ## Sistem ortamı entegrasyonu (macOS)
 
+## Claude Desktop modları: ağ geçidi (varsayılan) ve first-party
+
+Birbirini dışlayan modlardan birini **Claude → Desktop → Bağlantı modu** bölümünden veya
+`ocx claude desktop apply --first-party|--gateway` komutuyla seçin.
+
+### Ağ geçidi (varsayılan)
+
+Yeni kurulumlarda ağ geçidi profili uygulanır; Chat sekmesi dâhil tüm uygulama OpenCodex'i
+kullanır. Yalnızca claude.ai üzerinden sunulan özellikler kullanılamaz. Eski `--static`,
+`--hybrid` ve `--discovery-only` bayrakları da ağ geçidini seçer.
+
+### First-party (isteğe bağlı)
+
+:::caution[Hesap riski]
+First-party modunda Claude aboneliğinizin trafiği yerel bir müdahale vekilinden geçer.
+Anthropic bunu kullanım koşullarının ihlali sayıp hesabınızı askıya alabilir. Varsayılan mod
+ağ geçididir; bu riski kabul ediyorsanız first-party modunu seçin.
+:::
+
+Desktop claude.ai oturumunu korur; Chat, bağlayıcılar ve uzaktan kontrol çalışmaya devam eder.
+OpenCodex yalnızca `~/.claude/settings.json` dosyasındaki (`CLAUDE_CONFIG_DIR` desteklenir)
+`env` alanına `HTTPS_PROXY` ve `NODE_EXTRA_CA_CERTS` yazar. Code sekmesinin başlattığı
+Claude Code, alt ajanları ve bağımsız `claude` CLI yerel vekilden geçer; diğer
+`api.anthropic.com` yolları Anthropic'e iletilir. CA, işletim sisteminin güven deposuna
+kurulmaz; yalnızca `NODE_EXTRA_CA_CERTS` okuyan Node süreçleri ona güvenir.
+
+Mod `claudeCode.desktopMode` içinde saklanır. First-party modunu açıkça veya bu sürümden önce
+uygulayan kurulumlar bu modu korur; mevcut ağ geçidi de korunur. Açık mod yoksa önce OpenCodex'e
+ait seçili ağ geçidi satırı, sonra kayıtlı ağ geçidi parmak izi, ardından `settings.json`
+içindeki OpenCodex'e ait first-party ayarları değerlendirilir; hiçbiri yoksa ağ geçidi seçilir.
+Katalog eşitlemesi ve model listesi güncellemesi, first-party kurulumunun üstüne ağ geçidi
+profili yazmaz. `claudeCode.intercept.enabled: false` olduğunda mevcut first-party kurulumunda
+apply işlemi `intercept_disabled` ile reddedilir; yeni kurulum ağ geçidini uygular. Başka bir
+vekilin ayarları üzerine yazılmaz. Mod değiştirince Desktop'ı tamamen kapatıp yeniden açın.
+
 ## Claude Desktop profili
+
+Bu profil yalnızca ağ geçidi modunda Desktop'a yazılır.
 
 Claude Desktop, Claude Code'dan ayrı bir profil kullanır. Mevcut her rotayı dört
 aileden birine (Opus, Fable, Sonnet veya Haiku) yerleştirmek için kontrol
@@ -173,7 +210,8 @@ ocx claude desktop export <path|->
 ocx claude desktop import <path> [--apply]
 ```
 
-`ocx claude desktop` ve `apply`, geçerli profili Claude Desktop'a yazar. `show`
+`ocx claude desktop` ve `apply` seçili modu uygular: first-party Claude Code vekilinin
+ortam ayarlarını, ağ geçidi ise Desktop profilini yazar. `show`
 okunabilir bir özet sunar; betikler için `--json` ekleyin. `export -`, standart
 çıktıya sürümlenmiş JSON yazar. İçe aktarma, kaydetmeden önce dosyanın tamamını
 doğrular, böylece geçersiz bir dosya geçerli profili değiştirmeden bırakır.

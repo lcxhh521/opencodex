@@ -121,32 +121,41 @@ Sur macOS, l'intégration automatique (`claudeCode.systemEnv`) suit la même ré
 `claude` lancée sans passer par `ocx` se comporte donc de la même manière. Le fichier d'environnement est un instantané actualisé au
 démarrage du proxy ou lors de l'enregistrement des paramètres, tandis que `ocx claude` effectue toujours une résolution immédiate.
 
-## Modes Claude Desktop : first-party (par défaut) et passerelle
+## Modes Claude Desktop : passerelle (par défaut) et first-party
 
-Claude Desktop utilise OpenCodex dans l'un de deux modes mutuellement exclusifs. Choisissez-le dans
-**Claude → Bureau → Mode de connexion** du tableau de bord ou avec
-`ocx claude desktop apply --first-party|--gateway`.
+Choisissez le mode dans **Claude → Bureau → Mode de connexion** ou avec
+`ocx claude desktop apply --first-party|--gateway`. Les deux modes sont exclusifs.
 
-- **First-party (par défaut)** : Desktop lui-même n'est pas reconfiguré. La connexion claude.ai,
-  l'onglet Chat, les connecteurs et le contrôle à distance continuent de fonctionner. OpenCodex
-  n'écrit que deux valeurs dans le bloc `env` de `~/.claude/settings.json` :
-  `HTTPS_PROXY=http://127.0.0.1:<port public+100>` et
-  `NODE_EXTRA_CA_CERTS=~/.opencodex/claude-intercept/ca.pem`. Seuls Claude Code lancé par Desktop
-  pour l'onglet Code (sous-agents compris) et la CLI `claude` du terminal les lisent et passent par le
-  proxy d'interception local ; seuls `POST /v1/messages` et `count_tokens` sont traités par OpenCodex,
-  les autres chemins de `api.anthropic.com` sont relayés tels quels vers Anthropic. L'AC n'est jamais
-  installée dans le magasin de confiance du système.
-- **Passerelle (tiers)** : l'ancien mode ; le profil ci-dessous fait basculer toute l'application sur
-  OpenCodex comme passerelle. Sélectionnez-le explicitement (`--gateway`, ou les anciens
-  `--static`/`--hybrid`/`--discovery-only`).
+### Passerelle (par défaut)
 
-Le mode est enregistré dans `claudeCode.desktopMode`. Les installations ayant déjà appliqué un profil
-passerelle le conservent après mise à jour ; seules les nouvelles installations démarrent en
-first-party. Changer de mode supprime la configuration de l'autre mode (uniquement les valeurs
-écrites par OpenCodex) ; un `HTTPS_PROXY`/`NODE_EXTRA_CA_CERTS` étranger (proxy d'entreprise) n'est
-jamais écrasé et l'application est refusée. Quittez complètement Desktop puis rouvrez-le après un
-changement. Les détails et la compatibilité de la CLI Claude Code sont décrits dans la documentation
-anglaise.
+Une nouvelle installation applique par défaut le profil passerelle : toute l'application utilise
+OpenCodex, y compris l'onglet Chat. Les fonctions réservées à claude.ai ne sont alors pas disponibles.
+Les anciens indicateurs `--static`, `--hybrid` et `--discovery-only` sélectionnent aussi ce mode.
+
+### First-party (sur demande)
+
+:::caution[Risque pour le compte]
+Le mode first-party fait passer le trafic de votre abonnement Claude par un proxy local d'interception.
+Anthropic peut y voir une violation de ses conditions et suspendre votre compte. La passerelle est
+le choix par défaut ; n'activez first-party que si vous acceptez ce risque.
+:::
+
+Desktop reste connecté à claude.ai : Chat, les connecteurs et le contrôle à distance continuent de
+fonctionner. OpenCodex écrit seulement `HTTPS_PROXY` et `NODE_EXTRA_CA_CERTS` dans le bloc `env` de
+`~/.claude/settings.json` (ou le répertoire `CLAUDE_CONFIG_DIR`). Le Claude Code lancé par l'onglet
+Code, ses sous-agents et la CLI `claude` passent par le proxy local ; les autres chemins de
+`api.anthropic.com` sont relayés vers Anthropic. L'AC n'est jamais installée dans le magasin de
+confiance du système ; seuls les processus Node qui lisent `NODE_EXTRA_CA_CERTS` lui font confiance.
+
+Le mode est enregistré dans `claudeCode.desktopMode`. Une installation ayant déjà appliqué le mode
+first-party, même avant cette version, le conserve ; un profil passerelle existant reste aussi en
+passerelle. Sans mode explicite, le profil passerelle sélectionné et détenu par OpenCodex, puis son
+empreinte enregistrée, priment sur les réglages first-party détenus dans `settings.json` ; sans ces
+indices, le mode est passerelle. La synchronisation du catalogue et la mise à jour de la liste des
+modèles n'écrivent jamais un profil passerelle sur une installation first-party. Si
+`claudeCode.intercept.enabled: false`, l'application d'un mode first-party existant est refusée
+(`intercept_disabled`) ; une nouvelle installation applique la passerelle. Un proxy d'entreprise
+étranger n'est pas écrasé. Quittez complètement Desktop puis rouvrez-le après un changement.
 
 ### Utiliser les modèles opencodex depuis l'onglet Code de Desktop (associations first-party)
 
@@ -183,6 +192,8 @@ Desktop n'a pas besoin d'être relancé.
 
 ## Profil Claude Desktop (mode passerelle)
 
+Le profil ci-dessous n'est écrit que lorsque le mode passerelle est sélectionné.
+
 Claude Desktop utilise un profil distinct de Claude Code. Ouvrez **Claude → Bureau** dans le
 tableau de bord afin de placer chaque route disponible dans l'une des quatre familles : Opus, Fable, Sonnet ou Haiku.
 Dans un nouveau profil, toutes les routes appartiennent initialement à Opus. La première route Opus devient la route globale
@@ -207,7 +218,8 @@ ocx claude desktop export <path|->
 ocx claude desktop import <path> [--apply]
 ```
 
-`ocx claude desktop` et `apply` écrivent tous deux le profil actuel dans Claude Desktop. `show` affiche un
+`ocx claude desktop` et `apply` appliquent le mode sélectionné : first-party écrit l'environnement
+du proxy Claude Code, tandis que passerelle écrit le profil Desktop. `show` affiche un
 résumé lisible ; ajoutez `--json` pour les scripts. `export -` écrit le document JSON versionné sur la sortie standard.
 L'importation valide le fichier entier avant tout enregistrement : un fichier invalide laisse donc le profil actuel
 inchangé. Ajoutez `--apply` pour écrire immédiatement un profil importé valide dans Claude Desktop. Utilisez `none` uniquement

@@ -101,7 +101,42 @@ Claude Code 需要在 `ANTHROPIC_AUTH_TOKEN` 中有 token 才能與閘道器通�
 在 macOS 上，自動連線（`claudeCode.systemEnv`）也遵循相同解析邏輯，因此在 `ocx` 之外直接啟動的
 `claude` 行為一致。該檔案是代理啟動或你儲存設定時重新整理的快照，而 `ocx claude` 則一律即時解析。
 
+## Claude Desktop 模式：閘道（預設）與第一方
+
+在儀表板的 **Claude → Desktop → 連線模式**，或透過
+`ocx claude desktop apply --first-party|--gateway` 選擇互斥的模式。
+
+### 閘道（預設）
+
+新安裝預設套用閘道設定檔：包含聊天分頁在內的整個應用程式都使用 OpenCodex。
+僅限 claude.ai 的功能無法使用。舊版 `--static`、`--hybrid` 和 `--discovery-only`
+選項也會選擇閘道。
+
+### 第一方（自行選擇）
+
+:::caution[帳號風險]
+第一方模式會讓你的 Claude 訂閱流量經過本機攔截代理。
+Anthropic 可能認為這違反其條款並停用你的帳號。預設模式是閘道；
+只有接受這項風險時才選擇第一方模式。
+:::
+
+Desktop 維持 claude.ai 登入，聊天、連接器和遠端控制仍可使用。OpenCodex 只在
+`~/.claude/settings.json`（支援 `CLAUDE_CONFIG_DIR`）的 `env` 中寫入 `HTTPS_PROXY`
+與 `NODE_EXTRA_CA_CERTS`。Code 分頁啟動的 Claude Code、子代理及獨立的 `claude` CLI
+經過本機代理；其他 `api.anthropic.com` 路徑會轉送給 Anthropic。CA 不會安裝到作業系統
+信任儲存區，只有讀取 `NODE_EXTRA_CA_CERTS` 的 Node 程序會信任它。
+
+模式儲存在 `claudeCode.desktopMode`。先前明確套用第一方模式或在此版本之前套用的安裝
+會保留第一方模式；現有閘道安裝也維持不變。沒有明確設定時，依序檢查 OpenCodex 擁有的
+已選閘道項目、儲存的閘道指紋、`settings.json` 中屬於 OpenCodex 的第一方設定；
+都沒有時採用閘道。目錄同步和模型清單更新絕不會在已解析為第一方模式的安裝上
+寫入閘道設定檔。若 `claudeCode.intercept.enabled: false`，現有第一方安裝的套用操作
+會以 `intercept_disabled` 拒絕，新安裝則套用閘道。不會覆寫其他代理的設定。
+切換模式後請完全結束並重新開啟 Desktop。
+
 ## Claude Desktop 設定檔
+
+只有閘道模式會將以下設定檔寫入 Desktop。
 
 Claude Desktop 使用與 Claude Code 分開的設定檔。在儀表板開啟 **Claude → Desktop**，可把每條
 可用路由放到四個系列之一：Opus、Fable、Sonnet 或 Haiku。新設定檔中所有路由一開始都在 Opus。
@@ -125,7 +160,8 @@ ocx claude desktop export <path|->
 ocx claude desktop import <path> [--apply]
 ```
 
-`ocx claude desktop` 與 `apply` 都會把目前設定檔寫入 Claude Desktop。`show` 提供可讀摘要；加上
+`ocx claude desktop` 與 `apply` 會套用選定模式：第一方寫入 Claude Code 代理環境變數，
+閘道則寫入 Desktop 設定檔。`show` 提供可讀摘要；加上
 `--json` 方便腳本使用。`export -` 會把帶版本的 JSON 寫到標準輸出。Import 會在儲存前驗證完整
 檔案，因此無效檔案不會改動目前設定檔。加上 `--apply` 可在匯入有效設定檔後立即寫入 Desktop。
 `none` 僅適用於空系列；每個非空系列都必須保留一個預設。
