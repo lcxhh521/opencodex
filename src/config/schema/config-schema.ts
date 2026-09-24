@@ -285,9 +285,12 @@ export const configSchema = z.object({
       if (!intercept || typeof intercept !== "object" || Array.isArray(intercept)) {
         ctx.addIssue({ code: "custom", path: ["claudeCode", "intercept"], message: "intercept must be an object" });
       } else {
-        const { enabled, port, modelMap } = intercept as { enabled?: unknown; port?: unknown; modelMap?: unknown };
+        const { enabled, port, picker, modelMap } = intercept as { enabled?: unknown; port?: unknown; picker?: unknown; modelMap?: unknown };
         if (enabled !== undefined && typeof enabled !== "boolean") {
           ctx.addIssue({ code: "custom", path: ["claudeCode", "intercept", "enabled"], message: "intercept.enabled must be a boolean" });
+        }
+        if (picker !== undefined && typeof picker !== "boolean") {
+          ctx.addIssue({ code: "custom", path: ["claudeCode", "intercept", "picker"], message: "intercept.picker must be a boolean" });
         }
         if (port !== undefined && (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535)) {
           ctx.addIssue({ code: "custom", path: ["claudeCode", "intercept", "port"], message: "intercept.port must be an integer between 1 and 65535" });

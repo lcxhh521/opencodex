@@ -6,7 +6,8 @@ import { BlockList, createServer, connect, isIP, type Server, type Socket } from
  * Claude Code honours `HTTPS_PROXY` and opens `CONNECT <host>:443` for every upstream. This
  * proxy splices tunnels for the intercepted hosts onto the local TLS listener (which holds a
  * leaf certificate for them) and blindly relays every other tunnel to its real destination,
- * so telemetry, OAuth refresh and claude.ai traffic stay native and opaque to opencodex.
+ * so telemetry and OAuth refresh stay native and opaque to opencodex. Picker mode may
+ * terminate only claude.ai tunnels, selected independently for each connection.
  *
  * Only CONNECT is served. Plain proxied HTTP requests are refused: Claude Code never sends
  * them, and answering them would turn this socket into a generic forward proxy.
@@ -15,6 +16,7 @@ import { BlockList, createServer, connect, isIP, type Server, type Socket } from
 export const CLAUDE_INTERCEPT_HOSTS = ["api.anthropic.com"] as const;
 
 const MAX_HEAD_BYTES = 8 * 1024;
+const MAX_PENDING_BYTES = 16 * 1024 * 1024;
 const HEAD_TIMEOUT_MS = 10_000;
 const UPSTREAM_CONNECT_TIMEOUT_MS = 15_000;
 
@@ -23,9 +25,16 @@ export interface ConnectProxyOptions {
   interceptPort: number;
   /** Hostnames (lowercase) whose 443 tunnels are spliced onto `interceptPort`. */
   interceptHosts?: readonly string[];
+  /** Per-connection override, consulted before interceptHosts; null keeps the default. */
+  selectTunnel?: (host: string, port: number) => TunnelDecision | null | Promise<TunnelDecision | null>;
   /** Test seam: dial the real destination for a blind tunnel. */
   dialUpstream?: (host: string, port: number) => Socket;
 }
+
+export type TunnelDecision = { kind: "intercept"; port: number } | { kind: "blind" };
+
+type ResolvedConnectProxyOptions = Required<Pick<ConnectProxyOptions, "interceptPort" | "interceptHosts" | "dialUpstream">>
+  & Pick<ConnectProxyOptions, "selectTunnel">;
 
 export interface ConnectProxyHandle {
   port: number;
@@ -90,7 +99,7 @@ function splice(client: Socket, upstream: Socket, pending: Uint8Array): void {
   upstream.pipe(client);
 }
 
-function handleConnection(socket: Socket, options: Required<Pick<ConnectProxyOptions, "interceptPort" | "interceptHosts" | "dialUpstream">>): void {
+function handleConnection(socket: Socket, options: ResolvedConnectProxyOptions): void {
   let head: Buffer = Buffer.alloc(0);
   socket.on("error", () => socket.destroy());
   socket.setTimeout(HEAD_TIMEOUT_MS, () => respond(socket, 408, "Request Timeout"));
@@ -109,7 +118,7 @@ function handleConnection(socket: Socket, options: Required<Pick<ConnectProxyOpt
     socket.pause();
     const target = parseConnectRequestLine(head.subarray(0, end).toString("latin1"));
     // Bytes after the head belong to the tunnel (a client may pipeline its TLS ClientHello).
-    const pending = head.subarray(end + 4);
+    let pending = head.subarray(end + 4);
     if (!target) {
       respond(socket, 405, "Method Not Allowed");
       return;
@@ -118,31 +127,71 @@ function handleConnection(socket: Socket, options: Required<Pick<ConnectProxyOpt
       respond(socket, 403, "Forbidden");
       return;
     }
-    const intercept = target.port === 443 && options.interceptHosts.includes(target.host);
-    const upstream = intercept
-      ? connect({ host: "127.0.0.1", port: options.interceptPort })
-      : options.dialUpstream(target.host, target.port);
-    let established = false;
-    const connectTimer = setTimeout(() => {
-      if (!established) {
-        upstream.destroy();
-        respond(socket, 504, "Gateway Timeout");
+    const dialFor = (selected: TunnelDecision | null): void => {
+      if (socket.destroyed) return;
+      const choice = selected ?? (target.port === 443 && options.interceptHosts.includes(target.host)
+        ? { kind: "intercept" as const, port: options.interceptPort }
+        : { kind: "blind" as const });
+      const upstream = choice.kind === "intercept"
+        ? connect({ host: "127.0.0.1", port: choice.port })
+        : options.dialUpstream(target.host, target.port);
+      let established = false;
+      const connectTimer = setTimeout(() => {
+        if (!established) {
+          upstream.destroy();
+          respond(socket, 504, "Gateway Timeout");
+        }
+      }, UPSTREAM_CONNECT_TIMEOUT_MS);
+      upstream.once("error", () => {
+        clearTimeout(connectTimer);
+        if (!established) respond(socket, 502, "Bad Gateway");
+      });
+      upstream.once("connect", () => {
+        established = true;
+        clearTimeout(connectTimer);
+        if (socket.destroyed) {
+          upstream.destroy();
+          return;
+        }
+        socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        splice(socket, upstream, pending);
+        socket.resume();
+      });
+    };
+    if (!options.selectTunnel) {
+      dialFor(null);
+      return;
+    }
+    let decision: ReturnType<NonNullable<ConnectProxyOptions["selectTunnel"]>>;
+    try {
+      decision = options.selectTunnel(target.host, target.port);
+    } catch {
+      dialFor({ kind: "blind" });
+      return;
+    }
+    if (!decision || typeof (decision as Promise<TunnelDecision | null>).then !== "function") {
+      dialFor(decision as TunnelDecision | null);
+      return;
+    }
+    // A paused socket does not notice a peer FIN until its readable side is drained.
+    // Hold later tunnel bytes here so a departing client cannot trigger a stale dial.
+    const onPendingReadable = () => {
+      let chunk: Buffer | null;
+      while ((chunk = socket.read() as Buffer | null) !== null) {
+        if (pending.length + chunk.length > MAX_PENDING_BYTES) {
+          socket.destroy();
+          return;
+        }
+        pending = Buffer.concat([pending, chunk]);
       }
-    }, UPSTREAM_CONNECT_TIMEOUT_MS);
-    upstream.once("error", () => {
-      clearTimeout(connectTimer);
-      if (!established) respond(socket, 502, "Bad Gateway");
-    });
-    upstream.once("connect", () => {
-      established = true;
-      clearTimeout(connectTimer);
-      if (socket.destroyed) {
-        upstream.destroy();
-        return;
-      }
-      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-      splice(socket, upstream, pending);
-      socket.resume();
+    };
+    const onPendingEnd = () => socket.destroy();
+    socket.on("readable", onPendingReadable);
+    socket.once("end", onPendingEnd);
+    void Promise.resolve(decision).catch(() => ({ kind: "blind" as const })).then(choice => {
+      socket.off("readable", onPendingReadable);
+      socket.off("end", onPendingEnd);
+      dialFor(choice);
     });
   };
   socket.on("data", onData);
@@ -150,9 +199,10 @@ function handleConnection(socket: Socket, options: Required<Pick<ConnectProxyOpt
 
 /** Bind the CONNECT proxy on 127.0.0.1. Rejects when the port is unavailable. */
 export function startConnectProxy(port: number, options: ConnectProxyOptions): Promise<ConnectProxyHandle> {
-  const resolved = {
+  const resolved: ResolvedConnectProxyOptions = {
     interceptPort: options.interceptPort,
     interceptHosts: options.interceptHosts ?? CLAUDE_INTERCEPT_HOSTS,
+    selectTunnel: options.selectTunnel,
     dialUpstream: options.dialUpstream ?? ((host: string, targetPort: number) => connect({ host, port: targetPort })),
   };
   return new Promise((resolve, reject) => {

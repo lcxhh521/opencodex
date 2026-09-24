@@ -148,7 +148,13 @@ export interface OcxClaudeCodeConfig {
    * the Desktop route vocabulary (`provider/model`, or `native/<slug>`). Bindings apply only to
    * requests that arrive through the intercept pair, overlaid on the global `modelMap`.
    */
-  intercept?: { enabled?: boolean; port?: number; modelMap?: Record<string, string> };
+  intercept?: {
+    enabled?: boolean;
+    port?: number;
+    /** First-party Desktop Code-tab picker injection; unset enables it when eligible. */
+    picker?: boolean;
+    modelMap?: Record<string, string>;
+  };
   /**
    * Bundled-skill content elision for ROUTED (non-Anthropic) models (devlog 260712
    * 060): Skill-tool results whose skill name matches an entry here are replaced
