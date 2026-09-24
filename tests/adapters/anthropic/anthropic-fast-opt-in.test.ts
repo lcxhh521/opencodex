@@ -146,6 +146,18 @@ describe("Anthropic Fast switch over the management API", () => {
       expect(loadConfig().providers["anthropic-apikey"]?.fastEnabled).toBe(true);
       expect((await summary("anthropic-apikey"))?.fastOptIn).toEqual({ enabled: true });
 
+      // A full provider save from the edit form omits the PATCH-owned switch and keeps it.
+      const overwrite = await fetch(new URL("/api/providers", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "anthropic-apikey",
+          provider: { adapter: "anthropic", baseUrl: "https://api.anthropic.com", authMode: "key", note: "edited" },
+        }),
+      });
+      expect(overwrite.status).toBe(200);
+      expect(loadConfig().providers["anthropic-apikey"]?.fastEnabled).toBe(true);
+
       expect((await patch({ fastEnabled: null })).status).toBe(200);
       expect(loadConfig().providers["anthropic-apikey"]).not.toHaveProperty("fastEnabled");
       expect((await summary("anthropic-apikey"))?.fastOptIn).toEqual({ enabled: false });
