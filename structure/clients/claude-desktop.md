@@ -115,6 +115,28 @@ settled state is cached for 30 seconds. Each registry query is bounded to two se
 timeouts and unreadable results report unknown policy state without blocking the server
 event loop. Injected probes may return a state or a promise, so isolated callers can exercise the same asynchronous boundary.
 
+### Picker mode: the Desktop egress proxy
+
+When the lifecycle passes `loadPickerRoutes` (the server always does), `startClaudeIntercept` also
+wires Claude Desktop picker mode: a second loopback CONNECT proxy on the intercept proxy port + 1
+(`claudePickerProxyPort`), used only as Desktop's egress proxy, whose per-connection
+`selectTunnel` comes from the picker runtime (`src/claude/intercept/picker-runtime.ts`). The two
+proxies never share clients: Claude Code trusts only the intercept CA and Desktop trusts only the
+login keychain. On the egress proxy every target is a blind tunnel except `claude.ai:443`, which is
+terminated by a `node:https` HTTP/1.1 relay (`picker-listener.ts`) only while the runtime's cached
+decision is armed: macOS, persisted resolved Desktop mode first-party, Desktop intent on,
+`claudeCode.intercept.picker !== false`, no disarm latch, listener up, and the current picker CA
+trusted in the login keychain (`picker-trust.ts`). The picker CA (`picker-ca.ts`, under
+`<OPENCODEX_HOME>/claude-picker/`, 0600 key) carries critical name constraints permitting only
+`claude.ai` and is regenerated on reload when they are missing. The relay verifies the upstream
+certificate, streams every body and upgrade unchanged, and rewrites only the bootstrap response's
+Code picker surface (`picker-bootstrap.ts`), failing open to the original bytes; the model list
+comes from a persisted snapshot (`picker-models.ts`), so a bootstrap never waits on discovery. A
+CONNECT to claude.ai that arrives before the first refresh waits at most 3 s, then goes blind. A
+picker proxy bind failure only disables picker mode; a picker construction or start failure closes
+every socket the start had bound before rethrowing. Nothing is logged but method, bootstrap or
+other, and status.
+
 ## Connected Claude Desktop profiles
 
 The connection's local Codex readiness check follows the [selected-runtime probe contract](../runtime.md#remote-hub-hardening-ownership); general status hands its resolved command to this check instead of probing the version twice.
