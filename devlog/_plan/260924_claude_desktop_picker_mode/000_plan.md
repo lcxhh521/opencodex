@@ -147,3 +147,24 @@ The trust gate on claude.ai termination is a safety guard, not enforcement.
   folded; architect recheck added the bounded first-CONNECT wait and the persisted route snapshot.
 - Round 8: **GO-WITH-FIXES (blockers=1)** — field-chain rows still named pre-D11 functions →
   folded. Main's judgment: near-pass; no High/Critical blocker remains.
+
+## wp1 close (D)
+
+Roadmap locked at D1–D11; the next cycle is wp2 (gateway default and the first-party risk warning).
+
+- What changed: the unit's plan, research and four diff-level decade docs; the threat model stays in
+  scratch.
+- Hypotheses that died: "no local change can add a row to the first-party picker" (true only for
+  Desktop builds older than 1.44121.1, which lack `egressProxyUrl` in 1P); "Desktop filters
+  non-Anthropic model ids" (only the custom-3P provider does; 1P returns `{ok:true}`); "Cloudflare
+  in front of claude.ai rejects a re-originated TLS client" — a Bun `node:https` GET of
+  `/edge-api/bootstrap` and `/api/bootstrap` returned 200 JSON (brotli) with no `cf-mitigated`
+  header (`/private/tmp/ocx-picker-spike/cf.ts`, 2026-09-24).
+- What did not improve: the audit needed eight rounds and two returns to P; every late finding was
+  about ordering between two mutation sites, which D11 removed. The activation surface is still the
+  largest part of the change.
+- Evidence that would show the direction is wrong: a logged-in bootstrap without a `code` surface
+  in `model_selector_config` (the logged-out bootstrap has no `model_selector_config` at all, so
+  this is only checkable in wp5); Desktop's Chromium refusing a login-keychain-trusted root with
+  name constraints; the launchd service never able to raise the keychain dialog (then
+  `trust_pending` + `picker trust` is the only path, which the plan already supports).
