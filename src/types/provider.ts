@@ -377,6 +377,13 @@ export interface OcxProviderConfig {
    * An explicit config value always wins over the registry default.
    */
   supportsServiceTier?: boolean;
+  /**
+   * Operator switch for the provider's Fast lane. `false` turns Fast off (no Fast toggle, no
+   * `--fast` row, no fast wire field) and overrides `supportsServiceTier`; `true` enables a lane the
+   * registry marks opt-in (Anthropic fast mode, which draws usage credits at 2x price). Absent keeps
+   * the registry default: off for opt-in entries, unchanged elsewhere.
+   */
+  fastEnabled?: boolean;
   /** Exact upstream model ids that override the provider-level service-tier capability. */
   modelSupportsServiceTier?: Record<string, boolean>;
   /**

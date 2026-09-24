@@ -2957,6 +2957,7 @@ export const ru: Record<TKey, string> = {
   "dash.codexClientCompaction": "Использовать сжатие на стороне клиента",
   "dash.codexClientCompactionHint": "По умолчанию выключено; только для аутентифицированной loopback-маршрутизации. Будущие сжатия сохраняют переносимые текстовые сводки, а маршрутизация OpenCodeX и V2 остаётся активной; настроенный провайдер может обрабатывать сводки и расходовать квоту. Существующую историю ocx1 всё равно нужно восстановить. После изменения перезапустите Codex.",
   "models.newPolicyGlobal": "Добавлять новые модели выключенными", "models.newPolicyProvider": "Политика новых моделей",
+  "models.fastProvider": "Режим Fast", "models.fastProviderHint": "Расходует кредиты использования по двойной цене", "models.fastEnabled": "Режим Fast включён", "models.fastDisabled": "Режим Fast выключен", "models.fastSaveFailed": "Не удалось сохранить режим Fast",
   "models.newPolicy_inherit": "Наследовать", "models.newPolicy_off": "Выкл.", "models.newPolicy_on": "Вкл.", "models.newBadge": "НОВАЯ", "models.newCount": "Новых: {count}, выкл.",
   "models.aliases": "Псевдонимы",
   "models.aliasesTable": "Таблица псевдонимов",

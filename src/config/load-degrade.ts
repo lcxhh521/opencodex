@@ -16,6 +16,7 @@ import { isValidProviderName } from "./provider-name";
 import { MODEL_ALIAS_PATTERN } from "../providers/default-aliases";
 import { MODEL_DISCOVERY_MAX_MODELS } from "../providers/model-discovery-limits";
 import { getProviderRegistryEntry, providerMatchesRegistryTransport, registryModelServiceTierCapabilityApplies } from "../providers/registry";
+import { providerFastSwitchOff } from "../providers/fast-opt-in";
 import { isCodexReasoningEffort } from "../reasoning-effort";
 import { refreshConfigDerivedRegistries } from "./derived-registries";
 import { type OcxClaudeCodeConfig, type OcxConfig } from "../types";
@@ -835,6 +836,7 @@ export function inheritedFastWireConflictProviderNames(
   const conflicts: string[] = [];
   for (const [name, provider] of Object.entries(config.providers)) {
     if (provider.fastWire !== null || provider.supportsServiceTier === false) continue;
+    if (providerFastSwitchOff(name, provider)) continue;
     const registry = providerMatchesRegistryTransport(name, provider)
       ? getProviderRegistryEntry(name)
       : undefined;

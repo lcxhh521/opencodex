@@ -2956,6 +2956,7 @@ export const ko: Record<TKey, string> = {
   "dash.codexClientCompaction": "클라이언트 측 컴팩션 사용",
   "dash.codexClientCompactionHint": "기본값은 꺼짐이며 인증된 루프백 라우팅에만 적용됩니다. 향후 컴팩션은 OpenCodeX 및 V2 제공자 라우팅을 유지하면서 이식 가능한 평문 요약을 저장합니다. 설정된 제공자가 요약을 처리하고 할당량을 사용할 수 있습니다. 기록은 건드리지 않으며, 기존 스레드는 OpenCodeX가 관리하는 openai_base_url override를 통해 프록시 경로를 유지합니다. 그 줄을 직접 설정해 두셨다면 그대로 보존하므로 해당 스레드는 설정하신 목적지를 따릅니다. 기존 ocx1 기록은 그대로 복구할 수 있고, 네이티브 Codex에서 해당 스레드를 재개하기 전에만 별도로 복구하세요. 변경 후 Codex를 다시 시작하세요.",
   "models.newPolicyGlobal": "새 모델을 비활성화 상태로 추가", "models.newPolicyProvider": "새 모델 정책",
+  "models.fastProvider": "Fast 모드", "models.fastProviderHint": "사용 크레딧을 2배 가격으로 소모합니다", "models.fastEnabled": "Fast 모드를 켰습니다", "models.fastDisabled": "Fast 모드를 껐습니다", "models.fastSaveFailed": "Fast 모드를 저장하지 못했습니다",
   "models.newPolicy_inherit": "상속", "models.newPolicy_off": "끔", "models.newPolicy_on": "켬", "models.newBadge": "신규", "models.newCount": "신규 {count}개, 꺼짐",
   "models.aliases": "별칭",
   "models.aliasesTable": "별칭 표",

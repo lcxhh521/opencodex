@@ -3123,6 +3123,7 @@ export const vi: Record<TKey, string> = {
   "remote.event.error": "Lỗi",
   "models.newPolicyGlobal": "Model mới mặc định bị tắt",
   "models.newPolicyProvider": "Chính sách model mới",
+  "models.fastProvider": "Chế độ Fast", "models.fastProviderHint": "Dùng tín dụng sử dụng với giá gấp 2", "models.fastEnabled": "Đã bật chế độ Fast", "models.fastDisabled": "Đã tắt chế độ Fast", "models.fastSaveFailed": "Không thể lưu chế độ Fast",
   "models.newPolicy_inherit": "Kế thừa",
   "models.newPolicy_off": "Tắt",
   "models.newPolicy_on": "Bật",

@@ -3008,6 +3008,7 @@ export const en = {
   "lab.layer.task_effectiveness": "Task effectiveness",
 
   "models.newPolicyGlobal": "New models start disabled", "models.newPolicyProvider": "New model policy",
+  "models.fastProvider": "Fast mode", "models.fastProviderHint": "Uses usage credits at 2x price", "models.fastEnabled": "Fast mode on", "models.fastDisabled": "Fast mode off", "models.fastSaveFailed": "Could not save Fast mode",
   "models.newPolicy_inherit": "Inherit", "models.newPolicy_off": "Off", "models.newPolicy_on": "On",
   "models.newBadge": "NEW", "models.newCount": "{count} new, off",
   "models.aliases": "Aliases",

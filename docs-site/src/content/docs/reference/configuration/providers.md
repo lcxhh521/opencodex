@@ -205,6 +205,7 @@ Providers can expose a built-in shorthand, such as `agy` for `google-antigravity
 | `allowEncryptedV2AgentTasks?` | `boolean` | Disabled by default. Trust a direct key-auth `openai-responses` provider to consume or relay opaque encrypted V2 sub-agent tasks unchanged. Eligible routes skip `agentTaskRecovery`; all other routes keep the existing recovery or fail-closed behavior. OpenCodex does not decrypt, translate, or recover tasks sent through this opt-in. |
 | `upstreamWebsocket?` | `boolean` | Opt-in upstream Responses WebSocket transport for `openai-responses` requests (default false). Honored only for the first-party `https://api.openai.com/v1` upstream; custom-provider endpoints always use bounded HTTP/SSE because Bun cannot enforce an inbound WebSocket message limit before allocating the complete message. The canonical ChatGPT transport is unaffected. Plain HTTP remains on SSE; non-Responses paths and `openai-chat` requests stay on HTTP. |
 | `supportsServiceTier?` | `boolean` | Tri-state canonical Fast capability fallback. `true` publishes Fast in the catalog, satisfies service-tier routing requirements, contributes a supported fingerprint, and lets fast mode inject the provider's canonical wire value on a compatible final adapter. `false` strips the field and never injects, and exact model declarations cannot reopen it. Absent leaves the provider unclassified: fast mode does not inject or normalize a canonical caller value, and caller values obey the final wire's forwarding permission (`chatServiceTier` on Chat; passthrough on Responses). The registry classifies canonical OpenAI (`true`), DeepSeek, and Volcengine Ark (`false`); set it explicitly only for custom gateways that genuinely support tiers. |
+| `fastEnabled?` | `boolean` | Operator switch for the provider's Fast lane. `false` turns Fast off (no Fast toggle, no `--fast` row, no fast wire field) and overrides `supportsServiceTier`. `true` enables a lane the registry marks opt-in. Absent keeps the registry default: off for `anthropic` and `anthropic-apikey`, whose fast mode spends usage credits at 2x price, and unchanged for every other provider. The dashboard Models page shows an Off/On row for opt-in providers. |
 | `modelSupportsServiceTier?` | `Record<string, boolean>` | Exact upstream model capability overrides. Exact `true` enables canonical Fast for that model; exact `false` narrows provider defaults. An explicit provider-level `supportsServiceTier: false` remains fail-closed and cannot be reopened. Exact `true` does not authorize foreign caller-tier forwarding on Chat. Undeclared models fall back to provider-wide behavior. Management `PATCH /api/providers` merges entries and accepts `null` to clear one. |
 | `chatServiceTier?` | `boolean` | Provider-wide Chat-wire opt-in for forwarding caller `service_tier` values. On a classified route it governs foreign values such as `flex`, not proxy-owned canonical Fast after capability validation; on an unclassified route it governs every caller value because no Fast capability has been validated. Exact model capability does not authorize foreign forwarding. Responses routes retain their capability-based caller forwarding behavior. |
 | `promptCacheKey?` | `boolean` | Provider-wide `openai-chat` opt-in for forwarding a `prompt_cache_key`. The adapter forwards the key it is given and never invents one, but the key is not always the caller's: Claude Messages translation derives one from `metadata.user_id`, or from a model/system/tools cohort when no metadata is sent. Default off. Enable only when the upstream documents support, because strict gateways may reject the unknown field with HTTP 400. |
@@ -562,7 +563,17 @@ Explicit capability `false` and Responses caller-tier forwarding retain their ex
 
 The built-in `anthropic` (stored Claude OAuth) and `anthropic-apikey` entries advertise Fast only
 for `claude-opus-5-5`, `claude-opus-5`, and `claude-opus-4-8`. Other Claude models are unclassified;
-the entries have no provider-wide Fast default. An eligible `--fast` or Fast selector sends
+the entries have no provider-wide Fast default.
+
+Anthropic Fast is **off by default** because it spends usage credits (subscription) or fast-mode
+access (API) at 2x price. Turn it on per provider with the Off/On row on the dashboard Models page,
+or set `providers.anthropic.fastEnabled: true` (or the same field on `anthropic-apikey`). While it is
+off, those models publish no Fast toggle or `--fast` row and the proxy never sends `speed`, even with
+a global `fastMode: true`. Claude Code native passthrough still forwards a `speed` field the caller
+sends itself (for example Claude Code `/fast`), because that request never reaches the proxy's Fast
+policy. Cursor Fast and other providers are unaffected.
+
+When enabled, an eligible `--fast` or Fast selector sends
 `speed: "fast"` and adds `fast-mode-2026-02-01` to the existing `anthropic-beta` header. The proxy
 preserves OAuth beta values and sends one deduplicated header. `fastMode: false` disables this
 injection.

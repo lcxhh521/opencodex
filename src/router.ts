@@ -26,6 +26,7 @@ import {
 import { registryModelIdKeys } from "./providers/registry/model-ids";
 import { applyDirectReasoningEffortContracts, hasLegacyClinePassReasoningEfforts } from "./providers/derive";
 import { cloneFastWire } from "./providers/fastwire";
+import { fastSwitchOff } from "./providers/fast-opt-in";
 import {
   providerMatchesRegistryTransportWithStaticGuards,
   providerSupportsLiveModelDiscovery,
@@ -393,6 +394,9 @@ export function routedProviderConfig(providerName: string, provider: OcxProvider
     ...(provider.supportsServiceTier === undefined && registryEntry.supportsServiceTier !== undefined
       ? { supportsServiceTier: registryEntry.supportsServiceTier }
       : {}),
+    // An off Fast switch is a provider-wide denial on the runtime provider, so a Fast policy
+    // resolved without the provider name still refuses (providerFastSwitchOff).
+    ...(fastSwitchOff(provider, registryEntry) ? { supportsServiceTier: false } : {}),
     // Registry-only web-search capability: without this backfill a saved provider row reaches
     // the Responses adapter with the flag `undefined`, so the capability gate added in #2262
     // reads "unclassified" and forwards Codex's OpenAI-only `web_search` config fields. xAI

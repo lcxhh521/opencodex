@@ -450,6 +450,13 @@ function applyProviderPatchFields(
     }
     touched = true;
   }
+  if (Object.hasOwn(rawBody, "fastEnabled")) {
+    const value = rawBody.fastEnabled;
+    if (value === null) delete next.fastEnabled;
+    else if (typeof value === "boolean") next.fastEnabled = value;
+    else return { error: "fastEnabled must be a boolean or null" };
+    touched = true;
+  }
   if (Object.hasOwn(rawBody, "xaiResponsesOptIn")) {
     if (name !== "xai") return { error: "xaiResponsesOptIn is valid only for provider xai" };
     if (typeof rawBody.xaiResponsesOptIn !== "boolean") {
@@ -942,6 +949,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       disabled: p.disabled === true,
       codexAccountMode: providerCodexAccountMode(name, p),
       ...(name === "xai" ? { xaiResponsesOptInState: xaiResponsesOptInState(p) } : {}),
+      // Only opt-in Fast lanes (Anthropic fast mode bills usage credits) get a dashboard switch.
+      ...(getProviderRegistryEntry(name)?.fastOptIn === true ? { fastOptIn: { enabled: p.fastEnabled === true } } : {}),
       discovery: p.liveModels === false ? undefined : getProviderDiscoveryStatus(name),
       ...(name === "openai" && isCanonicalOpenAiForwardProvider(p)
         ? { entitlement: getCodexModelEntitlementStatus(config) }

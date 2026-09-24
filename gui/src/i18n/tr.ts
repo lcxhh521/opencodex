@@ -2957,6 +2957,7 @@ export const tr: Record<TKey, string> = {
   "dash.codexClientCompaction": "İstemci tarafı sıkıştırmayı kullan",
   "dash.codexClientCompactionHint": "Varsayılan olarak kapalıdır ve yalnızca kimliği doğrulanmış geri döngü yönlendirmesinde geçerlidir. Gelecekteki sıkıştırmalar, OpenCodeX ve V2 sağlayıcı yönlendirmesi etkin kalırken taşınabilir düz metin özetleri kaydeder; yapılandırılmış sağlayıcı bunları işleyip kotasını tüketebilir. Mevcut ocx1 geçmişi yine ayrıca kurtarılmalıdır. Değişiklikten sonra Codex’i yeniden başlatın.",
   "models.newPolicyGlobal": "Yeni modeller devre dışı başlasın", "models.newPolicyProvider": "Yeni model ilkesi",
+  "models.fastProvider": "Fast modu", "models.fastProviderHint": "Kullanım kredilerini 2 kat fiyatla harcar", "models.fastEnabled": "Fast modu açık", "models.fastDisabled": "Fast modu kapalı", "models.fastSaveFailed": "Fast modu kaydedilemedi",
   "models.newPolicy_inherit": "Devral", "models.newPolicy_off": "Kapalı", "models.newPolicy_on": "Açık", "models.newBadge": "YENİ", "models.newCount": "{count} yeni, kapalı",
   "models.aliases": "Takma adlar",
   "models.aliasesTable": "Takma ad tablosu",

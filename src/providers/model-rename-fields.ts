@@ -25,6 +25,7 @@ export const PROVIDER_MODEL_RENAME_ROLES = {
   requiresPairedResponsesToolResults: "none",
   annotateEmptyToolOutputs: "none",
   supportsServiceTier: "none",
+  fastEnabled: "none",
   modelSupportsServiceTier: "record",
   preserveResponsesReasoningContent: "none",
   modelReasoningEffortsAuthoritative: "none",

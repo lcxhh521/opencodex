@@ -2,6 +2,7 @@ import type { ModelCapabilities, OcxProviderConfig } from "../types";
 import { MODEL_ADAPTER_OVERRIDE_ALLOWED, pinnedWireAdapter } from "../types";
 import { isCanonicalOpenAiForwardProvider } from "./openai-tiers";
 import { resolveProviderAuthTransport } from "./fastwire";
+import { fastSwitchOff } from "./fast-opt-in";
 import { registryEntrySupportsLiveModelDiscovery } from "./static-model-discovery";
 import type { InboundWire, ProviderRegistryEntry, ResponsesTerminalRepairPolicy } from "./registry/types";
 import {
@@ -187,7 +188,10 @@ export function resolveModelPolicy(input: ResolveModelPolicyInput): ResolvedMode
     legacyClinePassLadder || provider.reasoningEfforts === undefined ? entry?.reasoningEfforts ? "registry" : "unknown" : "operator");
   put("chatServiceTier", provider.chatServiceTier ?? keyAuthDefaults?.chatServiceTier ?? entry?.chatServiceTier,
     provider.chatServiceTier !== undefined ? "operator" : keyAuthDefaults?.chatServiceTier !== undefined ? "registry" : entry?.chatServiceTier !== undefined ? "registry" : "unknown");
-  put("supportsServiceTier", provider.supportsServiceTier ?? keyAuthDefaults?.supportsServiceTier ?? entry?.supportsServiceTier,
+  // The Fast switch overrides every capability source; see providerFastSwitchOff.
+  const fastOff = fastSwitchOff(provider, input.registryEntry);
+  if (fastOff) put("supportsServiceTier", false, provider.fastEnabled === false ? "operator" : "registry");
+  else put("supportsServiceTier", provider.supportsServiceTier ?? keyAuthDefaults?.supportsServiceTier ?? entry?.supportsServiceTier,
     provider.supportsServiceTier !== undefined ? "operator" : keyAuthDefaults?.supportsServiceTier !== undefined ? "registry" : entry?.supportsServiceTier !== undefined ? "registry" : "unknown");
   if (entry && !registryEntrySupportsLiveModelDiscovery(entry)) put("liveModels", false, "registry");
   putMergedMap("modelDisplayNames", entry?.modelDisplayNames, provider.modelDisplayNames);
@@ -325,7 +329,9 @@ export function resolveModelPolicy(input: ResolveModelPolicyInput): ResolvedMode
   const modelSupportsReasoningSummaries = modelValue(providerPolicy.modelSupportsReasoningSummaries)
     ?? (modelValue(providerPolicy.modelReasoningSummaryDelivery) !== undefined ? true : undefined);
   const modelSupportsVerbosity = modelValue(providerPolicy.modelSupportsVerbosity) ?? providerPolicy.supportsVerbosity;
-  const modelSupportsServiceTier = modelValue(providerPolicy.modelSupportsServiceTier) ?? providerPolicy.supportsServiceTier;
+  const modelSupportsServiceTier = fastOff
+    ? false
+    : modelValue(providerPolicy.modelSupportsServiceTier) ?? providerPolicy.supportsServiceTier;
   const model: ResolvedPerModelStaticPolicy = {
     adapter,
     ...(modelContextWindow !== undefined ? { contextWindow: modelContextWindow } : {}),
@@ -380,7 +386,7 @@ export function resolveModelPolicy(input: ResolveModelPolicyInput): ResolvedMode
   }
   modelProvenance.supportsVerbosity = modelOrProviderSource(provider.modelSupportsVerbosity, entry?.modelSupportsVerbosity, provider.supportsVerbosity, entry?.supportsVerbosity);
   const exactServiceTierSource = modelSource(provider.modelSupportsServiceTier, registryServiceTierDefaults);
-  modelProvenance.supportsServiceTier = exactServiceTierSource !== "unknown" ? exactServiceTierSource
+  modelProvenance.supportsServiceTier = !fastOff && exactServiceTierSource !== "unknown" ? exactServiceTierSource
     : providerProvenance.supportsServiceTier ?? "unknown";
   modelProvenance.responsesUpstreamStreaming = model.responsesUpstreamStreaming === undefined ? "unknown" : "registry";
   modelProvenance.responsesTerminalRepair = model.responsesTerminalRepair === undefined ? "unknown" : "registry";

@@ -258,6 +258,11 @@ export interface ProviderRegistryEntry {
   /** Provider-specific copy for the Codex catalog's Fast tier. */
   fastTierDescription?: string;
   /**
+   * The Fast lane is billed beyond the plan, so it stays off until the operator sets
+   * `providers.<name>.fastEnabled: true` (see `providerFastSwitchOff`).
+   */
+  fastOptIn?: boolean;
+  /**
    * Registry-only destination guard for `modelSupportsServiceTier`. This scopes vendor evidence
    * without changing provider ownership, routing, authentication, or config validation.
    */

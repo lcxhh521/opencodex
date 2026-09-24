@@ -475,9 +475,11 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     // Claude fast mode on the subscription lane (Claude Code `/fast`): the OAuth route accepts
     // `speed` and gates it on account entitlement (usage credits / org enablement), probed live
     // 2026-09-23 (devlog/_plan/260923_anthropic_fast_speed/020_probe-evidence.md).
+    // Off until the operator opts in: fast mode draws usage credits at 2x price.
     fastWire: ANTHROPIC_FAST_WIRE,
     modelSupportsServiceTier: { ...ANTHROPIC_FAST_MODELS },
     fastTierDescription: ANTHROPIC_FAST_TIER_DESCRIPTION,
+    fastOptIn: true,
   },
   {
     id: "anthropic-apikey",
@@ -500,6 +502,7 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     fastWire: ANTHROPIC_FAST_WIRE,
     modelSupportsServiceTier: { ...ANTHROPIC_FAST_MODELS },
     fastTierDescription: ANTHROPIC_FAST_TIER_DESCRIPTION,
+    fastOptIn: true,
   },
   {
     id: "kimi",

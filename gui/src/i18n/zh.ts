@@ -2955,6 +2955,7 @@ export const zh: Record<TKey, string> = {
   "dash.codexClientCompaction": "使用客户端压缩",
   "dash.codexClientCompactionHint": "默认关闭，仅适用于已认证的 loopback 路由。未来压缩会保存可移植的明文摘要，同时保留 OpenCodeX 与 V2 提供方路由；已配置的提供方可能处理摘要并消耗其额度。已有 ocx1 历史仍需单独恢复。更改后请重启 Codex。",
   "models.newPolicyGlobal": "新模型默认停用", "models.newPolicyProvider": "新模型策略",
+  "models.fastProvider": "Fast 模式", "models.fastProviderHint": "按 2 倍价格消耗用量额度", "models.fastEnabled": "已开启 Fast 模式", "models.fastDisabled": "已关闭 Fast 模式", "models.fastSaveFailed": "无法保存 Fast 模式",
   "models.newPolicy_inherit": "继承", "models.newPolicy_off": "关闭", "models.newPolicy_on": "开启", "models.newBadge": "新增", "models.newCount": "{count} 个新增，已关闭",
   "models.aliases": "别名",
   "models.aliasesTable": "别名表",
