@@ -157,6 +157,25 @@ modèles n'écrivent jamais un profil passerelle sur une installation first-part
 (`intercept_disabled`) ; une nouvelle installation applique la passerelle. Un proxy d'entreprise
 étranger n'est pas écrasé. Quittez complètement Desktop puis rouvrez-le après un changement.
 
+### Mode picker : modèles opencodex dans le sélecteur Code first-party
+
+Le mode picker fait partie du mode first-party. Sur macOS, il est activé par défaut lorsque first-party
+est sélectionné, sauf si `claudeCode.intercept.picker: false` est défini. Il modifie le sélecteur de
+modèles de l'onglet Code de Desktop first-party pour y afficher les modèles opencodex disponibles par
+leur nom. Lors de la première activation, macOS peut demander l'autorisation d'une autorité de certification
+locale dans le trousseau de connexion. Cette autorité est limitée à `claude.ai` et à ses sous-domaines ;
+la demande correspond à cette étape de confiance unique pour cette AC locale.
+
+Lorsque le mode picker est actif, Claude Desktop accède au réseau par OpenCodex. Si OpenCodex s'arrête,
+Desktop reste hors ligne jusqu'à son redémarrage complet ou jusqu'à la désactivation du mode picker.
+Consultez l'état avec `ocx claude desktop picker status`, relancez l'étape de confiance avec
+`ocx claude desktop picker trust`, ou désactivez-le avec `ocx claude desktop picker off`. Le tableau
+de bord propose le même interrupteur dans **Claude → Bureau**. Après la sélection du profil picker,
+quittez complètement puis rouvrez Claude Desktop.
+
+Le mode picker fait partie de first-party : le [risque pour le compte du mode first-party](#first-party-sur-demande)
+s'applique donc aussi à ce mode.
+
 ### Utiliser les modèles opencodex depuis l'onglet Code de Desktop (associations first-party)
 
 En mode first-party, le sélecteur de modèles de l'onglet Code appartient à claude.ai : ses lignes

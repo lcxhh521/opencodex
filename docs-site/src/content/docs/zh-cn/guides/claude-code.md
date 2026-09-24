@@ -124,6 +124,20 @@ OpenCodex 拥有的已选网关条目、保存的网关指纹、`settings.json` 
 应用操作会以 `intercept_disabled` 拒绝，新安装则应用网关。不会覆盖其他代理的设置。
 切换模式后请完全退出并重新打开 Desktop。
 
+### Picker 模式：在第一方 Code 标签页中显示 opencodex 模型
+
+Picker 模式是第一方模式的一部分。在 macOS 上选择第一方时默认开启；设置
+`claudeCode.intercept.picker: false` 后会保持关闭。它会修改第一方 Desktop 的 Code 标签页模型选择器，
+按名称列出可用的 opencodex 模型。首次开启时，macOS 可能会要求你在登录钥匙串中信任本地证书颁发机构。
+该颁发机构限制为 `claude.ai` 及其子域名；这个提示是对该本地 CA 的一次性信任步骤。
+
+Picker 模式开启期间，Claude Desktop 通过 OpenCodex 访问网络。如果 OpenCodex 停止，Desktop 会处于离线状态，
+直到你完全重启 Desktop 或关闭 Picker 模式。使用 `ocx claude desktop picker status` 查看状态，使用
+`ocx claude desktop picker trust` 重复信任步骤，或使用 `ocx claude desktop picker off` 关闭。
+控制台 **Claude → Desktop** 中也有同样的开关。选择 Picker 配置档案后，请完全退出并重新打开 Claude Desktop。
+
+Picker 模式属于第一方模式，因此[第一方账户风险](#第一方主动选择)同样适用。
+
 ## 连接远程 hub 的 Claude Desktop
 
 已连接的机器运行 `ocx claude desktop apply` 或 `ocx claude desktop` 时，会读取 hub 的

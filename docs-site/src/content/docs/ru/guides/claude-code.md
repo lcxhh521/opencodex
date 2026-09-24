@@ -139,6 +139,23 @@ OpenCodex настройки first-party в `settings.json`; при отсутс
 отклоняется с `intercept_disabled`, а новая установка применяет шлюз. Чужие настройки прокси
 не перезаписываются. После переключения полностью закройте и снова откройте Desktop.
 
+### Режим picker: модели opencodex в селекторе Code first-party
+
+Режим picker входит в режим first-party. В macOS он включён по умолчанию при выборе first-party,
+если не задано `claudeCode.intercept.picker: false`. Он изменяет селектор моделей во вкладке Code
+first-party Desktop и показывает доступные модели opencodex по именам. При первом включении macOS может
+попросить доверить локальному центру сертификации в связке ключей для входа. Этот центр ограничен
+`claude.ai` и его поддоменами; запрос появляется один раз для доверия этому локальному центру.
+
+Пока режим picker включён, Claude Desktop выходит в сеть через OpenCodex. Если OpenCodex остановится,
+Desktop будет офлайн, пока вы полностью не перезапустите его или не отключите режим picker.
+Проверьте состояние командой `ocx claude desktop picker status`, повторите доверие командой
+`ocx claude desktop picker trust`, а для отключения используйте `ocx claude desktop picker off`.
+В панели управления есть такой же переключатель в **Claude → Desktop**. После выбора профиля picker
+полностью закройте и снова откройте Claude Desktop.
+
+Режим picker входит в first-party, поэтому к нему также применяется [риск для аккаунта first-party](#first-party-по-выбору).
+
 ## Claude Desktop через удалённый хаб
 
 На подключённой машине `ocx claude desktop apply` или `ocx claude desktop` получает снимок

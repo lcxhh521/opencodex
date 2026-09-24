@@ -155,6 +155,22 @@ OpenCodex 소유의 선택된 게이트웨이 항목, 저장된 게이트웨이 
 거절되고, 새 설치는 게이트웨이를 적용해요. 회사 프록시 같은 외부 설정은 덮어쓰지 않아요.
 모드 전환 후에는 Desktop을 완전히 종료하고 다시 열어 주세요.
 
+### Picker 모드: 1P Code 탭에 opencodex 모델 표시하기
+
+Picker 모드는 1P 모드의 일부예요. macOS에서 1P를 선택하면 기본으로 켜지지만,
+`claudeCode.intercept.picker: false`를 설정하면 꺼져요. 1P Desktop의 Code 탭 모델 선택기를 바꿔서
+사용 가능한 opencodex 모델을 이름으로 보여줘요. 처음 켤 때 macOS 로그인 키체인에서 로컬 인증 기관을
+신뢰하라는 메시지가 표시될 수 있어요. 이 인증 기관은 `claude.ai`와 그 하위 도메인으로 제한되며,
+이 메시지는 이 로컬 CA를 한 번 신뢰하기 위한 절차예요.
+
+Picker 모드가 켜져 있는 동안 Claude Desktop의 네트워크는 OpenCodex를 거쳐요. OpenCodex가 중단되면
+Picker 모드를 끄거나 Desktop을 완전히 다시 시작할 때까지 Desktop은 오프라인이에요.
+`ocx claude desktop picker status`로 상태를 보고, `ocx claude desktop picker trust`로 신뢰 절차를
+다시 실행할 수 있어요. `ocx claude desktop picker off` 또는 대시보드 **Claude → Desktop**의 토글로
+끌 수 있어요. Picker 프로필을 선택한 뒤에는 Claude Desktop을 완전히 종료하고 다시 열어야 해요.
+
+Picker 모드는 1P의 일부이므로 [1P 계정 위험](#1p직접-선택)도 그대로 적용돼요.
+
 ### Code 탭에서 opencodex 모델 쓰기 (1P 바인딩)
 
 1P 모드에서 Code 탭의 모델 선택기는 claude.ai가 채워요. Opus 5.5, Sonnet 5, Haiku 4.5와

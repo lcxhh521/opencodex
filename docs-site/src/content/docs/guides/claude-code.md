@@ -211,6 +211,23 @@ applied. An apply for an existing first-party install is refused when the interc
 new installs apply gateway. On a connected client the proxy runs on the
 hub, so `ocx claude desktop apply` there uses the gateway profile.
 
+### Picker mode: opencodex models in the first-party Code-tab picker
+
+Picker mode is part of first-party mode. On macOS it is on by default when first-party is selected,
+unless `claudeCode.intercept.picker: false` is set. It changes the first-party Desktop Code-tab picker
+so it lists available opencodex models by name. The first time it is enabled, macOS may ask you to
+trust a local certificate authority in the login keychain. That authority is constrained to `claude.ai`
+and its subdomains; the prompt is a one-time trust step for this local CA.
+
+While picker mode is on, Claude Desktop reaches the network through OpenCodex. If OpenCodex stops,
+Desktop is offline until you fully restart it or turn picker mode off. Check the state with
+`ocx claude desktop picker status`; use `ocx claude desktop picker trust` to repeat the trust step,
+or turn it off with `ocx claude desktop picker off`. The dashboard has the same picker toggle under
+**Claude → Desktop**. After the picker profile is selected, fully quit and reopen Claude Desktop.
+
+Picker mode is part of first-party mode, so the [first-party account risk](#first-party-opt-in)
+applies to it as well.
+
 ### Use opencodex models from the Desktop Code tab (first-party bindings)
 
 In first-party mode the Code tab's model picker belongs to claude.ai: its rows (Opus 5.5,

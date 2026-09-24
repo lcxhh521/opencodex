@@ -132,6 +132,23 @@ OpenCodex 所有の選択済みゲートウェイ行、保存済みのゲート�
 `intercept_disabled` で拒否され、新規環境はゲートウェイを適用します。外部の企業プロキシ
 設定は上書きしません。モード変更後は Desktop を完全に終了して開き直してください。
 
+### Picker モード: 1P の Code タブで opencodex モデルを表示する
+
+Picker モードは 1P モードの一部です。macOS で 1P を選ぶとデフォルトで有効になりますが、
+`claudeCode.intercept.picker: false` を設定した場合は無効です。1P の Desktop の Code タブにある
+モデルピッカーを書き換え、利用できる opencodex モデルを名前付きで表示します。初回の有効化時は、
+macOS がログインキーチェーン内のローカル証明書認証局を信頼するよう求めることがあります。この認証局の
+制約は `claude.ai` とそのサブドメインに限られ、このダイアログはこのローカル CA に対する一度だけの
+信頼操作です。
+
+Picker モードが有効な間、Claude Desktop のネットワークは OpenCodex を経由します。OpenCodex が停止
+すると、Picker モードをオフにするか Desktop を完全に再起動するまで Desktop はオフラインになります。
+状態は `ocx claude desktop picker status`、信頼操作は `ocx claude desktop picker trust` で確認・実行できます。
+`ocx claude desktop picker off` またはダッシュボードの **Claude → Desktop** の切り替えでオフにできます。
+Picker プロファイルを選択した後は、Claude Desktop を完全に終了して開き直してください。
+
+Picker モードは 1P の一部なので、[1P のアカウントリスク](#1pオプトイン)も同じように適用されます。
+
 ### Code タブで opencodex モデルを使う（1P バインディング）
 
 1P モードでは、Code タブのモデルピッカーは claude.ai が提供します。各行（Opus 5.5、Sonnet 5、

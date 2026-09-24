@@ -118,8 +118,8 @@ event loop. Injected probes may return a state or a promise, so isolated callers
 ### Picker mode: the Desktop egress proxy
 
 When the lifecycle passes `loadPickerRoutes` (the server always does), `startClaudeIntercept` also
-wires Claude Desktop picker mode: a second loopback CONNECT proxy on the intercept proxy port + 1
-(`claudePickerProxyPort`), used only as Desktop's egress proxy, whose per-connection
+wires Claude Desktop picker mode: a second loopback CONNECT proxy on the dedicated picker proxy
+port (`getClaudeInterceptState()?.pickerProxyPort`), used only as Desktop's egress proxy, whose per-connection
 `selectTunnel` comes from the picker runtime (`src/claude/intercept/picker-runtime.ts`). The two
 proxies never share clients: Claude Code trusts only the intercept CA and Desktop trusts only the
 login keychain. On the egress proxy every target is a blind tunnel except `claude.ai:443`, which is
@@ -136,6 +136,32 @@ CONNECT to claude.ai that arrives before the first refresh waits at most 3 s, th
 picker proxy bind failure only disables picker mode; a picker construction or start failure closes
 every socket the start had bound before rethrowing. Nothing is logged but method, bootstrap or
 other, and status.
+
+`src/claude/desktop-picker.ts` owns every mutation while a server is running. One controller lock
+serializes `enable`, `disable`, and `transition`; the latter wraps a whole Desktop mode change so
+cleanup, mode/profile commit, and the optional picker enable cannot race. `runDesktopTransition` uses
+that controller when one exists. With no controller (intercept disabled, client role, or a failed
+picker-proxy bind), its offline operations remove leftover picker artifacts without creating a
+terminator, and refuse enable with `proxy_unavailable`.
+
+The controller disarms the picker runtime before disable or cleanup. The disarm latch makes new
+`claude.ai` CONNECTs blind immediately and is cleared only by a completed, checked enable. If an
+enable attempt added trust and a later check or profile write fails, it removes that trust again;
+an earlier successful picker profile keeps the trust it needs. The owned profile helpers in
+`src/claude/desktop-picker-profile.ts` use the standard row `opencodex-picker`, whose file contains
+only `egressProxyUrl`. The previous Desktop selection is stored in
+`<configDir>/claude-picker/profile-state.json`, never in Desktop's `_meta.json`.
+
+The local controls are `ocx claude desktop picker on|off|status|trust`. With a live server, `on`,
+`off`, and transition cleanup use the controller; `trust` performs the operator's local keychain
+step and then reports the result to the server. Without a server, `on` is refused and `off` removes
+owned artifacts locally. The management surface accepts `GET /api/claude-desktop/picker` and
+`PUT /api/claude-desktop/picker` with `{ enabled, persist, trustedLocally?, callerAddedTrust? }`;
+unknown keys are rejected, a successful enable/disable or reported refusal returns `200 { ok: true,
+picker }`, and enabling without a controller returns `503 { ok: false, code: "picker_proxy_unavailable",
+picker }`. `GET /api/claude-desktop/status` and `POST /api/claude-desktop/apply` expose the same
+`firstParty.picker` status; first-party apply includes `picker` in its response. Selecting the
+profile requires a full Desktop quit and reopen.
 
 ## Connected Claude Desktop profiles
 

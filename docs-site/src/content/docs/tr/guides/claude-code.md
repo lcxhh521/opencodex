@@ -180,6 +180,24 @@ profili yazmaz. `claudeCode.intercept.enabled: false` olduğunda mevcut first-pa
 apply işlemi `intercept_disabled` ile reddedilir; yeni kurulum ağ geçidini uygular. Başka bir
 vekilin ayarları üzerine yazılmaz. Mod değiştirince Desktop'ı tamamen kapatıp yeniden açın.
 
+### Picker modu: first-party Code sekmesinde opencodex modelleri
+
+Picker modu first-party modunun bir parçasıdır. macOS'ta first-party seçildiğinde varsayılan olarak
+açıktır; `claudeCode.intercept.picker: false` ayarlanırsa kapalı kalır. First-party Desktop'ın Code
+sekmesindeki model seçiciyi değiştirerek kullanılabilir opencodex modellerini adlarıyla listeler.
+İlk etkinleştirmede macOS, giriş anahtar zincirinde yerel bir sertifika yetkilisine güvenmenizi isteyebilir.
+Bu yetkili `claude.ai` ve alt alan adlarıyla sınırlıdır; iletişim kutusu bu yerel CA için tek seferlik güven
+adımıdır.
+
+Picker modu açıkken Claude Desktop ağa OpenCodex üzerinden çıkar. OpenCodex durursa Desktop, tamamen yeniden
+başlatılana veya picker modu kapatılana kadar çevrimdışı kalır. Durumu `ocx claude desktop picker status`
+ile görün, güven adımını `ocx claude desktop picker trust` ile tekrarlayın veya `ocx claude desktop picker off`
+ile kapatın. Aynı açma-kapama denetimi **Claude → Desktop** kontrol panelinde de bulunur. Picker profili
+seçildikten sonra Claude Desktop'ı tamamen kapatıp yeniden açın.
+
+Picker modu first-party'nin parçasıdır; bu nedenle [first-party hesap riski](#first-party-isteğe-bağlı)
+aynı şekilde geçerlidir.
+
 ## Claude Desktop profili
 
 Bu profil yalnızca ağ geçidi modunda Desktop'a yazılır.

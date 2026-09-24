@@ -134,6 +134,20 @@ Desktop 維持 claude.ai 登入，聊天、連接器和遠端控制仍可使用�
 會以 `intercept_disabled` 拒絕，新安裝則套用閘道。不會覆寫其他代理的設定。
 切換模式後請完全結束並重新開啟 Desktop。
 
+### Picker 模式：在第一方 Code 分頁顯示 opencodex 模型
+
+Picker 模式是第一方模式的一部分。在 macOS 上選擇第一方時預設開啟；設定
+`claudeCode.intercept.picker: false` 後會保持關閉。它會修改第一方 Desktop 的 Code 分頁模型選擇器，
+依名稱列出可用的 opencodex 模型。首次開啟時，macOS 可能會要求你在登入鑰匙圈中信任本機憑證授權單位。
+該授權單位限制為 `claude.ai` 及其子網域；這個提示是對該本機 CA 的一次性信任步驟。
+
+Picker 模式開啟期間，Claude Desktop 會透過 OpenCodex 存取網路。如果 OpenCodex 停止，Desktop 會離線，
+直到你完全重新啟動 Desktop 或關閉 Picker 模式。使用 `ocx claude desktop picker status` 查看狀態，
+使用 `ocx claude desktop picker trust` 重複信任步驟，或使用 `ocx claude desktop picker off` 關閉。
+儀表板的 **Claude → Desktop** 也有相同的切換開關。選取 Picker 設定檔後，請完全結束並重新開啟 Claude Desktop。
+
+Picker 模式屬於第一方模式，因此[第一方帳號風險](#第一方自行選擇)同樣適用。
+
 ## Claude Desktop 設定檔
 
 只有閘道模式會將以下設定檔寫入 Desktop。
