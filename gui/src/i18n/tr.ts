@@ -2874,6 +2874,7 @@ export const tr: Record<TKey, string> = {
   "claudeDesktop.mode.defaultBadge": "varsayılan",
   "claudeDesktop.mode.current": "geçerli",
   "claudeDesktop.mode.firstPartyHint": "Desktop claude.ai'de oturum açık kalır (sohbet, bağlayıcılar, uzaktan kontrol). Yalnızca Code sekmesi, alt ajanları ve Claude Code CLI OpenCodex üzerinden geçer.",
+  "claudeDesktop.mode.firstPartyRisk": "Hesap riski: First-party modu, Claude abonelik trafiğinizi yerel bir trafik yakalama proxy'si üzerinden geçirir. Anthropic bunu kullanım koşullarının ihlali sayıp hesabı askıya alabilir. Ağ geçidi varsayılan moddur.",
   "claudeDesktop.mode.gatewayHint": "Uygulamanın tamamı OpenCodex'i ağ geçidi olarak kullanır. Sohbet yerelde çalışır; claude.ai özellikleri kullanılamaz.",
   "claudeDesktop.mode.switchNote": "Geçiş diğer modun yapılandırmasını kaldırır. Ardından Desktop'ı tamamen kapatıp yeniden açın.",
   "claudeDesktop.firstParty.proxyRunning": "Yerel proxy 127.0.0.1:{port}",

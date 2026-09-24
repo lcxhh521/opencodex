@@ -2932,6 +2932,7 @@ export const en = {
   "claudeDesktop.mode.defaultBadge": "default",
   "claudeDesktop.mode.current": "current",
   "claudeDesktop.mode.firstPartyHint": "Desktop stays signed in to claude.ai (chat, connectors, remote control). Only the Code tab, its subagents and the Claude Code CLI go through OpenCodex.",
+  "claudeDesktop.mode.firstPartyRisk": "Account risk: first-party sends your Claude subscription traffic through a local interception proxy. Anthropic may treat this as a terms violation and suspend the account. Gateway is the default.",
   "claudeDesktop.mode.gatewayHint": "The whole app switches to OpenCodex as its gateway. Chat runs locally; claude.ai features are unavailable.",
   "claudeDesktop.mode.switchNote": "Switching replaces the other mode's configuration. Fully quit and reopen Desktop afterwards.",
   "claudeDesktop.firstParty.proxyRunning": "Local proxy on 127.0.0.1:{port}",

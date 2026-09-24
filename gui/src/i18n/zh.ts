@@ -2852,6 +2852,7 @@ export const zh: Record<TKey, string> = {
   "claudeDesktop.mode.defaultBadge": "默认",
   "claudeDesktop.mode.current": "当前",
   "claudeDesktop.mode.firstPartyHint": "Desktop 保持登录 claude.ai（聊天、连接器、远程控制）。仅 Code 标签页、其子代理和 Claude Code CLI 经由 OpenCodex。",
+  "claudeDesktop.mode.firstPartyRisk": "账户风险：第一方模式会让您的 Claude 订阅流量经过本地拦截代理。Anthropic 可能将此视为违反服务条款并暂停账户。网关是默认模式。",
   "claudeDesktop.mode.gatewayHint": "整个应用改用 OpenCodex 作为网关。聊天在本地运行；claude.ai 功能不可用。",
   "claudeDesktop.mode.switchNote": "切换会移除另一模式的配置。应用后请完全退出并重新打开 Desktop。",
   "claudeDesktop.firstParty.proxyRunning": "本地代理 127.0.0.1:{port}",

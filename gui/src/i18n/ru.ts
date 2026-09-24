@@ -2725,6 +2725,7 @@ export const ru: Record<TKey, string> = {
   "claudeDesktop.mode.defaultBadge": "по умолчанию",
   "claudeDesktop.mode.current": "текущий",
   "claudeDesktop.mode.firstPartyHint": "Desktop остаётся в claude.ai (чат, коннекторы, удалённое управление). Через OpenCodex идут только вкладка Code, её субагенты и CLI Claude Code.",
+  "claudeDesktop.mode.firstPartyRisk": "Риск для учётной записи: в режиме First-party трафик подписки Claude проходит через локальный перехватывающий прокси. Anthropic может счесть это нарушением условий использования и приостановить действие учётной записи. Шлюз — режим по умолчанию.",
   "claudeDesktop.mode.gatewayHint": "Всё приложение переключается на OpenCodex как шлюз. Чат работает локально; функции claude.ai недоступны.",
   "claudeDesktop.mode.switchNote": "Переключение удаляет настройки другого режима. После применения полностью закройте и заново откройте Desktop.",
   "claudeDesktop.firstParty.proxyRunning": "Локальный прокси на 127.0.0.1:{port}",

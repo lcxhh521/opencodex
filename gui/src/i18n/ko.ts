@@ -2871,6 +2871,7 @@ export const ko: Record<TKey, string> = {
   "claudeDesktop.mode.defaultBadge": "기본값",
   "claudeDesktop.mode.current": "현재",
   "claudeDesktop.mode.firstPartyHint": "Desktop은 claude.ai에 로그인된 상태를 유지합니다(채팅·커넥터·원격 제어). Code 탭과 서브에이전트, Claude Code CLI만 OpenCodex를 거칩니다.",
+  "claudeDesktop.mode.firstPartyRisk": "계정 위험: 1P (퍼스트파티) 모드는 Claude 구독 트래픽을 로컬 가로채기 프록시로 전송합니다. Anthropic이 이를 이용약관 위반으로 판단해 계정을 정지할 수 있습니다. 게이트웨이가 기본값입니다.",
   "claudeDesktop.mode.gatewayHint": "앱 전체가 OpenCodex를 게이트웨이로 사용합니다. 채팅은 로컬로 실행되고 claude.ai 기능은 사용할 수 없습니다.",
   "claudeDesktop.mode.switchNote": "전환하면 다른 모드의 설정은 제거됩니다. 적용 후 Desktop을 완전히 종료하고 다시 열어주세요.",
   "claudeDesktop.firstParty.proxyRunning": "로컬 프록시 127.0.0.1:{port}",

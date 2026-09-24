@@ -2863,6 +2863,7 @@ export const vi: Record<TKey, string> = {
   "claudeDesktop.mode.defaultBadge": "mặc định",
   "claudeDesktop.mode.current": "hiện tại",
   "claudeDesktop.mode.firstPartyHint": "Desktop vẫn đăng nhập claude.ai (chat, connector, điều khiển từ xa). Chỉ tab Code, các subagent và Claude Code CLI đi qua OpenCodex.",
+  "claudeDesktop.mode.firstPartyRisk": "Rủi ro tài khoản: chế độ First-party chuyển lưu lượng gói thuê bao Claude của bạn qua proxy chặn bắt cục bộ. Anthropic có thể xem đây là hành vi vi phạm điều khoản sử dụng và đình chỉ tài khoản. Gateway là chế độ mặc định.",
   "claudeDesktop.mode.gatewayHint": "Toàn bộ ứng dụng chuyển sang dùng OpenCodex làm gateway. Chat chạy cục bộ; các tính năng claude.ai không khả dụng.",
   "claudeDesktop.mode.switchNote": "Chuyển chế độ sẽ xóa cấu hình của chế độ kia. Sau đó hãy thoát hẳn Desktop rồi mở lại.",
   "claudeDesktop.firstParty.proxyRunning": "Proxy cục bộ tại 127.0.0.1:{port}",

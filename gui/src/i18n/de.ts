@@ -2832,6 +2832,7 @@ export const de: Record<TKey, string> = {
   "claudeDesktop.mode.defaultBadge": "Standard",
   "claudeDesktop.mode.current": "aktuell",
   "claudeDesktop.mode.firstPartyHint": "Desktop bleibt bei claude.ai angemeldet (Chat, Connectors, Remote Control). Nur der Code-Tab, seine Subagenten und die Claude Code CLI laufen über OpenCodex.",
+  "claudeDesktop.mode.firstPartyRisk": "Kontorisiko: Im First-Party-Modus wird dein Claude-Abonnementverkehr über einen lokalen Abfangproxy geleitet. Anthropic kann dies als Verstoß gegen die Nutzungsbedingungen werten und das Konto sperren. Gateway ist der Standard.",
   "claudeDesktop.mode.gatewayHint": "Die ganze App wechselt auf OpenCodex als Gateway. Chat läuft lokal; claude.ai-Funktionen sind nicht verfügbar.",
   "claudeDesktop.mode.switchNote": "Der Wechsel ersetzt die Konfiguration des anderen Modus. Desktop danach vollständig beenden und neu öffnen.",
   "claudeDesktop.firstParty.proxyRunning": "Lokaler Proxy auf 127.0.0.1:{port}",

@@ -2654,6 +2654,7 @@ export const ja: Record<TKey, string> = {
   "claudeDesktop.mode.defaultBadge": "デフォルト",
   "claudeDesktop.mode.current": "現在",
   "claudeDesktop.mode.firstPartyHint": "Desktop は claude.ai にログインしたまま（チャット・コネクタ・リモート操作）。Code タブとそのサブエージェント、Claude Code CLI だけが OpenCodex を通ります。",
+  "claudeDesktop.mode.firstPartyRisk": "アカウントのリスク：1P（ファーストパーティ）モードでは、Claude のサブスクリプション通信がローカルの傍受プロキシを通ります。Anthropic がこれを利用規約違反とみなし、アカウントを停止する可能性があります。ゲートウェイがデフォルトです。",
   "claudeDesktop.mode.gatewayHint": "アプリ全体が OpenCodex をゲートウェイとして使います。チャットはローカル実行になり、claude.ai の機能は使えません。",
   "claudeDesktop.mode.switchNote": "切り替えると他方のモードの設定は削除されます。適用後は Desktop を完全に終了して再起動してください。",
   "claudeDesktop.firstParty.proxyRunning": "ローカルプロキシ 127.0.0.1:{port}",

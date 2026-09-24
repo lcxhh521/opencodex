@@ -63,6 +63,7 @@ interface DesktopStatus {
   desiredEnabled: boolean;
   /** Effective mode: a gateway profile on disk wins; otherwise the saved/default mode. */
   mode?: DesktopMode;
+  riskWarning?: { code: string; message: string } | null;
   firstParty?: DesktopFirstPartyStatus;
   applied: boolean;
   appliedAt: string | null;
@@ -86,6 +87,10 @@ function isDesktopStatus(value: unknown): value is DesktopStatus {
   const v = value as Record<string, unknown>;
   const health = v.health as Record<string, unknown> | null | undefined;
   if (v.mode !== undefined && !DESKTOP_MODES.includes(v.mode as DesktopMode)) return false;
+  if (v.riskWarning !== undefined && v.riskWarning !== null) {
+    const warning = v.riskWarning as Record<string, unknown>;
+    if (typeof warning !== "object" || typeof warning.code !== "string" || typeof warning.message !== "string") return false;
+  }
   if (v.firstParty !== undefined) {
     const fp = v.firstParty as Record<string, unknown> | null;
     if (typeof fp !== "object" || fp === null
@@ -237,7 +242,7 @@ export default function ClaudeDesktop({
   // is not, and restoring five open rows on reload would rebuild the wall this removes.
   const [openRows, setOpenRows] = useState<Record<string, boolean>>({});
   // The mode the user wants the next apply to use. null = follow whatever /status reports
-  // (first-party by default), so a page load never silently changes an existing install.
+  // (gateway by default), so a page load never silently changes an existing install.
   const [chosenMode, setChosenMode] = useState<DesktopMode | null>(null);
   const importRef = useRef<HTMLInputElement>(null);
   const fetchDesktop = useCallback(async (signal: AbortSignal): Promise<CachedDesktop> => {
@@ -348,12 +353,12 @@ export default function ClaudeDesktop({
   const status = statusState.data ?? cachedStatus;
   const statusFailed = statusState.showError;
   // Until /status answers, the effective mode is unknown: the picker renders unchecked and
-  // disabled instead of flashing the first-party default at a gateway install. A confirmed
+  // disabled instead of flashing the gateway default at a first-party install. A confirmed
   // /status failure unlocks it (the status bar already shows the error) so an apply can still
   // be attempted, but no "current" badge is claimed.
   const modeKnown = status !== null;
   const modePickable = modeKnown || statusFailed;
-  const effectiveMode: DesktopMode = status?.mode ?? "first-party";
+  const effectiveMode: DesktopMode = status?.mode ?? "gateway";
   const selectedMode: DesktopMode = chosenMode ?? effectiveMode;
   const modeDirty = modeKnown && selectedMode !== effectiveMode;
 
@@ -524,7 +529,7 @@ export default function ClaudeDesktop({
             />
             <span className="claude-mode-title">
               {mode === "first-party" ? t("claudeDesktop.mode.firstParty") : t("claudeDesktop.mode.gateway")}
-              {mode === "first-party" && <span className="claude-mode-default">{t("claudeDesktop.mode.defaultBadge")}</span>}
+              {mode === "gateway" && <span className="claude-mode-default">{t("claudeDesktop.mode.defaultBadge")}</span>}
               {modeKnown && effectiveMode === mode && <span className="claude-mode-current">{t("claudeDesktop.mode.current")}</span>}
             </span>
             <span className="claude-mode-hint">
@@ -532,6 +537,7 @@ export default function ClaudeDesktop({
             </span>
           </label>
         ))}
+        {selectedMode === "first-party" && <p className="claude-mode-risk" role="note">{t("claudeDesktop.mode.firstPartyRisk")}</p>}
         {modeDirty && <span className="claude-mode-switch-note">{t("claudeDesktop.mode.switchNote")}</span>}
       </fieldset>
 
@@ -595,6 +601,7 @@ export default function ClaudeDesktop({
           </span>
         )}
       </div>
+      {status?.riskWarning && selectedMode !== "first-party" && <p className="claude-mode-risk" role="note">{t("claudeDesktop.mode.firstPartyRisk")}</p>}
 
       <div className="sr-only" aria-live="polite" aria-atomic="true">{announcement}</div>
       {message && <Notice tone={message.tone}>{message.text}</Notice>}

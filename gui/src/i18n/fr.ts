@@ -2850,6 +2850,7 @@ export const fr: Record<TKey, string> = {
   "claudeDesktop.mode.defaultBadge": "par défaut",
   "claudeDesktop.mode.current": "actuel",
   "claudeDesktop.mode.firstPartyHint": "Desktop reste connecté à claude.ai (chat, connecteurs, contrôle à distance). Seuls l'onglet Code, ses sous-agents et la CLI Claude Code passent par OpenCodex.",
+  "claudeDesktop.mode.firstPartyRisk": "Risque pour le compte : le mode Première partie (first-party) fait passer le trafic de votre abonnement Claude par un proxy d'interception local. Anthropic peut considérer cela comme une violation de ses conditions d'utilisation et suspendre le compte. La Passerelle est le mode par défaut.",
   "claudeDesktop.mode.gatewayHint": "Toute l'application bascule sur OpenCodex comme passerelle. Le chat tourne en local ; les fonctions claude.ai sont indisponibles.",
   "claudeDesktop.mode.switchNote": "Le changement remplace la configuration de l'autre mode. Quittez complètement Desktop puis rouvrez-le.",
   "claudeDesktop.firstParty.proxyRunning": "Proxy local sur 127.0.0.1:{port}",
