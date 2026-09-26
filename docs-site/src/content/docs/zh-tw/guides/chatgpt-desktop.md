@@ -59,7 +59,7 @@ app 自己的憑證轉發到真正的 `chatgpt.com`，WebSocket（例如語音�
 
 ## 網路環境
 
-不需要設定任何 VPN 或代理規則。每次 app 啟動時，都會依系統代理選擇啟動參數：
+不需要設定任何 VPN 或代理規則。預設模式下，每次 app 啟動時，都會依系統代理選擇啟動參數：
 
 | 環境 | app 的啟動參數 |
 |---|---|
@@ -69,6 +69,32 @@ app 自己的憑證轉發到真正的 `chatgpt.com`，WebSocket（例如語音�
 | PAC 檔案 | 只有路徑。PAC 檔案可能讓 `chatgpt.com` 繼續走代理，輸入框因此可能仍被鎖定，但其他功能不受影響。 |
 
 opencodex 透過自己的 `proxy` 設定連到真正的 `chatgpt.com`，與它的其他對外流量一致。
+
+## opencodex 停止後仍能使用 app
+
+預設模式下，已接管的 app 依賴監聽器：opencodex 停止期間，它對 `chatgpt.com` 的請求都會失敗。PAC 備援
+改為用產生的 PAC 檔案啟動 app，讓 app 自行切換回原本的路由：
+
+```json
+{ "chatgptDesktop": { "unblockSend": true, "pacFallback": true } }
+```
+
+`pacFallback` 只有與 `unblockSend` 同時開啟才生效。此時 opencodex 還會在監聽器連接埠加一（預設 `10301`）
+上監聽，並在每次啟動時重寫主目錄下的 `chatgpt-unblock.pac`。PAC 先把 `chatgpt.com` 送給 opencodex，
+其他主機則依系統的路由走：
+
+| 環境 | 其他主機，以及 opencodex 停止期間的 `chatgpt.com` |
+|---|---|
+| 無代理，或 VPN TUN 模式 | 直連。 |
+| VPN 系統代理模式 | 系統代理，然後直連。 |
+| PAC 檔案 | 系統 PAC（嵌入產生的檔案中）。 |
+
+opencodex 停止後，app 不需重新啟動就會沿這條路由繼續運作；只有傳送解鎖會暫停，直到 opencodex 恢復。路由
+在 opencodex 啟動時讀取：切換 VPN 模式後，請重新啟動 opencodex 並執行 `ocx chatgpt launch`。如果當時設定了
+系統 PAC 卻讀取不到，其他主機會直連，opencodex 會印出警告。
+
+開啟或關閉 `pacFallback` 後，請重新啟動 opencodex、執行 `ocx chatgpt launch`；如果在用 watcher，還要重新
+執行 `ocx chatgpt install-watcher`。
 
 ## 查看狀態
 
@@ -96,5 +122,5 @@ ocx chatgpt restore
   會顯示信任狀態。
 - **傳送按鈕仍是灰色：** 查看 `ocx chatgpt status`。app 可能沒有帶著路徑執行（執行
   `ocx chatgpt launch`），或者鎖的原因不是用量額度，會列在「send blocks kept」下。
-- **opencodex 停止後 app 什麼都載入不出來：** 已接管的 app 依賴監聽器。重新啟動 opencodex，
-  或執行 `ocx chatgpt restore`。
+- **opencodex 停止後 app 什麼都載入不出來：** 預設模式下，已接管的 app 依賴監聽器。重新啟動 opencodex，
+  或執行 `ocx chatgpt restore`；開啟 PAC 備援後，app 會自行切換回原本的路由。

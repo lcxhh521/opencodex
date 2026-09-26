@@ -67,8 +67,8 @@ ve OpenAI sunucuları kendi isteklerinde tüm sınırları uygulamaya devam eder
 
 ## Ağ kurulumları
 
-VPN veya proxy kuralı gerekmez. Başlatma bağımsız değişkenleri, uygulama her başladığında sistem
-proxy'sine göre seçilir:
+VPN veya proxy kuralı gerekmez. Varsayılan modda başlatma bağımsız değişkenleri, uygulama her
+başladığında sistem proxy'sine göre seçilir:
 
 | Kurulum | Uygulamanın başlatıldığı bağımsız değişkenler |
 |---|---|
@@ -78,6 +78,36 @@ proxy'sine göre seçilir:
 | PAC dosyası | Yalnızca yol. PAC dosyası `chatgpt.com`'u proxy'de tutabilir, bu yüzden yazma alanı kilitli kalabilir, ancak başka hiçbir şey bozulmaz. |
 
 opencodex, diğer tüm giden trafiği gibi, gerçek `chatgpt.com`'a kendi `proxy` ayarı üzerinden ulaşır.
+
+## opencodex durduğunda uygulamayı çalışır tutma
+
+Varsayılan modda yönlendirilmiş bir uygulama dinleyiciye bağlıdır: opencodex durduğu sürece
+`chatgpt.com` istekleri başarısız olur. PAC yedeği bunun yerine uygulamayı oluşturulan bir PAC
+dosyasıyla başlatır; böylece uygulama kendiliğinden yedek yola geçer:
+
+```json
+{ "chatgptDesktop": { "unblockSend": true, "pacFallback": true } }
+```
+
+`pacFallback` yalnızca `unblockSend` ile birlikte etkilidir. Bu durumda opencodex dinleyici portunun
+bir fazlasını da (varsayılan `10301`) dinler ve her başlangıçta ana dizinindeki `chatgpt-unblock.pac`
+dosyasını yeniden yazar. PAC, `chatgpt.com`'u önce opencodex'e, diğer tüm sunucuları ise sistemin
+yönlendirdiği şekilde gönderir:
+
+| Kurulum | Diğer sunucular ve opencodex durmuşken `chatgpt.com` |
+|---|---|
+| Proxy yok ya da TUN modunda VPN | Doğrudan. |
+| Sistem proxy modunda VPN | Sistem proxy'si, ardından doğrudan. |
+| PAC dosyası | Oluşturulan dosyaya gömülü sistem PAC'i. |
+
+opencodex durduğunda uygulama yeniden başlatılmadan bu yoldan çalışmaya devam eder; yalnızca gönderme
+kilidinin kaldırılması opencodex geri gelene kadar durur. Yol, opencodex başlarken alınır: VPN modunu
+değiştirdikten sonra opencodex'i yeniden başlatın ve `ocx chatgpt launch` çalıştırın. O anda bir
+sistem PAC'i ayarlı olduğu hâlde okunamıyorsa diğer sunucular doğrudan gider ve opencodex bir uyarı
+yazdırır.
+
+`pacFallback`'i açıp kapattıktan sonra opencodex'i yeniden başlatın, `ocx chatgpt launch` çalıştırın
+ve izleyiciyi kullanıyorsanız `ocx chatgpt install-watcher` komutunu yeniden çalıştırın.
 
 ## Durumu kontrol etme
 
@@ -108,5 +138,6 @@ kullanmıyorsanız kaldırın.
 - **Gönder düğmesi hâlâ gri:** `ocx chatgpt status` çıktısına bakın. Uygulama yol olmadan çalışıyor
   olabilir (`ocx chatgpt launch` çalıştırın) ya da kilidin nedeni kullanım kotası değildir ve
   "send blocks kept" altında listelenir.
-- **opencodex durduktan sonra uygulama hiçbir şey yükleyemiyor:** yönlendirilmiş bir uygulama
-  dinleyiciye bağlıdır. opencodex'i yeniden başlatın ya da `ocx chatgpt restore` çalıştırın.
+- **opencodex durduktan sonra uygulama hiçbir şey yükleyemiyor:** varsayılan modda yönlendirilmiş bir
+  uygulama dinleyiciye bağlıdır. opencodex'i yeniden başlatın ya da `ocx chatgpt restore` çalıştırın;
+  PAC yedeğini açarsanız uygulama kendiliğinden yedek yola geçer.

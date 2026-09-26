@@ -69,8 +69,8 @@ requêtes.
 
 ## Configurations réseau
 
-Aucune règle de VPN ou de proxy n'est nécessaire. Les arguments de lancement sont choisis d'après le
-proxy système à chaque démarrage de l'application :
+Aucune règle de VPN ou de proxy n'est nécessaire. En mode par défaut, les arguments de lancement sont
+choisis d'après le proxy système à chaque démarrage de l'application :
 
 | Configuration | Arguments de lancement de l'application |
 |---|---|
@@ -81,6 +81,36 @@ proxy système à chaque démarrage de l'application :
 
 opencodex joint le vrai `chatgpt.com` via son propre réglage `proxy`, comme tout son autre trafic
 sortant.
+
+## Garder l'application utilisable quand opencodex s'arrête
+
+En mode par défaut, une application routée dépend de l'écouteur : tant qu'opencodex est arrêté, ses
+requêtes vers `chatgpt.com` échouent. Le repli PAC lance plutôt l'application avec un fichier PAC
+généré, pour qu'elle se replie d'elle-même :
+
+```json
+{ "chatgptDesktop": { "unblockSend": true, "pacFallback": true } }
+```
+
+`pacFallback` n'a d'effet qu'avec `unblockSend`. opencodex écoute alors aussi sur le port de
+l'écouteur plus un (`10301` par défaut) et réécrit `chatgpt-unblock.pac` dans son répertoire à chaque
+démarrage. Le PAC envoie `chatgpt.com` d'abord vers opencodex, et tous les autres hôtes selon le
+routage du système :
+
+| Configuration | Autres hôtes, et `chatgpt.com` tant qu'opencodex est arrêté |
+|---|---|
+| Aucun proxy, ou VPN en mode TUN | Direct. |
+| VPN en mode proxy système | Le proxy système, puis direct. |
+| Fichier PAC | Le PAC système, intégré au fichier généré. |
+
+Quand opencodex s'arrête, l'application continue de fonctionner par ce chemin, sans redémarrage ;
+seul le déblocage de l'envoi est suspendu jusqu'au retour d'opencodex. Le routage est capturé au
+démarrage d'opencodex : après un changement de mode du VPN, redémarrez opencodex et lancez
+`ocx chatgpt launch`. Si un PAC système est configuré mais illisible à ce moment, les autres hôtes
+passent en direct et opencodex affiche un avertissement.
+
+Après avoir activé ou désactivé `pacFallback`, redémarrez opencodex, lancez `ocx chatgpt launch`, et
+relancez `ocx chatgpt install-watcher` si vous utilisez le surveillant.
 
 ## Vérifier l'état
 
@@ -111,5 +141,6 @@ ni l'une ni l'autre.
 - **Le bouton d'envoi reste grisé :** consultez `ocx chatgpt status`. L'application tourne peut-être
   sans la route (lancez `ocx chatgpt launch`), ou le verrou a une raison autre que le quota
   d'utilisation, listée sous « send blocks kept ».
-- **L'application ne charge plus rien après l'arrêt d'opencodex :** une application routée dépend de
-  l'écouteur. Redémarrez opencodex, ou lancez `ocx chatgpt restore`.
+- **L'application ne charge plus rien après l'arrêt d'opencodex :** en mode par défaut, une
+  application routée dépend de l'écouteur. Redémarrez opencodex ou lancez `ocx chatgpt restore`, ou
+  activez le repli PAC pour que l'application se replie d'elle-même.
