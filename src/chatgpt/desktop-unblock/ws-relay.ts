@@ -118,7 +118,7 @@ export async function performUpstreamHandshake(
 }
 
 /** Read through the blank line; bytes after it are the first frames. Pauses the socket. */
-function readResponseHead(socket: TLSSocket, timeoutMs: number): Promise<{ head: string; early: Buffer } | null> {
+export function readResponseHead(socket: TLSSocket, timeoutMs: number): Promise<{ head: string; early: Buffer } | null> {
   return new Promise(resolve => {
     let buffer = Buffer.alloc(0);
     let settled = false;
@@ -128,6 +128,9 @@ function readResponseHead(socket: TLSSocket, timeoutMs: number): Promise<{ head:
       socket.removeListener("data", onData);
       socket.removeListener("error", onFailure);
       socket.removeListener("close", onFailure);
+      // Until WsRelay.attach() installs its own handlers (or the socket is destroyed), a late
+      // 'error' with no listener is thrown by the emitter and would take the whole proxy down.
+      socket.on("error", () => {});
       socket.setTimeout(0);
       socket.pause();
       resolve(result);
