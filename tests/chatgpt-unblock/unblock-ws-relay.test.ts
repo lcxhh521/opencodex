@@ -7,7 +7,7 @@ import type { Server as TlsServer, TLSSocket } from "node:tls";
 import { createLocalInterceptCa, issueLocalInterceptLeaf } from "../../src/claude/intercept/local-ca";
 import { startChatgptUnblockListener } from "../../src/chatgpt/desktop-unblock/listener";
 import { isRelayableUpgrade, sendableCloseCode } from "../../src/chatgpt/desktop-unblock/ws-relay";
-import { parseWsFrames, WEBSOCKET_GUID, WsOpcode } from "../../src/chatgpt/desktop-unblock/ws-frame";
+import { encodeWsFrame, parseWsFrames, WEBSOCKET_GUID, WsOpcode } from "../../src/chatgpt/desktop-unblock/ws-frame";
 import type { DialUpstreamOptions } from "../../src/chatgpt/desktop-unblock/ws-upstream";
 
 const ca = createLocalInterceptCa();
@@ -83,6 +83,15 @@ function startFakeUpstream(): { server: TlsServer; log: UpstreamLog; port: () =>
           } else if (text === "close") {
             const payload = Buffer.concat([Buffer.from([0x0f, 0xa1]), Buffer.from("bye")]);
             socket.end(serverFrame(0x88, payload));
+          } else if (text === "bigfrag") {
+            // A message whose fragment payloads pass the 16 MiB byte ceiling (chunk count stays small).
+            // FIN is cleared on both fragments, so the relay must buffer rather than flush.
+            const piece = Buffer.alloc(12 * 1024 * 1024, 0x61);
+            const unfin = (frame: Buffer): Buffer => { const copy = Buffer.from(frame); copy[0]! &= 0x7f; return copy; };
+            socket.write(Buffer.concat([
+              unfin(encodeWsFrame(WsOpcode.BINARY, piece, false)),
+              unfin(encodeWsFrame(WsOpcode.CONTINUATION, piece, false)),
+            ]));
           } else socket.write(serverFrame(0x81, `up:${text}`));
         }
       }
@@ -93,9 +102,37 @@ function startFakeUpstream(): { server: TlsServer; log: UpstreamLog; port: () =>
 }
 
 /** HTTP CONNECT proxy that sends every tunnel to the fake upstream, recording the request line. */
-function startConnectProxy(upstreamPort: () => number): { server: NetServer; requests: string[] } {
+function startConnectProxy(upstreamPort: () => number): { server: NetServer; requests: string[]; heads: string[] } {
   const requests: string[] = [];
+  const heads: string[] = [];
   const server = createNetServer(client => {
+    let buffer = Buffer.alloc(0);
+    client.on("error", () => {});
+    const onData = (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      const end = buffer.indexOf("\r\n\r\n");
+      if (end === -1) return;
+      client.removeListener("data", onData);
+      heads.push(buffer.subarray(0, end).toString());
+      requests.push(buffer.subarray(0, buffer.indexOf("\r\n")).toString());
+      const upstream = connectNet(upstreamPort(), "127.0.0.1", () => {
+        client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        client.pipe(upstream).pipe(client);
+      });
+      upstream.on("error", () => client.destroy());
+    };
+    client.on("data", onData);
+  });
+  server.listen(0, "127.0.0.1");
+  return { server, requests, heads };
+}
+
+/** TLS-speaking CONNECT proxy: the client must wrap the proxy port before its CONNECT. */
+function startTlsConnectProxy(upstreamPort: () => number): { server: TlsServer; requests: string[] } {
+  const requests: string[] = [];
+  // A leaf for 127.0.0.1 (IP SAN), so the client's TLS wrap of the proxy port validates.
+  const proxyLeaf = issueLocalInterceptLeaf(ca, ["127.0.0.1"]);
+  const server = createTlsServer({ ca: [ca.certPem], cert: proxyLeaf.certPem, key: proxyLeaf.keyPem }, client => {
     let buffer = Buffer.alloc(0);
     client.on("error", () => {});
     const onData = (chunk: Buffer) => {
@@ -311,6 +348,34 @@ describe("chatgpt unblock websocket relay", () => {
     app.ws.close();
   });
 
+  test("sends Proxy-Authorization when the CONNECT proxy URL carries credentials", async () => {
+    const proxy = startConnectProxy(upstream.port);
+    cleanups.push(() => proxy.server.close());
+    await waitFor(() => proxy.server.listening, "authed connect proxy");
+    const listener = listenerFor({ proxy: `http://user:p%40ss@127.0.0.1:${(proxy.server.address() as AddressInfo).port}` });
+    cleanups.push(() => listener.stop(true));
+    const app = await openApp(listener.port!, "/dictation/stream");
+    expect(await app.next()).toBe("hello-early");
+    app.ws.send("via-auth");
+    expect(await app.next()).toBe("up:via-auth");
+    expect(proxy.heads[0]).toContain("Proxy-Authorization: Basic " + Buffer.from("user:p@ss").toString("base64"));
+    app.ws.close();
+  });
+
+  test("TLS-wraps an https:// proxy before the CONNECT handshake", async () => {
+    const proxy = startTlsConnectProxy(upstream.port);
+    cleanups.push(() => proxy.server.close());
+    await waitFor(() => proxy.server.listening, "tls connect proxy");
+    const listener = listenerFor({ proxy: `https://127.0.0.1:${(proxy.server.address() as AddressInfo).port}`, ca: `${ca.certPem}` });
+    cleanups.push(() => listener.stop(true));
+    const app = await openApp(listener.port!, "/dictation/stream");
+    expect(await app.next()).toBe("hello-early");
+    app.ws.send("via-tls");
+    expect(await app.next()).toBe("up:via-tls");
+    expect(proxy.requests).toEqual(["CONNECT chatgpt.com:443 HTTP/1.1"]);
+    app.ws.close();
+  });
+
   test("dials chatgpt.com through a SOCKS5 proxy", async () => {
     const proxy = startSocks5Proxy(upstream.port);
     cleanups.push(() => proxy.server.close());
@@ -323,6 +388,16 @@ describe("chatgpt unblock websocket relay", () => {
     expect(await app.next()).toBe("up:via-socks");
     expect(proxy.targets).toEqual(["chatgpt.com:443"]);
     app.ws.close();
+  });
+
+  test("a fragmented message whose payload passes the byte ceiling fails with 1009", async () => {
+    const listener = listenerFor(direct());
+    cleanups.push(() => listener.stop(true));
+    const app = await openApp(listener.port!, "/dictation/stream");
+    expect(await app.next()).toBe("hello-early");
+    app.ws.send("bigfrag");
+    const closed = await app.closed;
+    expect(closed.code).toBe(1009);
   });
 });
 

@@ -1,7 +1,7 @@
 import type { Server, ServerWebSocket } from "bun";
 import { randomBytes } from "node:crypto";
 import type { TLSSocket } from "node:tls";
-import { encodeWsFrame, parseWsFrames, WsOpcode } from "./ws-frame";
+import { encodeWsFrame, parseWsFrames, WEBSOCKET_MAX_FRAME_BYTES, WsOpcode } from "./ws-frame";
 import type { WsFrame } from "./ws-frame";
 import { CHATGPT_UPSTREAM_HOST, dialUpstreamTunnel } from "./ws-upstream";
 import type { DialUpstreamOptions, UpstreamTunnel } from "./ws-upstream";
@@ -28,6 +28,8 @@ const HANDSHAKE_TIMEOUT_MS = 10_000;
 const CLOSE_DRAIN_MS = 500;
 /** Continuation frames accepted for one message before the relay gives up on it. */
 const MAX_MESSAGE_CHUNKS = 1024;
+/** Total payload bytes accepted for one fragmented message, mirroring the per-frame ceiling. */
+const MAX_MESSAGE_BYTES = WEBSOCKET_MAX_FRAME_BYTES;
 
 /**
  * Handshake headers the relay regenerates for the upstream leg. Extensions are dropped
@@ -151,7 +153,7 @@ function readResponseHead(socket: TLSSocket, timeoutMs: number): Promise<{ head:
 export class WsRelay {
   private client: ServerWebSocket<WsRelaySocketData> | null = null;
   private pendingParse: Buffer = Buffer.alloc(0);
-  private fragmentation: { opcode: WsOpcode; chunks: Buffer[] } | null = null;
+  private fragmentation: { opcode: WsOpcode; chunks: Buffer[]; bytes: number } | null = null;
   private clientClosed = false;
   private closed = false;
   private drainTimer: ReturnType<typeof setTimeout> | null = null;
@@ -222,14 +224,15 @@ export class WsRelay {
     if (opcode === WsOpcode.TEXT || opcode === WsOpcode.BINARY) {
       // A new data frame mid-fragmentation is a protocol violation; the relay restarts
       // assembly rather than tearing the connection down over it.
-      this.fragmentation = { opcode, chunks: [payload] };
+      this.fragmentation = { opcode, chunks: [payload], bytes: payload.length };
       if (fin) this.flushMessage();
       return;
     }
     if (opcode === WsOpcode.CONTINUATION) {
       if (this.fragmentation === null) return;
       this.fragmentation.chunks.push(payload);
-      if (this.fragmentation.chunks.length > MAX_MESSAGE_CHUNKS) {
+      this.fragmentation.bytes += payload.length;
+      if (this.fragmentation.chunks.length > MAX_MESSAGE_CHUNKS || this.fragmentation.bytes > MAX_MESSAGE_BYTES) {
         this.failClient(1009, "message too fragmented");
         return;
       }

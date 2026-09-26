@@ -56,7 +56,7 @@ export async function dialUpstreamTunnel(options: DialUpstreamOptions = {}): Pro
   const route: UpstreamTunnel["route"] = socks5Route(proxy) ? "socks5" : proxy ? "http-connect" : "direct";
   try {
     const target = options.target ?? { host: CHATGPT_UPSTREAM_HOST, port: CHATGPT_UPSTREAM_TLS_PORT };
-    const raw = await dialRaw(target, proxy, route, timeout);
+    const raw = await dialRaw(target, proxy, route, timeout, options.ca);
     const socket = await wrapTls(raw, timeout, options.ca);
     return { socket, route };
   } catch {
@@ -73,25 +73,35 @@ function socks5Route(proxy: string | null): boolean {
   return proxy !== null && /^socks5h?:\/\//i.test(proxy.trim());
 }
 
-async function dialRaw(target: RawTarget, proxy: string | null, route: UpstreamTunnel["route"], timeout: number): Promise<Socket> {
+function isIpLiteral(host: string): boolean {
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || host.includes(":");
+}
+
+async function dialRaw(target: RawTarget, proxy: string | null, route: UpstreamTunnel["route"], timeout: number, ca: string | undefined): Promise<Socket> {
   if (route === "direct") return tcpConnect(target.host, target.port, timeout);
   const proxyUrl = new URL(proxy!);
   const proxyHost = proxyUrl.hostname.replace(/^\[|\]$/g, "");
   const proxyPort = Number(proxyUrl.port) || (route === "socks5" ? 1080 : proxyUrl.protocol === "https:" ? 443 : 8080);
   const proxySocket = await tcpConnect(proxyHost, proxyPort, timeout);
-  const reader = new ProxyHandshakeReader(proxySocket, timeout);
+  // An https:// proxy speaks TLS on its own port before any handshake, so the CONNECT
+  // request must ride that TLS session, with the proxy's hostname as the SNI.
+  const plain = proxyUrl.protocol === "https:" ? await wrapProxyTls(proxySocket, proxyHost, timeout, ca) : proxySocket;
+  if (plain !== proxySocket) {
+    plain.once("error", () => proxySocket.destroy());
+  }
+  const reader = new ProxyHandshakeReader(plain, timeout);
   try {
-    if (route === "http-connect") await httpConnectThrough(reader, target);
+    if (route === "http-connect") await httpConnectThrough(reader, target, proxyUrl);
     else await socks5ConnectThrough(reader, target);
   } catch (error) {
     reader.dispose();
-    proxySocket.destroy();
+    plain.destroy();
     throw error;
   }
   // Handshake done: hand leftover bytes and data events back to the socket so the TLS
   // layer above starts from a clean stream.
   reader.dispose();
-  return proxySocket;
+  return plain;
 }
 
 async function tcpConnect(host: string, port: number, timeout: number): Promise<Socket> {
@@ -186,15 +196,20 @@ class ProxyHandshakeReader {
   }
 }
 
-async function httpConnectThrough(reader: ProxyHandshakeReader, target: RawTarget): Promise<void> {
+async function httpConnectThrough(reader: ProxyHandshakeReader, target: RawTarget, proxyUrl: URL): Promise<void> {
   const authority = `${target.host}:${target.port}`;
-  reader.write([
+  const lines = [
     `CONNECT ${authority} HTTP/1.1`,
     `Host: ${authority}`,
     `Proxy-Connection: Keep-Alive`,
-    "",
-    "",
-  ].join(CRLF));
+  ];
+  // Credentials in the proxy URL become Basic Proxy-Authorization; an unauthenticated
+  // proxy never sees the header.
+  if (proxyUrl.username) {
+    const credentials = Buffer.from(`${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}`).toString("base64");
+    lines.push(`Proxy-Authorization: Basic ${credentials}`);
+  }
+  reader.write([...lines, "", ""].join(CRLF));
   const head = await reader.readHttpHead();
   const statusLine = head.split(CRLF)[0]!;
   if (!/^HTTP\/1\.[01] 2\d\d/.test(statusLine)) throw new Error(`proxy refused CONNECT: ${statusLine}`);
@@ -229,6 +244,23 @@ async function wrapTls(raw: Socket, timeout: number, ca: string | undefined): Pr
     const tls = connectTls({ socket: raw, servername: CHATGPT_UPSTREAM_HOST, ...(ca ? { ca } : {}) });
     const onError = (error: Error) => { tls.destroy(); reject(error); };
     tls.setTimeout(timeout, () => onError(new Error("TLS handshake timeout")));
+    tls.once("error", onError);
+    tls.once("secureConnect", () => {
+      tls.setTimeout(0);
+      tls.removeListener("error", onError);
+      resolve(tls);
+    });
+  });
+}
+
+/** TLS-wrap the proxy's own socket before the CONNECT handshake (https:// proxy URLs). */
+async function wrapProxyTls(raw: Socket, proxyHost: string, timeout: number, ca: string | undefined): Promise<TLSSocket> {
+  // An IP-literal proxy has no hostname to name in SNI; node:tls forbids it outright.
+  const servername = isIpLiteral(proxyHost) ? undefined : proxyHost;
+  return new Promise((resolve, reject) => {
+    const tls = connectTls({ socket: raw, ...(servername ? { servername } : {}), ...(ca ? { ca } : {}) });
+    const onError = (error: Error) => { tls.destroy(); reject(error); };
+    tls.setTimeout(timeout, () => onError(new Error("proxy TLS handshake timeout")));
     tls.once("error", onError);
     tls.once("secureConnect", () => {
       tls.setTimeout(0);
