@@ -1878,6 +1878,37 @@
     "server-combo-cooldown-recording.test.ts": "server",
     "injection-routing-drift.test.ts": "codex-integration", "injection-routing-healer.test.ts": "codex-integration",
     "injection-routing-heal-apply.test.ts": "codex-integration", "cli-start-routing-heal-wiring.test.ts": "cli",
-    "cli-status-codex-routing-drift.test.ts": "cli"
-  }
+    "cli-status-codex-routing-drift.test.ts": "cli",
+    "rewrite.test.ts": "chatgpt-unblock",
+    "unblock-ca-trust.test.ts": "chatgpt-unblock",
+    "unblock-launch-script.test.ts": "chatgpt-unblock",
+    "unblock-listener.test.ts": "chatgpt-unblock",
+    "unblock-watcher-install.test.ts": "chatgpt-unblock",
+    "unblock-ws-frame.test.ts": "chatgpt-unblock",
+    "unblock-ws-relay.test.ts": "chatgpt-unblock"
+  },
+  "migrated": [
+    "adapters",
+    "ci-workflows",
+    "claude-integration",
+    "cli",
+    "clients",
+    "codex-integration",
+    "config",
+    "gui",
+    "lab",
+    "lib",
+    "oauth",
+    "providers",
+    "responses",
+    "routing",
+    "server",
+    "service",
+    "storage",
+    "update",
+    "usage",
+    "vision",
+    "web-search",
+    "windows"
+  ]
 }
