@@ -62,8 +62,8 @@ Chromium 스위치와 함께 실행되며, 서브도메인을 포함한 다른 �
 
 ## 네트워크 환경
 
-VPN이나 프록시 규칙을 설정할 필요가 없습니다. 실행 인자는 앱이 시작될 때마다 시스템 프록시에 따라
-정해집니다.
+VPN이나 프록시 규칙을 설정할 필요가 없습니다. 기본 모드에서는 실행 인자가 앱이 시작될 때마다 시스템
+프록시에 따라 정해집니다.
 
 | 환경 | 앱 실행 인자 |
 |---|---|
@@ -73,6 +73,33 @@ VPN이나 프록시 규칙을 설정할 필요가 없습니다. 실행 인자는
 | PAC 파일 | 경로만. PAC 파일이 `chatgpt.com`을 프록시에 남길 수 있어 입력창이 잠긴 채로 있을 수 있지만, 다른 기능은 망가지지 않습니다. |
 
 opencodex는 다른 외부 트래픽과 마찬가지로 자체 `proxy` 설정으로 실제 `chatgpt.com`에 접속합니다.
+
+## opencodex를 멈춰도 앱 계속 쓰기
+
+기본 모드에서는 경로가 적용된 앱이 리스너에 의존합니다. opencodex가 멈춰 있는 동안 `chatgpt.com`
+요청은 실패합니다. PAC 폴백은 대신 생성된 PAC 파일로 앱을 실행하므로, 앱이 스스로 폴백합니다.
+
+```json
+{ "chatgptDesktop": { "unblockSend": true, "pacFallback": true } }
+```
+
+`pacFallback`은 `unblockSend`와 함께일 때만 적용됩니다. 이때 opencodex는 리스너 포트 + 1(기본값
+`10301`)에서도 대기하고, 시작할 때마다 홈 디렉터리의 `chatgpt-unblock.pac`을 다시 씁니다. PAC는
+`chatgpt.com`을 먼저 opencodex로 보내고, 다른 호스트는 시스템 경로대로 보냅니다.
+
+| 환경 | 다른 호스트, 그리고 opencodex가 멈춘 동안의 `chatgpt.com` |
+|---|---|
+| 프록시 없음 또는 TUN 모드 VPN | 직접 연결. |
+| 시스템 프록시 모드 VPN | 시스템 프록시, 그다음 직접 연결. |
+| PAC 파일 | 시스템 PAC(생성된 파일에 포함). |
+
+opencodex가 멈춰도 앱은 재시작 없이 이 경로로 계속 동작하며, 보내기 잠금 해제만 opencodex가 돌아올
+때까지 멈춥니다. 경로는 opencodex가 시작될 때 가져옵니다. VPN 모드를 바꾼 뒤에는 opencodex를 다시
+시작하고 `ocx chatgpt launch`를 실행하세요. 그 시점에 시스템 PAC가 설정되어 있지만 읽을 수 없으면 다른
+호스트는 직접 연결되고 opencodex가 경고를 출력합니다.
+
+`pacFallback`을 켜거나 끈 뒤에는 opencodex를 다시 시작하고 `ocx chatgpt launch`를 실행하며, 감시자를
+쓰고 있다면 `ocx chatgpt install-watcher`도 다시 실행하세요.
 
 ## 상태 확인
 
@@ -100,5 +127,6 @@ opencodex의 Claude 통합과 공유되므로, 둘 다 쓰지 않을 때만 신�
   실행하세요. `ocx chatgpt status`가 신뢰 상태를 보여 줍니다.
 - **전송 버튼이 여전히 회색:** `ocx chatgpt status`를 확인하세요. 앱이 경로 없이 실행 중이거나
   (`ocx chatgpt launch` 실행), 잠금 이유가 사용량 한도가 아니어서 "send blocks kept"에 표시될 수 있습니다.
-- **opencodex를 멈추면 앱이 아무것도 불러오지 못함:** 경로가 적용된 앱은 리스너에 의존합니다.
-  opencodex를 다시 시작하거나 `ocx chatgpt restore`를 실행하세요.
+- **opencodex를 멈추면 앱이 아무것도 불러오지 못함:** 기본 모드에서는 경로가 적용된 앱이 리스너에
+  의존합니다. opencodex를 다시 시작하거나 `ocx chatgpt restore`를 실행하세요. PAC 폴백을 켜면 앱이
+  스스로 폴백합니다.

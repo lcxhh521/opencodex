@@ -66,8 +66,8 @@ changed, and OpenAI's servers still enforce every limit on their own requests.
 
 ## Network setups
 
-No VPN or proxy rules are needed. The launch arguments are chosen from the system proxy each
-time the app starts:
+No VPN or proxy rules are needed. In the default mode the launch arguments are chosen from the
+system proxy each time the app starts:
 
 | Setup | What the app is launched with |
 |---|---|
@@ -78,6 +78,35 @@ time the app starts:
 
 opencodex reaches the real `chatgpt.com` through its own `proxy` setting, like all its other
 outbound traffic.
+
+## Keep the app working when opencodex stops
+
+In the default mode a routed app depends on the listener: while opencodex is stopped, its
+`chatgpt.com` requests fail. PAC fallback launches the app with a generated PAC file instead, so
+the app falls back on its own:
+
+```json
+{ "chatgptDesktop": { "unblockSend": true, "pacFallback": true } }
+```
+
+`pacFallback` only takes effect together with `unblockSend`. opencodex then also listens on the
+listener port plus one (`10301` by default) and rewrites `chatgpt-unblock.pac` in its home
+directory at every start. The PAC sends `chatgpt.com` to opencodex first, and every other host
+the way the system routes it:
+
+| Setup | Other hosts, and `chatgpt.com` while opencodex is stopped |
+|---|---|
+| No proxy, or VPN in TUN mode | Direct. |
+| VPN in system-proxy mode | The system proxy, then direct. |
+| PAC file | The system PAC, embedded in the generated file. |
+
+When opencodex stops, the app keeps working on that route without a restart; only the send
+unblock pauses until opencodex is back. The route is captured when opencodex starts: after
+changing the VPN mode, restart opencodex and run `ocx chatgpt launch`. If a system PAC is set but
+cannot be read at that moment, other hosts go direct and opencodex prints a warning.
+
+After turning `pacFallback` on or off, restart opencodex, run `ocx chatgpt launch`, and run
+`ocx chatgpt install-watcher` again if you use the watcher.
 
 ## Check the state
 
@@ -107,5 +136,6 @@ shared with opencodex's Claude integrations; remove its trust only if you use ne
 - **The send button is still grey:** check `ocx chatgpt status`. The app may be running
   without the route (run `ocx chatgpt launch`), or the lock may have a reason other than usage
   quota, which is listed under "send blocks kept".
-- **The app cannot load anything after opencodex stops:** a routed app depends on the
-  listener. Start opencodex again, or run `ocx chatgpt restore`.
+- **The app cannot load anything after opencodex stops:** in the default mode a routed app
+  depends on the listener. Start opencodex again or run `ocx chatgpt restore`, or turn on
+  PAC fallback so the app falls back on its own.
