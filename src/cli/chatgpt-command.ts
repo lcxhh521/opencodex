@@ -62,6 +62,19 @@ export async function handleChatgptCommand(args: string[], platform: NodeJS.Plat
     return sub === "status" ? 0 : 1;
   }
 
+  // uninstall-watcher must work even when the port cannot be resolved: the operator may need
+  // to remove the watcher precisely because the configuration no longer resolves.
+  if (sub === "uninstall-watcher") {
+    try {
+      uninstallChatgptUnblockWatcher();
+    } catch (error) {
+      console.error(`Launch watcher not removed: ${error instanceof Error ? error.message : String(error)}`);
+      return 1;
+    }
+    console.log("Launch watcher removed.");
+    return 0;
+  }
+
   const config = loadConfig();
   const live = await findLiveProxy().catch(() => null);
   let port: number;
@@ -105,27 +118,19 @@ export async function handleChatgptCommand(args: string[], platform: NodeJS.Plat
     return 0;
   }
 
-  if (sub === "uninstall-watcher") {
-    try {
-      uninstallChatgptUnblockWatcher();
-    } catch (error) {
-      console.error(`Launch watcher not removed: ${error instanceof Error ? error.message : String(error)}`);
-      return 1;
-    }
-    console.log("Launch watcher removed.");
-    return 0;
-  }
+  const pacMode = chatgptPacFallbackEnabled(config);
+  const entryPort = pacMode ? chatgptUnblockEntryPort(config, live?.port ?? (typeof config.port === "number" ? config.port : 10100)) : undefined;
 
-  if (sub === "launch") return report(launchChatgptWithRule(port));
+  if (sub === "launch") return report(launchChatgptWithRule(port, undefined, pacMode, entryPort));
 
-  // restore: the watcher would put the rule straight back on the relaunch while opencodex runs.
-  const watcher = chatgptUnblockWatcherStatus(port);
+  // restore: the watcher would put the switches straight back on the relaunch while opencodex runs.
+  const watcher = chatgptUnblockWatcherStatus(port, undefined, pacMode, entryPort);
   if (watcher.agentLoaded && (await probeChatgptUnblockListener(port)).state === "ours") {
     console.error("The launch watcher would re-apply the opencodex route on relaunch while opencodex is running.");
     console.error("Run 'ocx chatgpt uninstall-watcher' first, or stop opencodex, then 'ocx chatgpt restore'.");
     return 1;
   }
-  return report(restoreChatgptNative(port));
+  return report(restoreChatgptNative(port, undefined, pacMode, entryPort));
 }
 
 function report(result: { ok: boolean; output: string }): number {

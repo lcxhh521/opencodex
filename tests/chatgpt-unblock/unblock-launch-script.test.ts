@@ -87,9 +87,10 @@ while IFS='|' read -r p name command; do
 done < "$STUB_DIR/processes"
 exit 1`);
   // The listener's identity path: opencodex answers with its service id, another server with
-  // something else, and a closed port makes curl fail. A call with -x (the entry probe)
-  // answers 0 when the entry is up and a connection-level failure when it is not.
-  stub("curl", `if [ "$1" = -s ] && [ "$2" = --noproxy ]; then
+  // something else, and a closed port makes curl fail. The entry probe fetches through the
+  // entry as an HTTP proxy (-x plus a target URL) and answers 0 when the entry is up, a
+  // connection-level failure when not. Distinguished by "$6" = -x.
+  stub("curl", `if [ "$6" = -x ]; then
   case "$STUB_ENTRY" in
     up) exit 0 ;;
     up56) exit 56 ;;

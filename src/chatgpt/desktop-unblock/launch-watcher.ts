@@ -158,10 +158,14 @@ listener_ours() {
 # missing entry would send every chatgpt.com request to a dead first hop.
 entry_ours() {
   [ "$ENTRY_URL" != ${shellQuote("http://127.0.0.1:0/")} ] || return 1
-  curl -s --noproxy '*' --max-time 3 -o /dev/null -x "$ENTRY_URL" 2>/dev/null
+  # The probe fetches through the entry as an HTTP proxy (the same job the PAC gives it). It
+  # must not carry --noproxy: that would bypass the very proxy being tested. The identity
+  # host keeps the probe off the network -- the entry refuses non-CONNECT chatgpt.com:443
+  # targets and answers before dialing anything.
+  curl -s --max-time 3 -o /dev/null -x "$ENTRY_URL" ${shellQuote(`http://${CHATGPT_INTERCEPT_HOST}/`)} 2>/dev/null
   local status=$?
-  # Exit 0 (CONNECT answered) or 56 (connected, nothing received) means the entry is there;
-  # any connection-level failure (7 and friends) means it is not.
+  # Exit 0 (answered) or 56 (connected, nothing received) means the entry is there; any
+  # connection-level failure (7 and friends) means it is not.
   [ "$status" -eq 0 ] || [ "$status" -eq 56 ]
 }
 # \`open\` on a running app only activates it and drops the arguments, so the old instance must
@@ -486,25 +490,25 @@ export async function probeChatgptUnblockListener(
   }
 }
 
-function runLaunchScript(mode: "launch" | "native", port: number, configDir?: string): { ok: boolean; output: string } {
+function runLaunchScript(mode: "launch" | "native", port: number, configDir?: string, pacMode = false, entryPort?: number): { ok: boolean; output: string } {
   if (process.platform !== "darwin") {
     throw new Error("launching the ChatGPT desktop app is only supported on macOS");
   }
   // The script goes in on stdin, so no file is needed and the script's own command line never
   // looks like the app's.
   const result = spawnSync("/bin/bash", ["-s", mode], {
-    input: buildChatgptUnblockWatcherScript(port, configDir),
+    input: buildChatgptUnblockWatcherScript(port, configDir, pacMode, entryPort),
     encoding: "utf8",
   });
   return { ok: result.status === 0, output: `${result.stdout ?? ""}${result.stderr ?? ""}`.trim() };
 }
 
 /** Start the app with the launch arguments, restarting it if it runs without them (macOS). */
-export function launchChatgptWithRule(port: number, configDir?: string): { ok: boolean; output: string } {
-  return runLaunchScript("launch", port, configDir);
+export function launchChatgptWithRule(port: number, configDir?: string, pacMode = false, entryPort?: number): { ok: boolean; output: string } {
+  return runLaunchScript("launch", port, configDir, pacMode, entryPort);
 }
 
-/** Restart an app that carries the resolver rule without it, returning it to native networking. */
-export function restoreChatgptNative(port: number, configDir?: string): { ok: boolean; output: string } {
-  return runLaunchScript("native", port, configDir);
+/** Restart an app that carries the launch switches without them, returning it to native networking. */
+export function restoreChatgptNative(port: number, configDir?: string, pacMode = false, entryPort?: number): { ok: boolean; output: string } {
+  return runLaunchScript("native", port, configDir, pacMode, entryPort);
 }

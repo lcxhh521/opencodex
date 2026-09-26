@@ -17,6 +17,10 @@ const HEAD_TIMEOUT_SECONDS = 10;
 
 interface EntryState {
   head: Buffer;
+  /** Set once the request head parsed; further data queues until the upstream attaches. */
+  connecting: boolean;
+  /** Bytes that arrived while the upstream connect was in flight. */
+  pending: Buffer[];
   upstream: Socket | null;
 }
 
@@ -44,6 +48,12 @@ function handleData(socket: Socket<EntryState>, chunk: Uint8Array, originPort: n
     state.upstream.write(chunk);
     return;
   }
+  if (state.connecting) {
+    // The CONNECT head parsed and the upstream dial is still in flight; hold the bytes
+    // instead of re-entering the head parser (which would answer a second CONNECT).
+    state.pending.push(Buffer.from(chunk));
+    return;
+  }
   state.head = state.head.length === 0 ? Buffer.from(chunk) : Buffer.concat([state.head, Buffer.from(chunk)]);
   const end = state.head.indexOf("\r\n\r\n");
   if (end === -1) {
@@ -56,6 +66,8 @@ function handleData(socket: Socket<EntryState>, chunk: Uint8Array, originPort: n
     refuse(socket, "403 Forbidden");
     return;
   }
+  state.connecting = true;
+  if (leftover.length > 0) state.pending.push(Buffer.from(leftover));
   bunConnect({
     hostname: "127.0.0.1",
     port: originPort,
@@ -66,9 +78,11 @@ function handleData(socket: Socket<EntryState>, chunk: Uint8Array, originPort: n
     },
   }).then(upstream => {
     state.upstream = upstream;
+    state.connecting = false;
     socket.write("HTTP/1.1 200 Connection established\r\n\r\n");
-    if (leftover.length > 0) upstream.write(leftover);
+    for (const buffered of state.pending.splice(0)) upstream.write(buffered);
   }).catch(() => {
+    state.connecting = false;
     refuse(socket, "502 Bad Gateway");
   });
 }
@@ -82,7 +96,7 @@ export function startChatgptUnblockEntryProxy(options: StartEntryProxyOptions): 
         port: options.port ?? 0,
         socket: {
           open(socket) {
-            socket.data = { head: Buffer.alloc(0), upstream: null };
+            socket.data = { head: Buffer.alloc(0), connecting: false, pending: [], upstream: null };
             socket.timeout(HEAD_TIMEOUT_SECONDS);
           },
           data(socket, chunk) { handleData(socket, chunk, options.originPort); },
