@@ -30,10 +30,11 @@ interface ScutilValue {
   get(key: string): string | null;
 }
 
-function parseScutilOutput(output: string): ScutilValue {
+export function parseScutilOutput(output: string): ScutilValue {
   const map = new Map<string, string>();
   for (const line of output.split("\n")) {
-    const match = /^\s*(\S+)\s*=\s*(.*?)\s*$/.exec(line);
+    // `scutil --proxy` prints `Key : value` inside its dictionary; accept `=` too.
+    const match = /^\s*(\S+)\s*[:=]\s*(.*?)\s*$/.exec(line);
     if (match) map.set(match[1]!, match[2]!);
   }
   return { get: key => map.get(key) ?? null };

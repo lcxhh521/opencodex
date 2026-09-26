@@ -1,11 +1,25 @@
 import { describe, expect, test } from "bun:test";
-import { buildChatgptUnblockPac, systemProxyChain } from "../../src/chatgpt/desktop-unblock/pac";
+import { buildChatgptUnblockPac, parseScutilOutput, systemProxyChain } from "../../src/chatgpt/desktop-unblock/pac";
 
-/** A scutil stand-in built from the same `key = value` lines the real command prints. */
+/** A scutil stand-in built from the same `Key : value` lines the real command prints. */
 function scutilOf(lines: Record<string, string>): ReturnType<typeof systemProxyChain> extends never ? never : Parameters<typeof systemProxyChain>[0] {
   const map = new Map(Object.entries(lines));
   return { get: key => map.get(key) ?? null };
 }
+
+describe("chatgpt unblock scutil parsing", () => {
+  test("the parser reads the colon-separated lines scutil actually prints", () => {
+    const raw = "<dictionary> {\n  HTTPSEnable : 1\n  HTTPSProxy : 127.0.0.1\n  HTTPSPort : 7892\n}";
+    const chain = systemProxyChain(parseScutilOutput(raw));
+    expect(chain.entries).toEqual(["PROXY 127.0.0.1:7892"]);
+  });
+
+  test("an equals-style line also parses, and non-key lines are ignored", () => {
+    const raw = "<dictionary> {\n  HTTPEnable = 1\n  HTTPProxy = 10.0.0.9\n  HTTPPort = 7890\n  ExceptionsList : <array> {\n}";
+    const chain = systemProxyChain(parseScutilOutput(raw));
+    expect(chain.entries).toEqual(["PROXY 10.0.0.9:7890"]);
+  });
+});
 
 describe("chatgpt unblock PAC generation", () => {
   test("an HTTP(S) system proxy becomes the PROXY entry, DIRECT last", () => {

@@ -52,7 +52,7 @@ function warnIfAppStillRouted(port: number, pacMode: boolean): void {
     if (app === null) return;
     if (pacMode) {
       if (!chatgptCommandLineHasPac(app, getConfigDir())) return;
-      console.warn(`⚠ The ChatGPT app is still launched with opencodex's PAC; until relaunched it points at a dead entry.`);
+      console.warn(`⚠ The ChatGPT app is still launched with opencodex's PAC; its chatgpt.com traffic now falls through to the captured system chain.`);
       console.warn("   To return it to native networking: ocx chatgpt restore");
       return;
     }
