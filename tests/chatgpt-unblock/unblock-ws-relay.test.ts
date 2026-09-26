@@ -1,12 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { createServer as createNetServer, connect as connectNet } from "node:net";
 import type { AddressInfo, Server as NetServer } from "node:net";
 import { connect as connectTls, createServer as createTlsServer } from "node:tls";
 import type { Server as TlsServer, TLSSocket } from "node:tls";
 import { createLocalInterceptCa, issueLocalInterceptLeaf } from "../../src/claude/intercept/local-ca";
 import { startChatgptUnblockListener } from "../../src/chatgpt/desktop-unblock/listener";
-import { isRelayableUpgrade, sendableCloseCode } from "../../src/chatgpt/desktop-unblock/ws-relay";
+import { isRelayableUpgrade, readResponseHead, sendableCloseCode } from "../../src/chatgpt/desktop-unblock/ws-relay";
 import { encodeWsFrame, parseWsFrames, WEBSOCKET_GUID, WsOpcode } from "../../src/chatgpt/desktop-unblock/ws-frame";
 import type { DialUpstreamOptions } from "../../src/chatgpt/desktop-unblock/ws-upstream";
 
@@ -417,5 +418,31 @@ describe("chatgpt unblock websocket relay helpers", () => {
     expect(sendableCloseCode(1011)).toBe(1011);
     expect(sendableCloseCode(4000)).toBe(4000);
     for (const reserved of [1004, 1005, 1006, 1015, 999, 2000, 5000]) expect(sendableCloseCode(reserved)).toBe(1000);
+  });
+});
+
+describe("chatgpt unblock upstream handshake reader", () => {
+  /** An emitter that stands in for the tunnel socket; an unhandled 'error' on it throws. */
+  function fakeTunnel(): TLSSocket {
+    const emitter = new EventEmitter() as EventEmitter & { pause(): void; setTimeout(ms: number, cb?: () => void): void };
+    emitter.pause = () => {};
+    emitter.setTimeout = () => {};
+    return emitter as unknown as TLSSocket;
+  }
+
+  test("a tunnel error after the 101 head, before attach(), does not throw", async () => {
+    const socket = fakeTunnel();
+    const read = readResponseHead(socket, 1000);
+    socket.emit("data", Buffer.from("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n"));
+    expect((await read)?.head).toStartWith("HTTP/1.1 101");
+    expect(() => socket.emit("error", new Error("ECONNRESET"))).not.toThrow();
+  });
+
+  test("a tunnel error after a failed read does not throw either", async () => {
+    const socket = fakeTunnel();
+    const read = readResponseHead(socket, 1000);
+    socket.emit("close");
+    expect(await read).toBeNull();
+    expect(() => socket.emit("error", new Error("ECONNRESET"))).not.toThrow();
   });
 });
