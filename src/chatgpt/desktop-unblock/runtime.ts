@@ -9,7 +9,7 @@ import {
 import { CHATGPT_INTERCEPT_HOST, startChatgptUnblockListener } from "./listener";
 import { startChatgptUnblockEntryProxy } from "./entry-proxy";
 import type { EntryProxyHandle } from "./entry-proxy";
-import { CHATGPT_UNBLOCK_PAC_FILENAME, buildChatgptUnblockPac, systemProxyChain } from "./pac";
+import { CHATGPT_UNBLOCK_PAC_FILENAME, buildChatgptUnblockPac, loadSystemPac, systemProxyChain } from "./pac";
 import type { WsRelaySocketData } from "./ws-relay";
 import { join } from "node:path";
 import { writeFileSync } from "node:fs";
@@ -93,12 +93,20 @@ export interface ChatgptUnblockState {
   caCertPath: string;
   /** Set in PAC-fallback mode: the CONNECT entry listener the PAC points chatgpt.com at. */
   entryProxy?: EntryProxyHandle;
+  /** PAC mode: how the generated file routes every host other than the intercepted one. */
+  pacRoute?: ChatgptUnblockPacRoute;
 }
 
 export interface ChatgptUnblockHandle<T = undefined> extends ChatgptUnblockState {
   listener: Server<WsRelaySocketData>;
   stop(): Promise<void>;
 }
+
+/**
+ * `system-proxy`: the scutil proxies (or DIRECT in TUN mode); `system-pac`: the system PAC,
+ * embedded; `system-pac-unreadable`: a system PAC is set but could not be read, so DIRECT.
+ */
+export type ChatgptUnblockPacRoute = "system-proxy" | "system-pac" | "system-pac-unreadable";
 
 export interface StartChatgptUnblockOptions {
   config: OcxConfig;
@@ -120,16 +128,21 @@ export async function startChatgptUnblock<T = undefined>(options: StartChatgptUn
   const port = chatgptUnblockPort(options.config, options.publicPort);
   const listener = startChatgptUnblockListener({ leaf, port });
   let entryProxy: EntryProxyHandle | undefined;
+  let pacRoute: ChatgptUnblockPacRoute | undefined;
   if (chatgptPacFallbackEnabled(options.config)) {
     try {
       // The PAC names this port; it must be the derived entry port, not ephemeral, and it
       // must be bound before the app ever reads the file.
       entryProxy = await startChatgptUnblockEntryProxy({ originPort: listener.port ?? port, port: chatgptUnblockEntryPort(options.config, options.publicPort) });
-      // Regenerated at every start: the entry port and the captured system chain (the
+      // Regenerated at every start: the entry port and the captured system route (the
       // user's VPN state) are what the file encodes. A stale file after a config or
       // network change would point the app at a dead chain.
-      writeFileSync(chatgptUnblockPacPath(configDir), buildChatgptUnblockPac(entryProxy.port, systemProxyChain()), { mode: 0o644 });
+      const chain = systemProxyChain();
+      const systemPac = chain.autoConfigUrl ? await loadSystemPac(chain.autoConfigUrl) : null;
+      pacRoute = systemPac ? "system-pac" : chain.autoConfig ? "system-pac-unreadable" : "system-proxy";
+      writeFileSync(chatgptUnblockPacPath(configDir), buildChatgptUnblockPac(entryProxy.port, chain, systemPac), { mode: 0o644 });
     } catch (error) {
+      await entryProxy?.stop();
       await listener.stop(true);
       throw error;
     }
@@ -138,6 +151,7 @@ export async function startChatgptUnblock<T = undefined>(options: StartChatgptUn
     port,
     caCertPath: claudeInterceptCaCertPath(configDir),
     ...(entryProxy ? { entryProxy } : {}),
+    ...(pacRoute ? { pacRoute } : {}),
     listener,
     stop: async () => {
       await entryProxy?.stop();

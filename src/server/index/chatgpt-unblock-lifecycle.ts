@@ -27,7 +27,13 @@ export function createChatgptUnblockLifecycle<T>(): ChatgptUnblockLifecycle {
       pending = startChatgptUnblock<T>(options).then(handle => {
         if (handle) {
           console.log(`🔓 ChatGPT send-unblock active on https://127.0.0.1:${handle.port} (CA: ${handle.caCertPath})`);
-          if (handle.entryProxy) console.log(`   PAC fallback on http://127.0.0.1:${handle.entryProxy.port} (chatgpt.com falls through to the system chain when opencodex is down)`);
+          if (handle.entryProxy) {
+            const route = handle.pacRoute === "system-pac" ? "the system PAC" : "the system proxy chain";
+            console.log(`   PAC fallback on http://127.0.0.1:${handle.entryProxy.port} (other hosts, and chatgpt.com while opencodex is down, follow ${route})`);
+            if (handle.pacRoute === "system-pac-unreadable") {
+              console.warn("⚠ A system PAC is configured but could not be read; the generated PAC routes other hosts DIRECT until opencodex restarts with it readable.");
+            }
+          }
           console.log("   Launch the ChatGPT app with: ocx chatgpt launch   (or `ocx chatgpt install-watcher` for Dock launches)");
         }
         return handle;
