@@ -7,6 +7,7 @@ import {
   issueLocalInterceptLeaf,
 } from "../../claude/intercept/local-ca";
 import { CHATGPT_INTERCEPT_HOST, startChatgptUnblockListener } from "./listener";
+import type { WsRelaySocketData } from "./ws-relay";
 
 /**
  * Lifecycle for the ChatGPT desktop send-unblock listener.
@@ -25,15 +26,34 @@ export function chatgptUnblockEnabled(config: Pick<OcxConfig, "chatgptDesktop" |
   return config.chatgptDesktop?.unblockSend === true;
 }
 
+/**
+ * The listener port: `chatgptDesktop.port` when valid, else the public port plus the offset.
+ * Throws when the derived port would leave the TCP range (a public port of 65336 or more);
+ * callers report that as the optional integration being unavailable.
+ */
 export function chatgptUnblockPort(config: Pick<OcxConfig, "chatgptDesktop">, publicPort: number): number {
   const configured = config.chatgptDesktop?.port;
   if (typeof configured === "number" && Number.isInteger(configured) && configured >= 1 && configured <= 65535) return configured;
-  return publicPort + CHATGPT_UNBLOCK_PORT_OFFSET;
+  const derived = publicPort + CHATGPT_UNBLOCK_PORT_OFFSET;
+  if (derived > 65535) {
+    throw new Error(
+      `the default ChatGPT unblock port (${publicPort} + ${CHATGPT_UNBLOCK_PORT_OFFSET} = ${derived}) is out of range; set chatgptDesktop.port to a free port`,
+    );
+  }
+  return derived;
 }
 
 /** The resolver rule to hand the ChatGPT desktop app at launch. */
 export function chatgptUnblockResolverRule(port: number): string {
   return `MAP ${CHATGPT_INTERCEPT_HOST} 127.0.0.1:${port}`;
+}
+
+/**
+ * The rule as the app's command-line switch. Chromium silently ignores a bare rule passed as
+ * a positional argument, so every launch path must pass this form.
+ */
+export function chatgptUnblockResolverArg(port: number): string {
+  return `--host-resolver-rules=${chatgptUnblockResolverRule(port)}`;
 }
 
 export interface ChatgptUnblockState {
@@ -42,7 +62,7 @@ export interface ChatgptUnblockState {
 }
 
 export interface ChatgptUnblockHandle<T = undefined> extends ChatgptUnblockState {
-  listener: Server<T>;
+  listener: Server<WsRelaySocketData>;
   stop(): Promise<void>;
 }
 
@@ -63,7 +83,7 @@ export async function startChatgptUnblock<T = undefined>(options: StartChatgptUn
   const ca = await ensureLocalInterceptCaForStartup(configDir);
   const leaf = issueLocalInterceptLeaf(ca, [CHATGPT_INTERCEPT_HOST]);
   // The port must be the configured one, not ephemeral: the launcher's resolver rule names it.
-  const listener = startChatgptUnblockListener<T>({ leaf, port: chatgptUnblockPort(options.config, options.publicPort) });
+  const listener = startChatgptUnblockListener({ leaf, port: chatgptUnblockPort(options.config, options.publicPort) });
   return {
     port: listener.port ?? chatgptUnblockPort(options.config, options.publicPort),
     caCertPath: claudeInterceptCaCertPath(configDir),

@@ -1949,7 +1949,14 @@
     "link-compensation.test.ts": "clients",
     "web-search-run-turn-loop.test.ts": "web-search",
     "responses-run-turn-web-search.test.ts": "responses",
-    "server-combo-cooldown-recording.test.ts": "server"
+    "server-combo-cooldown-recording.test.ts": "server",
+    "rewrite.test.ts": "chatgpt-unblock",
+    "unblock-ca-trust.test.ts": "chatgpt-unblock",
+    "unblock-launch-script.test.ts": "chatgpt-unblock",
+    "unblock-listener.test.ts": "chatgpt-unblock",
+    "unblock-watcher-install.test.ts": "chatgpt-unblock",
+    "unblock-ws-frame.test.ts": "chatgpt-unblock",
+    "unblock-ws-relay.test.ts": "chatgpt-unblock"
   },
   "migrated": [
     "adapters",
