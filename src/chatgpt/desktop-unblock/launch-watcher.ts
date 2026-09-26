@@ -100,7 +100,6 @@ function chatgptUnblockWatcherLogPath(configDir?: string): string {
  */
 export function buildChatgptUnblockWatcherScript(port: number, configDir?: string, pacMode = false, entryPort?: number): string {
   const pacArg = chatgptUnblockPacArg(configDir ?? getConfigDir());
-  const flagMarker = pacMode ? ` $PAC_ARG` : ` $RESOLVER_ARG`;
   return `#!/bin/bash
 # opencodex ChatGPT send-unblock launcher.
 #   watch  (launchd, fired by the app's Electron SingletonLock on every launch): if the app is
@@ -146,6 +145,16 @@ app_flagged() {
   else
     case "$cmdline" in *" $RESOLVER_ARG"*) return 0 ;; esac
   fi
+  return 1
+}
+# Either launch switch, whatever the configured mode: restore must also undo the switch an app
+# was launched with before pacFallback was toggled.
+app_switched() {
+  local pid
+  pid=$(app_pid) || return 1
+  local cmdline
+  cmdline=$(ps -o command= -p "$pid" 2>/dev/null)
+  case "$cmdline" in *" $PAC_ARG"*|*" $RESOLVER_ARG"*) return 0 ;; esac
   return 1
 }
 # The port must be held by opencodex's listener, not just by any process. The listener answers
@@ -216,7 +225,7 @@ trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 
 if [ "$MODE" = native ]; then
   if ! app_running; then say "ChatGPT is not running"; exit 0; fi
-  if ! app_flagged; then say "ChatGPT is already running without the launch switches"; exit 0; fi
+  if ! app_switched; then say "ChatGPT is already running without the launch switches"; exit 0; fi
   say "ChatGPT carries the launch switches; restarting it without"
   quit_app || { say "ChatGPT did not quit; quit it manually and reopen it"; exit 1; }
   open -a ChatGPT
