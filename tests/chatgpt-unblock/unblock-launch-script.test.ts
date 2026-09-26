@@ -295,6 +295,18 @@ describe("chatgpt launch watcher", () => {
 });
 
 describe("chatgpt restore (native networking)", () => {
+  test("restore undoes a PAC switch after pacFallback was turned off", () => {
+    const r = run("native", { app: "pac" });
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.openArgs).toEqual([]);
+  });
+
+  test("restore undoes a resolver rule after pacFallback was turned on", () => {
+    const r = run("native", { app: "flagged", pac: true });
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.openArgs).toEqual([]);
+  });
+
   test("a mapped app is quit and reopened without any arguments", () => {
     const r = run("native", { app: "flagged" });
     expect(r.status).toBe(0);
