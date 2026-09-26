@@ -7,16 +7,16 @@ import { join } from "node:path";
 import { getConfigDir } from "../../config/paths";
 import { CHATGPT_INTERCEPT_HOST, CHATGPT_UNBLOCK_IDENTITY_PATH, CHATGPT_UNBLOCK_SERVICE_ID } from "./listener";
 import type { PreservedSendBlock } from "./rewrite";
-import { chatgptUnblockResolverArg } from "./runtime";
+import { chatgptUnblockPacArg, chatgptUnblockResolverArg } from "./runtime";
 
 /**
  * Launch integration for the ChatGPT desktop send-unblock intercept.
  *
- * The Chromium resolver rule only applies when the app is launched with it, so a normal
+ * The launch switches only apply when the app is launched with them, so a normal
  * Dock/Spotlight start reaches the real chatgpt.com and the composer locks again. This module
  * installs a launchd agent that watches the app's Electron `SingletonLock` -- written on every
- * launch -- and, exactly once per launch, restarts the app with the resolver rule if it was
- * started without one. There is no resident polling process: launchd wakes the script on the
+ * launch -- and, exactly once per launch, restarts the app with the switches if it was
+ * started without them. There is no resident polling process: launchd wakes the script on the
  * lock event and the script exits after one check. Because it fires on launch, it never quits
  * an app the user is already working in.
  *
@@ -24,8 +24,9 @@ import { chatgptUnblockResolverArg } from "./runtime";
  * with the feature off -- or another process holding the port -- the app is left native.
  *
  * The watcher, `ocx chatgpt launch` and `ocx chatgpt restore` run the same script, so the launch
- * arguments are built in exactly one place. They are computed at launch time from the system
- * proxy:
+ * arguments are built in exactly one place. The mode decides the switch set:
+ *
+ *   resolver-rule mode (default):
  *   - always `--host-resolver-rules=MAP chatgpt.com 127.0.0.1:<port>`;
  *   - with an HTTP(S)/SOCKS system proxy (a VPN in system-proxy mode), also
  *     `--proxy-server=<proxy>,direct://` and `--proxy-bypass-list=chatgpt.com`. Chromium hands
@@ -36,6 +37,13 @@ import { chatgptUnblockResolverArg } from "./runtime";
  *   - with no proxy, or TUN mode (loopback never enters the tunnel), the resolver rule alone;
  *   - with a PAC file, the resolver rule alone: PAC cannot be combined with a bypass, so
  *     chatgpt.com may stay on the proxy and the composer may lock, but nothing else breaks.
+ *
+ *   PAC-fallback mode (`chatgptDesktop.pacFallback`): only `--proxy-pac-url=file://<pac>`. The
+ *   PAC (regenerated at every opencodex start) sends chatgpt.com to the CONNECT entry listener,
+ *   which splices onto the TLS origin listener; when opencodex is down the refused CONNECT makes
+ *   Chromium fall through to the captured system chain and finally DIRECT -- no resolver rule
+ *   may be present, or it would blackhole that fallback to the dead origin port. No app restart
+ *   is needed to recover.
  */
 
 export const CHATGPT_APP_PATH = "/Applications/ChatGPT.app";
@@ -81,26 +89,35 @@ function chatgptUnblockWatcherLogPath(configDir?: string): string {
 
 /**
  * The launch script.
- *   watch  (launchd, on every app launch) only corrects a running app that lacks the rule;
+ *   watch  (launchd, on every app launch) only corrects a running app that lacks the switches;
  *   launch (`ocx chatgpt launch`) also starts the app when it is not running;
- *   native (`ocx chatgpt restore`) restarts a mapped app WITHOUT the rule, for when the
+ *   native (`ocx chatgpt restore`) restarts a switched app WITHOUT them, for when the
  *          listener is gone or the feature is being turned off.
+ *
+ * `pacMode` switches the argument set (see the module doc): the PAC switch alone when on, the
+ * resolver rule [+ proxy/bypass] otherwise. The app is "flagged" by whichever switch the mode
+ * uses, so a mode change makes the watcher correct an app launched under the other mode.
  */
-export function buildChatgptUnblockWatcherScript(port: number, configDir?: string): string {
+export function buildChatgptUnblockWatcherScript(port: number, configDir?: string, pacMode = false, entryPort?: number): string {
+  const pacArg = chatgptUnblockPacArg(configDir ?? getConfigDir());
+  const flagMarker = pacMode ? ` $PAC_ARG` : ` $RESOLVER_ARG`;
   return `#!/bin/bash
 # opencodex ChatGPT send-unblock launcher.
 #   watch  (launchd, fired by the app's Electron SingletonLock on every launch): if the app is
-#          running WITHOUT the resolver rule (a normal Dock/Spotlight launch), restart it once
-#          with the rule. A correctly launched app, or an absent intercept, is left alone.
+#          running WITHOUT the launch switches (a normal Dock/Spotlight launch), restart it once
+#          with them. A correctly launched app, or an absent intercept, is left alone.
 #   launch (ocx chatgpt launch): same, and start the app if it is not running.
-#   native (ocx chatgpt restore): restart an app that carries the rule without it.
+#   native (ocx chatgpt restore): restart an app that carries the switches without them.
 
 PORT=${port}
 MODE="\${1:-watch}"
 RESOLVER_ARG=${shellQuote(chatgptUnblockResolverArg(port))}
+PAC_ARG=${shellQuote(pacArg)}
+PAC_MODE=${pacMode ? "1" : "0"}
 BYPASS_HOST=${shellQuote(CHATGPT_INTERCEPT_HOST)}
 APP_PATTERN='ChatGPT.app/Contents/MacOS/ChatGPT'
 IDENTITY_URL=${shellQuote(`https://127.0.0.1:${port}${CHATGPT_UNBLOCK_IDENTITY_PATH}`)}
+ENTRY_URL=${shellQuote(`http://127.0.0.1:${entryPort ?? 0}/`)}
 SERVICE_ID=${shellQuote(`"service":"${CHATGPT_UNBLOCK_SERVICE_ID}"`)}
 LOG=${shellQuote(chatgptUnblockWatcherLogPath(configDir))}
 LOCK_DIR="\${TMPDIR:-/tmp}/opencodex-chatgpt-launch.lock"
@@ -122,9 +139,13 @@ app_running() { app_pid >/dev/null; }
 app_flagged() {
   local pid
   pid=$(app_pid) || return 1
-  case "$(ps -o command= -p "$pid" 2>/dev/null)" in
-    *" $RESOLVER_ARG"*) return 0 ;;
-  esac
+  local cmdline
+  cmdline=$(ps -o command= -p "$pid" 2>/dev/null)
+  if [ "$PAC_MODE" = 1 ]; then
+    case "$cmdline" in *" $PAC_ARG"*) return 0 ;; esac
+  else
+    case "$cmdline" in *" $RESOLVER_ARG"*) return 0 ;; esac
+  fi
   return 1
 }
 # The port must be held by opencodex's listener, not just by any process. The listener answers
@@ -132,6 +153,16 @@ app_flagged() {
 # proxy in the environment must not be asked to reach loopback.
 listener_ours() {
   curl -sk --noproxy '*' --max-time 3 "$IDENTITY_URL" 2>/dev/null | grep -qF "$SERVICE_ID"
+}
+# In PAC mode the entry listener must also be up: the PAC points chatgpt.com at it, and a
+# missing entry would send every chatgpt.com request to a dead first hop.
+entry_ours() {
+  [ "$ENTRY_URL" != ${shellQuote("http://127.0.0.1:0/")} ] || return 1
+  curl -s --noproxy '*' --max-time 3 -o /dev/null -x "$ENTRY_URL" 2>/dev/null
+  local status=$?
+  # Exit 0 (CONNECT answered) or 56 (connected, nothing received) means the entry is there;
+  # any connection-level failure (7 and friends) means it is not.
+  [ "$status" -eq 0 ] || [ "$status" -eq 56 ]
 }
 # \`open\` on a running app only activates it and drops the arguments, so the old instance must
 # be fully gone first. Quit is re-sent because the app can ignore it while starting up.
@@ -146,8 +177,10 @@ quit_app() {
   ! app_running
 }
 
-# Extra switches for the current system proxy, one per line (none without a proxy).
+# Extra switches for the current system proxy, one per line (none without a proxy). Only in
+# resolver-rule mode: the PAC carries the system chain itself.
 proxy_args() {
+  [ "$PAC_MODE" = 0 ] || return 0
   local out
   out=$(scutil --proxy 2>/dev/null) || return 0
   val() { printf '%s\\n' "$out" | awk -v k="$1" '$1 == k { print $3; exit }'; }
@@ -166,6 +199,10 @@ if [ "$MODE" != native ] && ! listener_ours; then
   [ "$MODE" = launch ] && { echo "opencodex's ChatGPT listener is not answering on port $PORT; start opencodex first" >&2; exit 1; }
   exit 0
 fi
+if [ "$MODE" != native ] && [ "$PAC_MODE" = 1 ] && ! entry_ours; then
+  [ "$MODE" = launch ] && { echo "the ChatGPT PAC entry listener is not answering; start opencodex first" >&2; exit 1; }
+  exit 0
+fi
 
 # One run at a time: quitting the app deletes the SingletonLock, which fires launchd again.
 # A lock left by a killed run expires after two minutes.
@@ -175,8 +212,8 @@ trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 
 if [ "$MODE" = native ]; then
   if ! app_running; then say "ChatGPT is not running"; exit 0; fi
-  if ! app_flagged; then say "ChatGPT is already running without the resolver rule"; exit 0; fi
-  say "ChatGPT carries the resolver rule; restarting it without"
+  if ! app_flagged; then say "ChatGPT is already running without the launch switches"; exit 0; fi
+  say "ChatGPT carries the launch switches; restarting it without"
   quit_app || { say "ChatGPT did not quit; quit it manually and reopen it"; exit 1; }
   open -a ChatGPT
   say "relaunched ChatGPT with native networking"
@@ -185,16 +222,21 @@ fi
 
 if app_running; then
   if app_flagged; then
-    say "ChatGPT is already running with the resolver rule"
+    say "ChatGPT is already running with the launch switches"
     exit 0
   fi
-  say "ChatGPT is running without the resolver rule; restarting it"
-  quit_app || { say "ChatGPT did not quit; leaving it running without the rule"; exit 1; }
+  say "ChatGPT is running without the launch switches; restarting it"
+  quit_app || { say "ChatGPT did not quit; leaving it running without the switches"; exit 1; }
 elif [ "$MODE" != launch ]; then
   exit 0
 fi
 
-ARGS=("$RESOLVER_ARG")
+ARGS=()
+if [ "$PAC_MODE" = 1 ]; then
+  ARGS+=("$PAC_ARG")
+else
+  ARGS+=("$RESOLVER_ARG")
+fi
 while IFS= read -r arg; do
   [ -n "$arg" ] && ARGS+=("$arg")
 done < <(proxy_args)
@@ -264,6 +306,8 @@ function watcherDomain(): string {
 
 export interface InstallChatgptUnblockWatcherOptions {
   port: number;
+  /** PAC mode: the CONNECT entry port the generated script checks and the app is pointed at. */
+  entryPort?: number;
   configDir?: string;
   /** Test seam: skip the macOS / app-presence guards. */
   assumeSupported?: boolean;
@@ -292,7 +336,11 @@ export function installChatgptUnblockWatcher(options: InstallChatgptUnblockWatch
     throw new Error(`could not unload the previous watcher (launchctl bootout exited ${previous.status}): ${previous.output}`);
   }
   if (!options.plistPath) mkdirSync(expandHome("~/Library/LaunchAgents"), { recursive: true });
-  writeFileSync(paths.scriptPath, buildChatgptUnblockWatcherScript(options.port, options.configDir), { mode: 0o700 });
+  writeFileSync(
+    paths.scriptPath,
+    buildChatgptUnblockWatcherScript(options.port, options.configDir, options.entryPort !== undefined, options.entryPort),
+    { mode: 0o700 },
+  );
   writeFileSync(paths.plistPath, buildChatgptUnblockWatcherPlist(paths.scriptPath, paths.lockPath, paths.errPath));
   const loaded = launchctl(["bootstrap", watcherDomain(), paths.plistPath]);
   if (!loaded.ok) {
@@ -332,13 +380,13 @@ export interface ChatgptUnblockWatcherStatus {
   plistUpToDate: boolean;
 }
 
-export function chatgptUnblockWatcherStatus(port: number, configDir?: string): ChatgptUnblockWatcherStatus {
+export function chatgptUnblockWatcherStatus(port: number, configDir?: string, pacMode = false, entryPort?: number): ChatgptUnblockWatcherStatus {
   const paths = chatgptUnblockWatcherPaths(configDir);
   const scriptInstalled = existsSync(paths.scriptPath);
   const plistInstalled = existsSync(paths.plistPath);
   const agentLoaded = sh("launchctl", ["print", `${watcherDomain()}/${CHATGPT_UNBLOCK_WATCHER_LABEL}`]).ok;
   const scriptUpToDate = scriptInstalled
-    && readFileSync(paths.scriptPath, "utf8") === buildChatgptUnblockWatcherScript(port, configDir);
+    && readFileSync(paths.scriptPath, "utf8") === buildChatgptUnblockWatcherScript(port, configDir, pacMode, entryPort);
   const plistUpToDate = plistInstalled
     && readFileSync(paths.plistPath, "utf8") === buildChatgptUnblockWatcherPlist(paths.scriptPath, paths.lockPath, paths.errPath);
   return { scriptInstalled, plistInstalled, agentLoaded, scriptUpToDate, plistUpToDate };
@@ -361,6 +409,11 @@ export function chatgptAppCommandLine(): string | null {
 /** Whether a command line carries the resolver switch for `port`. */
 export function chatgptCommandLineHasRule(commandLine: string, port: number): boolean {
   return commandLine.includes(` ${chatgptUnblockResolverArg(port)}`);
+}
+
+/** Whether a command line carries the PAC switch of the given config dir. */
+export function chatgptCommandLineHasPac(commandLine: string, configDir: string): boolean {
+  return commandLine.includes(` ${chatgptUnblockPacArg(configDir)}`);
 }
 
 export type ChatgptListenerProbe =

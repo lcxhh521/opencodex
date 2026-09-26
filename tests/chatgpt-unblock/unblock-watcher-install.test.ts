@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  chatgptUnblockWatcherStatus,
   installChatgptUnblockWatcher,
   probeChatgptUnblockListener,
   uninstallChatgptUnblockWatcher,
@@ -135,5 +136,29 @@ describe("chatgpt listener probe", () => {
       }
       await listener.stop(true);
     }
+  });
+});
+
+describe("chatgpt launch watcher install (PAC mode)", () => {
+  test("installing with an entryPort writes the PAC-mode script that probes the entry", () => {
+    const fake = launchctl({ bootout: 3 });
+    installChatgptUnblockWatcher({ port: 10300, configDir: dir, plistPath, assumeSupported: true, launchctl: fake.run, entryPort: 10301 });
+    expect(existsSync(scriptPath)).toBe(true);
+    const script = readFileSync(scriptPath!, "utf8");
+    expect(script).toContain("--proxy-pac-url=file://");
+    expect(script).toContain("PAC_MODE=1");
+    expect(script).toContain("127.0.0.1:10301");
+    expect(script).not.toContain("--host-resolver-rules=MAP chatgpt.com 127.0.0.1:10300 '--");
+    // The resolver arg is still defined (used by mode checks) but the app is launched with PAC.
+    expect(script).toContain("entry_ours");
+  });
+
+  test("the PAC-mode script's up-to-date check matches only the same mode", () => {
+    const fake = launchctl({ bootout: 3 });
+    installChatgptUnblockWatcher({ port: 10300, configDir: dir, plistPath, assumeSupported: true, launchctl: fake.run, entryPort: 10301 });
+    const statusPac = chatgptUnblockWatcherStatus(10300, dir, true, 10301);
+    expect(statusPac.scriptUpToDate).toBe(true);
+    const statusResolver = chatgptUnblockWatcherStatus(10300, dir, false);
+    expect(statusResolver.scriptUpToDate).toBe(false);
   });
 });
