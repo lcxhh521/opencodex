@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   buildChatgptUnblockWatcherPlist,
   buildChatgptUnblockWatcherScript,
+  chatgptCommandLineHasPac,
   chatgptCommandLineHasRule,
 } from "../../src/chatgpt/desktop-unblock/launch-watcher";
 
@@ -54,7 +55,7 @@ const SCUTIL_PAC = `<dictionary> {
   SOCKSEnable : 0
 }`;
 
-type AppState = "none" | "plain" | "flagged";
+type AppState = "none" | "plain" | "flagged" | "pac";
 
 const APP_BINARY = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT";
 // A shell whose command line mentions the rule, e.g. someone grepping for it. Matching on
@@ -86,8 +87,16 @@ while IFS='|' read -r p name command; do
 done < "$STUB_DIR/processes"
 exit 1`);
   // The listener's identity path: opencodex answers with its service id, another server with
-  // something else, and a closed port makes curl fail.
-  stub("curl", `case "$STUB_LISTENER" in
+  // something else, and a closed port makes curl fail. A call with -x (the entry probe)
+  // answers 0 when the entry is up and a connection-level failure when it is not.
+  stub("curl", `if [ "$1" = -s ] && [ "$2" = --noproxy ]; then
+  case "$STUB_ENTRY" in
+    up) exit 0 ;;
+    up56) exit 56 ;;
+    *) exit 7 ;;
+  esac
+fi
+case "$STUB_LISTENER" in
   ours) echo '{"service":"opencodex-chatgpt-unblock","preservedSendBlocks":[]}' ;;
   foreign) echo '<html>another server</html>' ;;
   *) exit 7 ;;
@@ -130,10 +139,17 @@ function run(mode: "watch" | "launch" | "native", options: {
   quitIgnored?: boolean;
   decoy?: boolean;
   configDir?: string;
+  entry?: "up" | "up56" | "down";
+  pac?: boolean;
+  entryPort?: number;
 }) {
+  const pacMode = options.pac === true;
+  const entryPort = options.entryPort ?? 10301;
+  const PAC_ARG = `--proxy-pac-url=file://${options.configDir ?? dir}/chatgpt-unblock.pac`;
   const processes = [
     options.app === "plain" ? `400|ChatGPT|${APP_BINARY}` : null,
     options.app === "flagged" ? `400|ChatGPT|${APP_BINARY} ${RESOLVER} --proxy-bypass-list=chatgpt.com` : null,
+    options.app === "pac" ? `400|ChatGPT|${APP_BINARY} ${PAC_ARG}` : null,
     // Helpers share the bundle but not the process name; they must never count as the app.
     options.app !== "none" ? `401|ChatGPT Helper|/Applications/ChatGPT.app/Contents/Frameworks/ChatGPT Helper.app/Contents/MacOS/ChatGPT Helper --type=utility ${RESOLVER}` : null,
     options.decoy ? `300|zsh|${DECOY}` : null,
@@ -141,7 +157,7 @@ function run(mode: "watch" | "launch" | "native", options: {
   writeFileSync(join(dir, "processes"), processes.map(line => `${line}\n`).join(""));
   writeFileSync(join(dir, "scutil.txt"), options.scutil ?? SCUTIL_NO_PROXY);
   const script = join(dir, "launch.sh");
-  writeFileSync(script, buildChatgptUnblockWatcherScript(PORT, options.configDir ?? dir));
+  writeFileSync(script, buildChatgptUnblockWatcherScript(PORT, options.configDir ?? dir, pacMode, entryPort));
   const result = spawnSync("/bin/bash", [script, mode], {
     encoding: "utf8",
     env: {
@@ -150,6 +166,7 @@ function run(mode: "watch" | "launch" | "native", options: {
       STUB_DIR: dir,
       STUB_LISTENER: options.listener ?? "ours",
       STUB_QUIT_IGNORED: options.quitIgnored ? "1" : "0",
+      STUB_ENTRY: options.entry ?? (pacMode ? "up" : "n/a"),
     },
   });
   const read = (name: string) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : "");
@@ -272,7 +289,7 @@ describe("chatgpt launch watcher", () => {
     const r = run("launch", { app: "flagged" });
     expect(r.status).toBe(0);
     expect(r.calls).toEqual([]);
-    expect(r.stdout).toContain("already running with the resolver rule");
+    expect(r.stdout).toContain("already running with the launch switches");
   });
 });
 
@@ -321,5 +338,54 @@ describe("chatgpt launch helpers", () => {
     expect(chatgptCommandLineHasRule(`${APP_BINARY} MAP chatgpt.com 127.0.0.1:10300`, PORT)).toBe(false);
     expect(chatgptCommandLineHasRule(APP_BINARY, PORT)).toBe(false);
     expect(chatgptCommandLineHasRule(`${APP_BINARY} ${RESOLVER.replace("10300", "10301")}`, PORT)).toBe(false);
+  });
+});
+
+describe("chatgpt launch in PAC-fallback mode", () => {
+  test("the app gets the PAC switch alone, whatever the system proxy is", () => {
+    for (const scutil of [SCUTIL_NO_PROXY, SCUTIL_SYSTEM_PROXY, SCUTIL_SOCKS_ONLY, SCUTIL_PAC]) {
+      const r = run("launch", { app: "none", scutil, pac: true, configDir: dir });
+      expect(r.openArgs).toEqual([`--proxy-pac-url=file://${dir}/chatgpt-unblock.pac`]);
+    }
+  });
+
+  test("watch corrects an app launched under the resolver-rule mode once the PAC is live", () => {
+    // A mode change means the app's old switches no longer match the marker: it is corrected.
+    const r = run("watch", { app: "flagged", pac: true });
+    expect(r.status).toBe(0);
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.openArgs).toEqual([`--proxy-pac-url=file://${dir}/chatgpt-unblock.pac`]);
+  });
+
+  test("an app already carrying the PAC is left alone", () => {
+    const r = run("launch", { app: "pac", pac: true });
+    expect(r.status).toBe(0);
+    expect(r.calls).toEqual([]);
+    expect(r.stdout).toContain("already running with the launch switches");
+  });
+
+  test("launch refuses with guidance while the entry listener is down", () => {
+    const r = run("launch", { app: "none", pac: true, entry: "down" });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("entry listener is not answering");
+    expect(r.calls).toEqual([]);
+  });
+
+  test("watch leaves everything alone when the entry is down (never force a dead route)", () => {
+    const r = run("watch", { app: "plain", pac: true, entry: "down" });
+    expect(r.status).toBe(0);
+    expect(r.calls).toEqual([]);
+  });
+
+  test("the entry probe accepts curl exit 56 (connected, empty answer) as up", () => {
+    const r = run("launch", { app: "none", pac: true, entry: "up56" });
+    expect(r.status).toBe(0);
+    expect(r.openArgs).toEqual([`--proxy-pac-url=file://${dir}/chatgpt-unblock.pac`]);
+  });
+
+  test("the PAC switch on the command line counts as flagged via chatgptCommandLineHasPac", () => {
+    expect(chatgptCommandLineHasPac(`${APP_BINARY} --proxy-pac-url=file://${dir}/chatgpt-unblock.pac`, dir)).toBe(true);
+    expect(chatgptCommandLineHasPac(APP_BINARY, dir)).toBe(false);
+    expect(chatgptCommandLineHasPac(`${APP_BINARY} --proxy-pac-url=file://other/chatgpt-unblock.pac`, dir)).toBe(false);
   });
 });

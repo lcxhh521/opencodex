@@ -11,7 +11,8 @@ import {
   restoreChatgptNative,
   uninstallChatgptUnblockWatcher,
 } from "../chatgpt/desktop-unblock/launch-watcher";
-import { chatgptUnblockPort, chatgptUnblockResolverArg } from "../chatgpt/desktop-unblock/runtime";
+import { chatgptPacFallbackEnabled, chatgptUnblockEntryPort, chatgptUnblockPacArg, chatgptUnblockPort, chatgptUnblockResolverArg } from "../chatgpt/desktop-unblock/runtime";
+import { chatgptCommandLineHasPac } from "../chatgpt/desktop-unblock/launch-watcher";
 import { chatgptCaTrustCommand, inspectChatgptCaTrust } from "../chatgpt/desktop-unblock/ca-trust";
 import { claudeInterceptCaCertPath } from "../claude/intercept/local-ca";
 import { getConfigDir } from "../config/paths";
@@ -23,16 +24,16 @@ import { interactiveConfirm } from "./interactive-confirm";
  *   ocx chatgpt status                   Feature, listener, trust, watcher and app state
  *   ocx chatgpt install-watcher [--yes]  Install the launch watcher (Dock/Spotlight launches too)
  *   ocx chatgpt uninstall-watcher        Remove the launch watcher
- *   ocx chatgpt launch                   Launch the app with the resolver rule
- *   ocx chatgpt restore                  Relaunch a mapped app with native networking
+ *   ocx chatgpt launch                   Launch the app with the intercept switches
+ *   ocx chatgpt restore                  Relaunch a switched app with native networking
  */
 
 const USAGE = `Usage:
   ocx chatgpt status                   Feature, listener, certificate trust, watcher and app state
   ocx chatgpt install-watcher [--yes]  Install the launch watcher (covers Dock/Spotlight launches)
   ocx chatgpt uninstall-watcher        Remove the launch watcher
-  ocx chatgpt launch                   Launch the ChatGPT app with the resolver rule
-  ocx chatgpt restore                  Relaunch a mapped ChatGPT app with native networking`;
+  ocx chatgpt launch                   Launch the ChatGPT app with the intercept switches
+  ocx chatgpt restore                  Relaunch a switched ChatGPT app with native networking`;
 
 /** Port the intercept listens on: explicit config, else live proxy + offset, else default + offset. */
 export function resolveChatgptUnblockPort(config: OcxConfig, livePort: number | undefined): number {
@@ -71,7 +72,7 @@ export async function handleChatgptCommand(args: string[], platform: NodeJS.Plat
     return 1;
   }
 
-  if (sub === "status") return await printStatus(config, port);
+  if (sub === "status") return await printStatus(config, port, live?.port);
 
   if (sub === "install-watcher") {
     if (config.chatgptDesktop?.unblockSend !== true) {
@@ -91,7 +92,11 @@ export async function handleChatgptCommand(args: string[], platform: NodeJS.Plat
       }
     }
     try {
-      installChatgptUnblockWatcher({ port });
+      const pacMode = chatgptPacFallbackEnabled(config);
+      installChatgptUnblockWatcher({
+        port,
+        ...(pacMode ? { entryPort: chatgptUnblockEntryPort(config, live?.port ?? (typeof config.port === "number" ? config.port : 10100)) } : {}),
+      });
     } catch (error) {
       console.error(`Launch watcher not installed: ${error instanceof Error ? error.message : String(error)}`);
       return 1;
@@ -128,14 +133,18 @@ function report(result: { ok: boolean; output: string }): number {
   return result.ok ? 0 : 1;
 }
 
-async function printStatus(config: OcxConfig, port: number): Promise<number> {
+async function printStatus(config: OcxConfig, port: number, livePort: number | undefined): Promise<number> {
   const enabled = config.chatgptDesktop?.unblockSend === true;
+  const pacMode = chatgptPacFallbackEnabled(config);
+  const configDir = getConfigDir();
+  const entryPort = pacMode ? chatgptUnblockEntryPort(config, livePort ?? (typeof config.port === "number" ? config.port : 10100)) : undefined;
   const listener = await probeChatgptUnblockListener(port);
-  const watcher = chatgptUnblockWatcherStatus(port);
+  const watcher = chatgptUnblockWatcherStatus(port, configDir, pacMode, entryPort);
   const appCommandLine = chatgptAppCommandLine();
   const appRunning = appCommandLine !== null;
-  const appFlagged = appRunning && chatgptCommandLineHasRule(appCommandLine, port);
-  const caPath = claudeInterceptCaCertPath(getConfigDir());
+  const appFlagged = appRunning
+    && (pacMode ? chatgptCommandLineHasPac(appCommandLine, configDir) : chatgptCommandLineHasRule(appCommandLine, port));
+  const caPath = claudeInterceptCaCertPath(configDir);
   const trust = await inspectChatgptCaTrust(caPath);
   const listenerLine = {
     ours: "listening",
@@ -149,14 +158,15 @@ async function printStatus(config: OcxConfig, port: number): Promise<number> {
     unknown: "could not be checked",
     unsupported: "not applicable on this platform",
   }[trust];
+  const launchSwitch = pacMode ? chatgptUnblockPacArg(configDir) : chatgptUnblockResolverArg(port);
   console.log(`ChatGPT send-unblock:
-  feature enabled:     ${enabled ? "yes" : "no (set chatgptDesktop.unblockSend: true)"}
-  listener port:       ${port} (${listenerLine})
-  resolver rule:       ${chatgptUnblockResolverArg(port)}
+  feature enabled:     ${enabled ? "yes" : "no (set chatgptDesktop.unblockSend: true)"}${pacMode ? "\n  PAC fallback:        on (auto-fallback to the VPN chain / direct when opencodex is down)" : ""}
+  listener port:       ${port} (${listenerLine})${pacMode && entryPort ? `\n  entry port:          ${entryPort}` : ""}
+  launch switch:       ${launchSwitch}
   CA trust:            ${trustLine}
   watcher script:      ${watcher.scriptInstalled ? (watcher.scriptUpToDate ? "installed" : "installed (outdated; reinstall)") : "not installed"}
   watcher agent:       ${watcher.agentLoaded ? "loaded" : watcher.plistInstalled ? "installed but not loaded" : "not installed"}
-  app:                 ${appRunning ? (appFlagged ? "running with rule" : "running WITHOUT rule (composer will lock)") : "not running"}`);
+  app:                 ${appRunning ? (appFlagged ? "running with switches" : "running WITHOUT switches (composer will lock)") : "not running"}`);
   if (trust === "untrusted") console.log(`  restore trust with:  ${chatgptCaTrustCommand(caPath)}`);
   if (listener.state === "ours" && listener.preservedSendBlocks.length > 0) {
     // Non-quota send blocks are deliberately left in place; name them so a locked composer has a cause.
@@ -164,7 +174,10 @@ async function printStatus(config: OcxConfig, port: number): Promise<number> {
     for (const block of listener.preservedSendBlocks) console.log(`    - ${block.name}: ${block.reason} (last seen ${block.lastSeen})`);
   }
   if (appFlagged && listener.state !== "ours") {
-    console.log(`
+    console.log(pacMode ? `
+  ⚠ The app is routed through opencodex's PAC, but the listener is not answering. ChatGPT
+    falls back to the system chain automatically; until the PAC is refreshed it may bypass
+    opencodex on the next launches. Run 'ocx chatgpt restore' for clean native networking.` : `
   ⚠ The app is routed to port ${port}, but opencodex's listener is not answering there.
     Every chatgpt.com request from the app fails until opencodex runs again, or run
     'ocx chatgpt restore' to relaunch the app with native networking.`);

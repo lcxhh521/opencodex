@@ -1046,7 +1046,7 @@ export interface OcxConfig {
    * the startup log). A malformed value reads as off. `port` (1–65535) overrides the default
    * listener port (public port + 200).
    */
-  chatgptDesktop?: { unblockSend?: boolean; port?: number };
+  chatgptDesktop?: { unblockSend?: boolean; pacFallback?: boolean; port?: number };
   /**
    * Shared account-pool kernel, opt-in and off by default.
    *

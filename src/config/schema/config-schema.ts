@@ -253,6 +253,7 @@ export const configSchema = z.object({
   // group must never cost the operator their other settings.
   chatgptDesktop: z.object({
     unblockSend: z.boolean().optional(),
+    pacFallback: z.boolean().optional(),
     port: z.number().int().min(1).max(65535).optional(),
   }).optional().catch(undefined),
   // Same degrade-to-off rule as the flags above: a hand-edited typo in an opt-in pool
