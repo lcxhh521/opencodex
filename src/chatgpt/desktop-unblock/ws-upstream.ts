@@ -1,6 +1,7 @@
 import { connect as connectSocket } from "node:net";
 import { connect as connectTls } from "node:tls";
 import { effectiveProxyFor } from "../../lib/proxy-env";
+import { socks5Credentials, socks5Handshake } from "../../lib/socks5-handshake";
 import type { Socket } from "node:net";
 import type { TLSSocket } from "node:tls";
 
@@ -12,10 +13,11 @@ import type { TLSSocket } from "node:tls";
  * fully controls. The dial honors the same proxy selection as every other outbound
  * request the server makes: `effectiveProxyFor` reads HTTP(S)_PROXY/ALL_PROXY, which
  * `applyProxyEnv` populates from `config.proxy` at startup. A configured http(s) proxy
- * is reached through an HTTP CONNECT tunnel; a SOCKS5 ALL_PROXY through a SOCKS5 CONNECT;
- * no proxy means a direct TLS connection. The VPN's own mode (system proxy / TUN / off)
- * therefore never has to be detected: the tunnel rides whatever egress opencodex already
- * uses for provider traffic.
+ * is reached through an HTTP CONNECT tunnel; a SOCKS5 ALL_PROXY through a SOCKS5 CONNECT
+ * (sharing `src/lib/socks5-handshake.ts` with the fetch tunnel, so a credentialed
+ * `socks5://` proxy authenticates on both routes); no proxy means a direct TLS
+ * connection. The VPN's own mode (system proxy / TUN / off) therefore never has to be
+ * detected: the tunnel rides whatever egress opencodex already uses for provider traffic.
  */
 
 export const CHATGPT_UPSTREAM_HOST = "chatgpt.com";
@@ -90,9 +92,15 @@ async function dialRaw(target: RawTarget, proxy: string | null, route: UpstreamT
     plain.once("error", () => proxySocket.destroy());
   }
   const reader = new ProxyHandshakeReader(plain, timeout);
+  const socks5 = route === "socks5";
   try {
-    if (route === "http-connect") await httpConnectThrough(reader, target, proxyUrl);
-    else await socks5ConnectThrough(reader, target);
+    // A socks5:// URL with credentials must authenticate here exactly as the fetch tunnel
+    // would with the same URL; refusing selection instead would disable voice and dictation
+    // for proxies fetch traffic handles fine. Credential decoding stays inside the try so a
+    // malformed URL destroys the proxy socket instead of leaking it.
+    const credentials = socks5 ? socks5Credentials(proxyUrl) : {};
+    if (!socks5) await httpConnectThrough(reader, target, proxyUrl);
+    else await socks5Handshake(reader, target, credentials);
   } catch (error) {
     reader.dispose();
     plain.destroy();
@@ -138,7 +146,7 @@ class ProxyHandshakeReader {
     socket.setTimeout(timeout, this.onTimeout);
   }
 
-  write(bytes: Buffer | string): void {
+  write(bytes: Uint8Array | string): void {
     this.socket.write(bytes);
   }
 
@@ -213,30 +221,6 @@ async function httpConnectThrough(reader: ProxyHandshakeReader, target: RawTarge
   const head = await reader.readHttpHead();
   const statusLine = head.split(CRLF)[0]!;
   if (!/^HTTP\/1\.[01] 2\d\d/.test(statusLine)) throw new Error(`proxy refused CONNECT: ${statusLine}`);
-}
-
-async function socks5ConnectThrough(reader: ProxyHandshakeReader, target: RawTarget): Promise<void> {
-  // Byte-level SOCKS5 CONNECT (RFC 1928), no-auth only: proxy selection upstream of this
-  // module never picks an authenticated SOCKS proxy it cannot hand to a raw socket.
-  reader.write(Buffer.from([0x05, 0x01, 0x00])); // VER, 1 method, NO AUTH
-  const greeting = await reader.readExact(2);
-  if (greeting[0] !== 0x05 || greeting[1] !== 0x00) throw new Error("SOCKS5 greeting rejected");
-  const hostBytes = Buffer.from(target.host, "utf8");
-  reader.write(Buffer.from([
-    0x05, // VER
-    0x01, // CONNECT
-    0x00, // RSV
-    0x03, // ATYP = domain
-    hostBytes.length,
-    ...hostBytes,
-    target.port >> 8,
-    target.port & 0xff,
-  ]));
-  const replyHead = await reader.readExact(4);
-  if (replyHead[0] !== 0x05 || replyHead[1] !== 0x00) throw new Error("SOCKS5 CONNECT refused");
-  const atyp = replyHead[3]!;
-  const addressLength = atyp === 0x01 ? 4 : atyp === 0x03 ? (await reader.readExact(1))[0]! : 16;
-  await reader.readExact(addressLength + 2);
 }
 
 async function wrapTls(raw: Socket, timeout: number, ca: string | undefined): Promise<TLSSocket> {

@@ -154,37 +154,61 @@ function startTlsConnectProxy(upstreamPort: () => number): { server: TlsServer; 
   return { server, requests };
 }
 
-/** No-auth SOCKS5 proxy that sends every CONNECT to the fake upstream, recording the target. */
-function startSocks5Proxy(upstreamPort: () => number): { server: NetServer; targets: string[] } {
+/** SOCKS5 proxy that sends every CONNECT to the fake upstream, recording the target. Optional RFC 1929 credentials. */
+function startSocks5Proxy(upstreamPort: () => number, credentials?: { username: string; password: string }): { server: NetServer; targets: string[]; authAttempts: string[] } {
   const targets: string[] = [];
+  const authAttempts: string[] = [];
   const server = createNetServer(client => {
     let buffer = Buffer.alloc(0);
-    let greeted = false;
+    let stage: "greeting" | "auth" | "connect" = "greeting";
     client.on("error", () => {});
     const onData = (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk]);
-      if (!greeted) {
+      if (stage === "greeting") {
         if (buffer.length < 2 || buffer.length < 2 + buffer[1]!) return;
-        buffer = buffer.subarray(2 + buffer[1]!);
-        greeted = true;
-        client.write(Buffer.from([0x05, 0x00]));
+        const methods = buffer.subarray(2, 2 + buffer[1]!);
+        buffer = buffer.subarray(2 + methods.length);
+        const needsAuth = credentials !== undefined;
+        if (needsAuth && !methods.includes(0x02)) {
+          client.end(Buffer.from([0x05, 0xff]));
+          return;
+        }
+        client.write(Buffer.from([0x05, needsAuth ? 0x02 : 0x00]));
+        stage = needsAuth ? "auth" : "connect";
       }
-      if (buffer.length < 5) return;
-      const hostLength = buffer[4]!;
-      if (buffer.length < 5 + hostLength + 2) return;
-      client.removeListener("data", onData);
-      const host = buffer.subarray(5, 5 + hostLength).toString();
-      targets.push(`${host}:${buffer.readUInt16BE(5 + hostLength)}`);
-      const upstream = connectNet(upstreamPort(), "127.0.0.1", () => {
-        client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
-        client.pipe(upstream).pipe(client);
-      });
-      upstream.on("error", () => client.destroy());
+      if (stage === "auth") {
+        if (buffer.length < 2) return;
+        const usernameLength = buffer[1]!;
+        if (buffer.length < 2 + usernameLength + 1) return;
+        const passwordLength = buffer[2 + usernameLength]!;
+        if (buffer.length < 2 + usernameLength + 1 + passwordLength) return;
+        const username = buffer.subarray(2, 2 + usernameLength).toString();
+        const password = buffer.subarray(3 + usernameLength, 3 + usernameLength + passwordLength).toString();
+        buffer = buffer.subarray(2 + usernameLength + 1 + passwordLength);
+        const valid = username === credentials?.username && password === credentials?.password;
+        authAttempts.push(`${username}:${password}`);
+        client.write(Buffer.from([0x01, valid ? 0x00 : 0xff]));
+        if (!valid) return;
+        stage = "connect";
+      }
+      if (stage === "connect") {
+        if (buffer.length < 5) return;
+        const hostLength = buffer[4]!;
+        if (buffer.length < 5 + hostLength + 2) return;
+        client.removeListener("data", onData);
+        const host = buffer.subarray(5, 5 + hostLength).toString();
+        targets.push(`${host}:${buffer.readUInt16BE(5 + hostLength)}`);
+        const upstream = connectNet(upstreamPort(), "127.0.0.1", () => {
+          client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+          client.pipe(upstream).pipe(client);
+        });
+        upstream.on("error", () => client.destroy());
+      }
     };
     client.on("data", onData);
   });
   server.listen(0, "127.0.0.1");
-  return { server, targets };
+  return { server, targets, authAttempts };
 }
 
 /** A WebSocket client standing in for the desktop app, with an awaitable message queue. */
@@ -389,6 +413,35 @@ describe("chatgpt unblock websocket relay", () => {
     expect(await app.next()).toBe("up:via-socks");
     expect(proxy.targets).toEqual(["chatgpt.com:443"]);
     app.ws.close();
+  });
+
+  test("a credentialed SOCKS5 proxy authenticates over RFC 1929 before CONNECT", async () => {
+    const proxy = startSocks5Proxy(upstream.port, { username: "user", password: "p@ss w0rd" });
+    cleanups.push(() => proxy.server.close());
+    await waitFor(() => proxy.server.listening, "authenticated socks5 proxy");
+    const listener = listenerFor({ proxy: `socks5://user:p%40ss%20w0rd@127.0.0.1:${(proxy.server.address() as AddressInfo).port}` });
+    cleanups.push(() => listener.stop(true));
+    const app = await openApp(listener.port!, "/dictation/stream");
+    expect(await app.next()).toBe("hello-early");
+    app.ws.send("via-auth-socks");
+    expect(await app.next()).toBe("up:via-auth-socks");
+    // Percent-encoded credentials decoded, subnegotiated exactly once, CONNECT after.
+    expect(proxy.authAttempts).toEqual(["user:p@ss w0rd"]);
+    expect(proxy.targets).toEqual(["chatgpt.com:443"]);
+    app.ws.close();
+  });
+
+  test("rejected RFC 1929 credentials fail the upgrade with 502", async () => {
+    const proxy = startSocks5Proxy(upstream.port, { username: "user", password: "real-secret" });
+    cleanups.push(() => proxy.server.close());
+    await waitFor(() => proxy.server.listening, "authenticated socks5 proxy");
+    const listener = listenerFor({ proxy: `socks5://user:wrong@127.0.0.1:${(proxy.server.address() as AddressInfo).port}` });
+    cleanups.push(() => listener.stop(true));
+    const head = await rawUpgrade(listener.port!, "/dictation/stream");
+    expect(head.split("\r\n")[0]).toMatch(/^HTTP\/1\.1 502/);
+    // The proxy saw the failed attempt and no CONNECT followed it.
+    expect(proxy.authAttempts).toEqual(["user:wrong"]);
+    expect(proxy.targets).toEqual([]);
   });
 
   test("a fragmented message whose payload passes the byte ceiling fails with 1009", async () => {
