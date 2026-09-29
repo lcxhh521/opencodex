@@ -145,7 +145,9 @@ describe("chatgpt launch watcher install (PAC mode)", () => {
     installChatgptUnblockWatcher({ port: 10300, configDir: dir, plistPath, assumeSupported: true, launchctl: fake.run, entryPort: 10301 });
     expect(existsSync(scriptPath)).toBe(true);
     const script = readFileSync(scriptPath!, "utf8");
-    expect(script).toContain("--proxy-pac-url=file://");
+    // The PAC is rebuilt from the file at run time and passed inline (a file:// PAC is ignored).
+    expect(script).toContain("--proxy-pac-url=data:application/x-ns-proxy-autoconfig;base64,");
+    expect(script).toContain("chatgpt-unblock.pac");
     expect(script).toContain("PAC_MODE=1");
     expect(script).toContain("127.0.0.1:10301");
     expect(script).not.toContain("--host-resolver-rules=MAP chatgpt.com 127.0.0.1:10300 '--");

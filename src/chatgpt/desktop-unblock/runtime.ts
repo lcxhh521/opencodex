@@ -12,7 +12,7 @@ import type { EntryProxyHandle } from "./entry-proxy";
 import { CHATGPT_UNBLOCK_PAC_FILENAME, buildChatgptUnblockPac, loadSystemPac, systemProxyChain } from "./pac";
 import type { WsRelaySocketData } from "./ws-relay";
 import { join } from "node:path";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 /**
  * Lifecycle for the ChatGPT desktop send-unblock listener.
@@ -115,9 +115,30 @@ export function chatgptUnblockPacPath(configDir: string): string {
   return join(configDir, CHATGPT_UNBLOCK_PAC_FILENAME);
 }
 
-/** The PAC as the app's command-line switch. */
+/**
+ * The PAC switch's fixed prefix. The script travels INLINE as a `data:` URL: on the ChatGPT
+ * desktop app (Chromium 154) a `--proxy-pac-url=file://...` switch is ignored -- the app then
+ * dials every host directly, bypassing both the intercept and the user's VPN chain -- and an
+ * `http://` PAC would need opencodex alive to be fetched, defeating the fallback. A `data:` PAC
+ * needs neither, and keeps working while opencodex is stopped.
+ */
+export const CHATGPT_UNBLOCK_PAC_ARG_PREFIX = "--proxy-pac-url=data:application/x-ns-proxy-autoconfig;base64,";
+
+/** The PAC switch for a given script text. */
+export function chatgptUnblockPacArgFor(pacText: string | Uint8Array): string {
+  return `${CHATGPT_UNBLOCK_PAC_ARG_PREFIX}${Buffer.from(pacText).toString("base64")}`;
+}
+
+/**
+ * The PAC as the app's command-line switch, from the file opencodex wrote at start. When the file
+ * is not there yet the bare prefix comes back, which matches no real command line.
+ */
 export function chatgptUnblockPacArg(configDir: string): string {
-  return `--proxy-pac-url=file://${chatgptUnblockPacPath(configDir)}`;
+  try {
+    return chatgptUnblockPacArgFor(readFileSync(chatgptUnblockPacPath(configDir)));
+  } catch {
+    return CHATGPT_UNBLOCK_PAC_ARG_PREFIX;
+  }
 }
 
 export interface ChatgptUnblockState {

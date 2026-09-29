@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { getConfigDir } from "../../config/paths";
 import { CHATGPT_INTERCEPT_HOST, CHATGPT_UNBLOCK_IDENTITY_PATH, CHATGPT_UNBLOCK_SERVICE_ID } from "./listener";
 import type { PreservedSendBlock } from "./rewrite";
-import { chatgptUnblockPacArg, chatgptUnblockResolverArg } from "./runtime";
+import { CHATGPT_UNBLOCK_PAC_ARG_PREFIX, chatgptUnblockPacArg, chatgptUnblockPacPath, chatgptUnblockResolverArg } from "./runtime";
 
 /**
  * Launch integration for the ChatGPT desktop send-unblock intercept.
@@ -38,7 +38,7 @@ import { chatgptUnblockPacArg, chatgptUnblockResolverArg } from "./runtime";
  *   - with a PAC file, the resolver rule alone: PAC cannot be combined with a bypass, so
  *     chatgpt.com may stay on the proxy and the composer may lock, but nothing else breaks.
  *
- *   PAC-fallback mode (`chatgptDesktop.pacFallback`): only `--proxy-pac-url=file://<pac>`. The
+ *   PAC-fallback mode (`chatgptDesktop.pacFallback`): only `--proxy-pac-url=data:...` carrying the PAC inline (a `file://` PAC is ignored by the app). The
  *   PAC (regenerated at every opencodex start) sends chatgpt.com to the CONNECT entry listener,
  *   which splices onto the TLS origin listener; when opencodex is down the refused CONNECT makes
  *   Chromium fall through to the captured system chain and finally DIRECT -- no resolver rule
@@ -99,7 +99,7 @@ function chatgptUnblockWatcherLogPath(configDir?: string): string {
  * uses, so a mode change makes the watcher correct an app launched under the other mode.
  */
 export function buildChatgptUnblockWatcherScript(port: number, configDir?: string, pacMode = false, entryPort?: number): string {
-  const pacArg = chatgptUnblockPacArg(configDir ?? getConfigDir());
+  const pacFile = chatgptUnblockPacPath(configDir ?? getConfigDir());
   return `#!/bin/bash
 # opencodex ChatGPT send-unblock launcher.
 #   watch  (launchd, fired by the app's Electron SingletonLock on every launch): if the app is
@@ -111,7 +111,8 @@ export function buildChatgptUnblockWatcherScript(port: number, configDir?: strin
 PORT=${port}
 MODE="\${1:-watch}"
 RESOLVER_ARG=${shellQuote(chatgptUnblockResolverArg(port))}
-PAC_ARG=${shellQuote(pacArg)}
+PAC_FILE=${shellQuote(pacFile)}
+PAC_PREFIX=${shellQuote(CHATGPT_UNBLOCK_PAC_ARG_PREFIX)}
 PAC_MODE=${pacMode ? "1" : "0"}
 BYPASS_HOST=${shellQuote(CHATGPT_INTERCEPT_HOST)}
 APP_PATTERN='ChatGPT.app/Contents/MacOS/ChatGPT'
@@ -135,13 +136,21 @@ app_pid() {
   return 1
 }
 app_running() { app_pid >/dev/null; }
+# The PAC travels inline as a data: URL (a file:// PAC is ignored by the app), so the switch is
+# rebuilt from the file opencodex regenerated at its last start. Fails when there is no file.
+pac_arg() {
+  [ -r "$PAC_FILE" ] || return 1
+  printf '%s%s' "$PAC_PREFIX" "$(base64 < "$PAC_FILE" | tr -d '\n')"
+}
 app_flagged() {
   local pid
   pid=$(app_pid) || return 1
   local cmdline
   cmdline=$(ps -o command= -p "$pid" 2>/dev/null)
   if [ "$PAC_MODE" = 1 ]; then
-    case "$cmdline" in *" $PAC_ARG"*) return 0 ;; esac
+    local pac
+    pac=$(pac_arg) || return 1
+    case "$cmdline" in *" $pac"*) return 0 ;; esac
   else
     case "$cmdline" in *" $RESOLVER_ARG"*) return 0 ;; esac
   fi
@@ -154,7 +163,9 @@ app_switched() {
   pid=$(app_pid) || return 1
   local cmdline
   cmdline=$(ps -o command= -p "$pid" 2>/dev/null)
-  case "$cmdline" in *" $PAC_ARG"*|*" $RESOLVER_ARG"*) return 0 ;; esac
+  # Any PAC switch counts, whatever script it carries: restore must undo an app launched under an
+  # older PAC, and a file:// switch from before the inline form.
+  case "$cmdline" in *" $PAC_PREFIX"*|*" --proxy-pac-url=file://$PAC_FILE"*|*" $RESOLVER_ARG"*) return 0 ;; esac
   return 1
 }
 # The port must be held by opencodex's listener, not just by any process. The listener answers
@@ -246,7 +257,8 @@ fi
 
 ARGS=()
 if [ "$PAC_MODE" = 1 ]; then
-  ARGS+=("$PAC_ARG")
+  PAC_SWITCH=$(pac_arg) || { say "no PAC file at $PAC_FILE; start opencodex with pacFallback first"; exit 1; }
+  ARGS+=("$PAC_SWITCH")
 else
   ARGS+=("$RESOLVER_ARG")
 fi
@@ -426,7 +438,9 @@ export function chatgptCommandLineHasRule(commandLine: string, port: number): bo
 
 /** Whether a command line carries the PAC switch of the given config dir. */
 export function chatgptCommandLineHasPac(commandLine: string, configDir: string): boolean {
-  return commandLine.includes(` ${chatgptUnblockPacArg(configDir)}`);
+  // The exact current script, or a file:// switch from before the inline form (still "ours").
+  return commandLine.includes(` ${chatgptUnblockPacArg(configDir)}`)
+    || commandLine.includes(` --proxy-pac-url=file://${chatgptUnblockPacPath(configDir)}`);
 }
 
 export type ChatgptListenerProbe =

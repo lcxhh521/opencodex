@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -36,10 +36,25 @@ describe("chatgpt unblock runtime ports and mode", () => {
     expect(chatgptPacFallbackEnabled({ chatgptDesktop: { unblockSend: true, pacFallback: true }, runtimeRole: "client" } as OcxConfig)).toBe(false);
   });
 
-  test("the PAC argument names a file:// URL inside the config dir", () => {
-    expect(chatgptUnblockPacArg("/Users/x/.opencodex")).toBe("--proxy-pac-url=file:///Users/x/.opencodex/chatgpt-unblock.pac");
+  test("the PAC argument carries the script inline as a data: URL", () => {
+    // A file:// PAC is ignored by the ChatGPT app (it dials directly, bypassing intercept and
+    // VPN), and an http:// one would need opencodex alive to be fetched.
+    const dir = mkdtempSync(join(tmpdir(), "ocx-pac-arg-"));
+    try {
+      const text = "function FindProxyForURL(u, h) { return \"DIRECT\"; }\n";
+      writeFileSync(chatgptUnblockPacPath(dir), text);
+      const arg = chatgptUnblockPacArg(dir);
+      expect(arg).toBe(`--proxy-pac-url=data:application/x-ns-proxy-autoconfig;base64,${Buffer.from(text).toString("base64")}`);
+      expect(Buffer.from(arg.split("base64,")[1]!, "base64").toString("utf8")).toBe(text);
+      // No file yet: the bare prefix, which matches no real command line.
+      rmSync(chatgptUnblockPacPath(dir));
+      expect(chatgptUnblockPacArg(dir)).toBe("--proxy-pac-url=data:application/x-ns-proxy-autoconfig;base64,");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
     expect(chatgptUnblockPacPath("/cfg")).toBe(join("/cfg", "chatgpt-unblock.pac"));
   });
+
 });
 
 /**

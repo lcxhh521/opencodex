@@ -2,7 +2,7 @@
  * PAC-file support for the ChatGPT desktop send-unblock intercept.
  *
  * With `chatgptDesktop.pacFallback` on, the app is launched with
- * `--proxy-pac-url=file://<configDir>/chatgpt-unblock.pac` instead of a resolver rule. The PAC
+ * an inline `--proxy-pac-url=data:` switch (the generated script, base64) instead of a resolver rule. The PAC
  * sends chatgpt.com to the entry CONNECT listener (which splices onto the TLS origin listener),
  * and every other host the way the system routes it. When opencodex stops, the refused CONNECT
  * makes Chromium fall through to the system route on its own -- the app keeps working, no

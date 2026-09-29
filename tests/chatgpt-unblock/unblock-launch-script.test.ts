@@ -9,6 +9,7 @@ import {
   chatgptCommandLineHasPac,
   chatgptCommandLineHasRule,
 } from "../../src/chatgpt/desktop-unblock/launch-watcher";
+import { chatgptUnblockPacArgFor } from "../../src/chatgpt/desktop-unblock/runtime";
 
 const PORT = 10300;
 const RESOLVER = "--host-resolver-rules=MAP chatgpt.com 127.0.0.1:10300";
@@ -19,6 +20,10 @@ const SCUTIL_NO_PROXY = `<dictionary> {
   ProxyAutoConfigEnable : 0
   SOCKSEnable : 0
 }`;
+
+/** The PAC text the fixture writes; the app is launched with it inline, as a data: URL. */
+const PAC_TEXT = "function FindProxyForURL(url, host) { return \"PROXY 127.0.0.1:10301; DIRECT\"; }\n";
+const PAC_SWITCH = chatgptUnblockPacArgFor(PAC_TEXT);
 
 // Shape of a VPN client in system-proxy mode (captured from Clash on macOS).
 const SCUTIL_SYSTEM_PROXY = `<dictionary> {
@@ -146,7 +151,8 @@ function run(mode: "watch" | "launch" | "native", options: {
 }) {
   const pacMode = options.pac === true;
   const entryPort = options.entryPort ?? 10301;
-  const PAC_ARG = `--proxy-pac-url=file://${options.configDir ?? dir}/chatgpt-unblock.pac`;
+  const PAC_ARG = PAC_SWITCH;
+  if (pacMode) writeFileSync(join(options.configDir ?? dir, "chatgpt-unblock.pac"), PAC_TEXT);
   const processes = [
     options.app === "plain" ? `400|ChatGPT|${APP_BINARY}` : null,
     options.app === "flagged" ? `400|ChatGPT|${APP_BINARY} ${RESOLVER} --proxy-bypass-list=chatgpt.com` : null,
@@ -358,7 +364,7 @@ describe("chatgpt launch in PAC-fallback mode", () => {
   test("the app gets the PAC switch alone, whatever the system proxy is", () => {
     for (const scutil of [SCUTIL_NO_PROXY, SCUTIL_SYSTEM_PROXY, SCUTIL_SOCKS_ONLY, SCUTIL_PAC]) {
       const r = run("launch", { app: "none", scutil, pac: true, configDir: dir });
-      expect(r.openArgs).toEqual([`--proxy-pac-url=file://${dir}/chatgpt-unblock.pac`]);
+      expect(r.openArgs).toEqual([PAC_SWITCH]);
     }
   });
 
@@ -367,7 +373,7 @@ describe("chatgpt launch in PAC-fallback mode", () => {
     const r = run("watch", { app: "flagged", pac: true });
     expect(r.status).toBe(0);
     expect(r.calls).toEqual(["quit", "open"]);
-    expect(r.openArgs).toEqual([`--proxy-pac-url=file://${dir}/chatgpt-unblock.pac`]);
+    expect(r.openArgs).toEqual([PAC_SWITCH]);
   });
 
   test("an app already carrying the PAC is left alone", () => {
@@ -393,10 +399,16 @@ describe("chatgpt launch in PAC-fallback mode", () => {
   test("the entry probe accepts curl exit 56 (connected, empty answer) as up", () => {
     const r = run("launch", { app: "none", pac: true, entry: "up56" });
     expect(r.status).toBe(0);
-    expect(r.openArgs).toEqual([`--proxy-pac-url=file://${dir}/chatgpt-unblock.pac`]);
+    expect(r.openArgs).toEqual([PAC_SWITCH]);
   });
 
   test("the PAC switch on the command line counts as flagged via chatgptCommandLineHasPac", () => {
+    writeFileSync(join(dir, "chatgpt-unblock.pac"), PAC_TEXT);
+    expect(chatgptCommandLineHasPac(`${APP_BINARY} ${PAC_SWITCH}`, dir)).toBe(true);
+    // A PAC regenerated since the app launched is no longer the one it carries.
+    writeFileSync(join(dir, "chatgpt-unblock.pac"), `${PAC_TEXT}// changed\n`);
+    expect(chatgptCommandLineHasPac(`${APP_BINARY} ${PAC_SWITCH}`, dir)).toBe(false);
+    // The pre-inline file:// switch still counts as ours, so it can be corrected.
     expect(chatgptCommandLineHasPac(`${APP_BINARY} --proxy-pac-url=file://${dir}/chatgpt-unblock.pac`, dir)).toBe(true);
     expect(chatgptCommandLineHasPac(APP_BINARY, dir)).toBe(false);
     expect(chatgptCommandLineHasPac(`${APP_BINARY} --proxy-pac-url=file://other/chatgpt-unblock.pac`, dir)).toBe(false);

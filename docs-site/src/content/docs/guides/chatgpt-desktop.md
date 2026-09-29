@@ -91,8 +91,9 @@ outbound traffic.
 ## Keep the app working when opencodex stops
 
 In the default mode a routed app depends on the listener: while opencodex is stopped, its
-`chatgpt.com` requests fail. PAC fallback launches the app with a generated PAC file instead, so
-the app falls back on its own:
+`chatgpt.com` requests fail. PAC fallback launches the app with a generated PAC script instead,
+so the app falls back on its own. The script is passed inline (a `data:` URL) because the app
+ignores a `file://` PAC and an `http://` one would need opencodex running to be fetched:
 
 ```json
 { "chatgptDesktop": { "unblockSend": true, "pacFallback": true } }
