@@ -1090,10 +1090,13 @@ export interface OcxConfig {
    * `rate_limit.allowed` / `rate_limit.limit_reached` in the `/backend-api/wham/usage`
    * snapshot and stream. Quota display (percentages, reset times, upsell banner) is left
    * untouched, so the app keeps showing the account's real usage while the composer unlocks
-   * for turns whose model calls are routed to third-party providers. The app must be launched
-   * with the resolver rule printed at startup, and the intercept CA must be trusted once (see
-   * the startup log). A malformed value reads as off. `port` (1–65535) overrides the default
-   * listener port (public port + 200).
+   * for turns whose model calls are routed to third-party providers. There are two launch
+   * modes: by default the app must be launched with the resolver rule printed at startup,
+   * while `pacFallback: true` launches it with a generated PAC URL instead (the app then
+   * routes chatgpt.com through the local entry first and falls back to the system route).
+   * In both modes the intercept CA must be trusted once (see the startup log). A malformed
+   * value reads as off. `port` (1–65535) overrides the default listener port (public
+   * port + 200).
    */
   chatgptDesktop?: { unblockSend?: boolean; pacFallback?: boolean; port?: number };
   /**
