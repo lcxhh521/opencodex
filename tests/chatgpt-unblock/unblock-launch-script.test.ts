@@ -22,6 +22,7 @@ const SCUTIL_NO_PROXY = `<dictionary> {
 }`;
 
 /** The PAC text the fixture writes; the app is launched with it inline, as a data: URL. */
+const SHIM_PATH = () => `${dir}/chatgpt-codex-shim.sh`;
 const PAC_TEXT = "function FindProxyForURL(url, host) { return \"PROXY 127.0.0.1:10301; DIRECT\"; }\n";
 const PAC_SWITCH = chatgptUnblockPacArgFor(PAC_TEXT);
 
@@ -114,14 +115,19 @@ if [ "$STUB_QUIT_IGNORED" != 1 ]; then
   grep -v '|ChatGPT|' "$STUB_DIR/processes" > "$STUB_DIR/processes.tmp"
   mv -f "$STUB_DIR/processes.tmp" "$STUB_DIR/processes"
 fi`);
-  // Records only what follows --args, i.e. what the app itself receives.
+  // Records what follows --args (what the app itself receives) and, apart, the --env pairs. The
+  // pairs are appended to the process line: `ps eww` shows a process's environment after its command.
   stub("open", `echo open >> "$STUB_DIR/calls"
-args=(); after=0
+args=(); envs=(); after=0; prev=""
 for a in "$@"; do
-  if [ $after = 1 ]; then args+=("$a"); elif [ "$a" = --args ]; then after=1; fi
+  if [ $after = 1 ]; then args+=("$a")
+  elif [ "$a" = --args ]; then after=1
+  elif [ "$prev" = --env ]; then envs+=("$a"); fi
+  prev="$a"
 done
 [ \${#args[@]} -gt 0 ] && printf '%s\\n' "\${args[@]}" > "$STUB_DIR/open-args"
-echo "500|ChatGPT|${APP_BINARY} \${args[*]}" >> "$STUB_DIR/processes"`);
+[ \${#envs[@]} -gt 0 ] && printf '%s\\n' "\${envs[@]}" > "$STUB_DIR/open-env"
+echo "500|ChatGPT|${APP_BINARY} \${args[*]} \${envs[*]}" >> "$STUB_DIR/processes"`);
   stub("sleep", ":");
 });
 
@@ -147,6 +153,7 @@ function run(mode: "watch" | "launch" | "native", options: {
   configDir?: string;
   entry?: "up" | "up56" | "down";
   pac?: boolean;
+  shim?: boolean;
   entryPort?: number;
 }) {
   const pacMode = options.pac === true;
@@ -157,6 +164,8 @@ function run(mode: "watch" | "launch" | "native", options: {
     options.app === "plain" ? `400|ChatGPT|${APP_BINARY}` : null,
     options.app === "flagged" ? `400|ChatGPT|${APP_BINARY} ${RESOLVER} --proxy-bypass-list=chatgpt.com` : null,
     options.app === "pac" ? `400|ChatGPT|${APP_BINARY} ${PAC_ARG}` : null,
+    options.app === "flagged-shim" ? `400|ChatGPT|${APP_BINARY} ${RESOLVER} --proxy-bypass-list=chatgpt.com CODEX_CLI_PATH=${SHIM_PATH()}` : null,
+    options.app === "shim-only" ? `400|ChatGPT|${APP_BINARY} CODEX_CLI_PATH=${SHIM_PATH()}` : null,
     // Helpers share the bundle but not the process name; they must never count as the app.
     options.app !== "none" ? `401|ChatGPT Helper|/Applications/ChatGPT.app/Contents/Frameworks/ChatGPT Helper.app/Contents/MacOS/ChatGPT Helper --type=utility ${RESOLVER}` : null,
     options.decoy ? `300|zsh|${DECOY}` : null,
@@ -164,7 +173,7 @@ function run(mode: "watch" | "launch" | "native", options: {
   writeFileSync(join(dir, "processes"), processes.map(line => `${line}\n`).join(""));
   writeFileSync(join(dir, "scutil.txt"), options.scutil ?? SCUTIL_NO_PROXY);
   const script = join(dir, "launch.sh");
-  writeFileSync(script, buildChatgptUnblockWatcherScript(PORT, options.configDir ?? dir, pacMode, entryPort));
+  writeFileSync(script, buildChatgptUnblockWatcherScript(PORT, options.configDir ?? dir, pacMode, entryPort, options.shim === true));
   const result = spawnSync("/bin/bash", [script, mode], {
     encoding: "utf8",
     env: {
@@ -183,6 +192,7 @@ function run(mode: "watch" | "launch" | "native", options: {
     stderr: result.stderr,
     calls: read("calls").split("\n").filter(Boolean),
     openArgs: read("open-args").split("\n").filter(Boolean),
+    openEnv: read("open-env").split("\n").filter(Boolean),
     log: read("chatgpt-unblock-watcher.log"),
   };
 }
@@ -412,5 +422,49 @@ describe("chatgpt launch in PAC-fallback mode", () => {
     expect(chatgptCommandLineHasPac(`${APP_BINARY} --proxy-pac-url=file://${dir}/chatgpt-unblock.pac`, dir)).toBe(true);
     expect(chatgptCommandLineHasPac(APP_BINARY, dir)).toBe(false);
     expect(chatgptCommandLineHasPac(`${APP_BINARY} --proxy-pac-url=file://other/chatgpt-unblock.pac`, dir)).toBe(false);
+  });
+});
+
+describe("chatgpt launch with the app-server shim", () => {
+  test("launch starts the app with CODEX_CLI_PATH pointing at the launcher, next to the usual switch", () => {
+    const r = run("launch", { app: "none", scutil: SCUTIL_NO_PROXY, shim: true });
+    expect(r.status).toBe(0);
+    expect(r.openArgs).toEqual([RESOLVER]);
+    expect(r.openEnv).toEqual([`CODEX_CLI_PATH=${SHIM_PATH()}`]);
+  });
+
+  test("without the shim the app gets no extra environment", () => {
+    const r = run("launch", { app: "none", scutil: SCUTIL_NO_PROXY });
+    expect(r.openEnv).toEqual([]);
+  });
+
+  test("the shim composes with PAC-fallback mode", () => {
+    const r = run("launch", { app: "none", pac: true, shim: true, configDir: dir });
+    expect(r.openArgs).toEqual([PAC_SWITCH]);
+    expect(r.openEnv).toEqual([`CODEX_CLI_PATH=${SHIM_PATH()}`]);
+  });
+
+  test("watch corrects an app that has the switch but was started without the shim", () => {
+    const r = run("watch", { app: "flagged", shim: true });
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.openEnv).toEqual([`CODEX_CLI_PATH=${SHIM_PATH()}`]);
+  });
+
+  test("an app that already carries the switch and the shim is left alone", () => {
+    const r = run("watch", { app: "flagged-shim", shim: true });
+    expect(r.status).toBe(0);
+    expect(r.calls).toEqual([]);
+  });
+
+  test("with the shim off, an app that has the switch is not restarted for lacking it", () => {
+    const r = run("watch", { app: "flagged" });
+    expect(r.calls).toEqual([]);
+  });
+
+  test("restore hands back an app that only carries the shim, even after the shim was switched off", () => {
+    const r = run("native", { app: "shim-only" });
+    expect(r.status).toBe(0);
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.openEnv).toEqual([]);
   });
 });

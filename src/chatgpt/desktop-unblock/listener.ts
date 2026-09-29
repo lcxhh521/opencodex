@@ -67,11 +67,7 @@ export class ChatgptUnblockDiagnostics {
 }
 
 export interface ChatgptUnblockListenerOptions {
-  /**
-   * The TLS leaf for `chatgpt.com`. Omitted for the plain-HTTP app-server listener: the bundled
-   * `codex app-server` reaches ChatGPT through `chatgpt_base_url`, so it needs no certificate.
-   */
-  leaf?: PemKeyPair;
+  leaf: PemKeyPair;
   upstreamBase?: string;
   idleTimeout?: number;
   fetchImpl?: typeof fetch;
@@ -243,7 +239,7 @@ export async function relayWithSendUnblock(
 }
 
 /**
- * Bind the intercept listener on an ephemeral loopback port (TLS with a `leaf`, plain HTTP without). WebSocket upgrades are
+ * Bind the intercept TLS listener on an ephemeral loopback port. WebSocket upgrades are
  * relayed by `handleWebSocketUpgrade` (voice/dictation and every other WS endpoint on the
  * intercepted host); everything else keeps going through the fetch-based relay untouched.
  */
@@ -253,7 +249,7 @@ export function startChatgptUnblockListener(options: ChatgptUnblockListenerOptio
   return Bun.serve<WsRelaySocketData>({
     port: options.port ?? 0,
     hostname: "127.0.0.1",
-    ...(options.leaf ? { tls: { cert: options.leaf.certPem, key: options.leaf.keyPem } } : {}),
+    tls: { cert: options.leaf.certPem, key: options.leaf.keyPem },
     idleTimeout: options.idleTimeout ?? 255,
     websocket: {
       // Frames both directions once Bun finished the client-side upgrade; see WsRelay.

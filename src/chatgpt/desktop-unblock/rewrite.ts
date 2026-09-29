@@ -89,7 +89,7 @@ function isQuotaBlockReason(reason: unknown): boolean {
 }
 
 function isExhaustedSendLimit(entry: unknown): boolean {
-  if (!isRecord(entry) || entry.feature_name !== SEND_LIMIT_FEATURE_NAME) return false;
+  if (!isRecord(entry) || (entry.feature_name ?? entry.featureName) !== SEND_LIMIT_FEATURE_NAME) return false;
   const remaining = entry.remaining;
   return typeof remaining === "number" && remaining <= 0;
 }
@@ -113,18 +113,19 @@ export function stripSendBlocks(value: unknown, preserved: PreservedSendBlock[] 
   let changed = false;
   const out: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(value)) {
-    if (key === "blocked_features" && Array.isArray(child)) {
+    if ((key === "blocked_features" || key === "blockedFeatures") && Array.isArray(child)) {
       const kept = child.filter(entry => {
         if (!isSendBlockedFeature(entry)) return true;
-        if (isQuotaBlockReason(entry.block_reason)) return false;
-        preserved.push({ name: String(entry.name), reason: String(entry.block_reason) });
+        const reason = entry.block_reason ?? entry.blockReason;
+        if (isQuotaBlockReason(reason)) return false;
+        preserved.push({ name: String(entry.name), reason: String(reason) });
         return true;
       });
       changed ||= kept.length !== child.length;
       out[key] = kept;
       continue;
     }
-    if (key === "limits_progress" && Array.isArray(child)) {
+    if ((key === "limits_progress" || key === "limitsProgress") && Array.isArray(child)) {
       const kept = child.filter(entry => !isExhaustedSendLimit(entry));
       changed ||= kept.length !== child.length;
       out[key] = kept;
@@ -149,29 +150,69 @@ export function stripSendBlocks(value: unknown, preserved: PreservedSendBlock[] 
  */
 export function unlockRateLimitGate(value: unknown): boolean {
   let changed = false;
-  const visit = (node: unknown): void => {
+  // A subtree shows the plain quota as the reason when a plain-quota reached type was removed in
+  // it or a usage window reads 100%; it stays "blocked" when a non-quota reason (workspace or
+  // credit reached type, spend control) is still standing in it.
+  const visit = (node: unknown): { cleared: boolean; exhausted: boolean; blocked: boolean } => {
+    let cleared = false;
+    let exhausted = false;
+    let blocked = false;
     if (Array.isArray(node)) {
-      node.forEach(visit);
-      return;
+      for (const item of node) {
+        const r = visit(item);
+        cleared ||= r.cleared;
+        exhausted ||= r.exhausted;
+        blocked ||= r.blocked;
+      }
+      return { cleared, exhausted, blocked };
     }
-    if (!isRecord(node)) return;
+    if (!isRecord(node)) return { cleared, exhausted, blocked };
+    if (typeof node.usedPercent === "number" && node.usedPercent >= 100) exhausted = true;
+    if (node.spendControlReached !== undefined && node.spendControlReached !== null && node.spendControlReached !== false) blocked = true;
     const reachedType = node.rate_limit_reached_type;
     if (isRecord(reachedType) && reachedType.type === PLAIN_QUOTA_REACHED_TYPE) {
       delete node.rate_limit_reached_type;
       changed = true;
+      cleared = true;
     }
-    const rateLimit = node.rate_limit;
-    if (isRecord(rateLimit)) {
+    // The app-server's JSON-RPC spelling of the same field: a nullable string.
+    const rpcReached = node.rateLimitReachedType;
+    const rpcType = typeof rpcReached === "string" ? rpcReached : isRecord(rpcReached) ? rpcReached.type : undefined;
+    if (rpcType === PLAIN_QUOTA_REACHED_TYPE) {
+      node.rateLimitReachedType = null;
+      changed = true;
+      cleared = true;
+    } else if (typeof rpcType === "string") {
+      blocked = true;
+    }
+    for (const key of ["rate_limit", "rateLimit"] as const) {
+      const rateLimit = node[key];
+      if (!isRecord(rateLimit)) continue;
       if (rateLimit.allowed === false) {
         rateLimit.allowed = true;
         changed = true;
       }
-      if (rateLimit.limit_reached === true) {
-        rateLimit.limit_reached = false;
-        changed = true;
+      for (const limitKey of ["limit_reached", "limitReached"] as const) {
+        if (rateLimit[limitKey] === true) {
+          rateLimit[limitKey] = false;
+          changed = true;
+        }
       }
     }
-    for (const child of Object.values(node)) visit(child);
+    for (const child of Object.values(node)) {
+      const r = visit(child);
+      cleared ||= r.cleared;
+      exhausted ||= r.exhausted;
+      blocked ||= r.blocked;
+    }
+    // `ordinaryUsageAllowed: false` is the same quota gate seen from the RPC side, and the only
+    // field the app reads for it. Open it only when the plain quota is the visible reason and
+    // nothing else still explains the block.
+    if (node.ordinaryUsageAllowed === false && (cleared || exhausted) && !blocked) {
+      node.ordinaryUsageAllowed = true;
+      changed = true;
+    }
+    return { cleared, exhausted, blocked };
   };
   visit(value);
   return changed;

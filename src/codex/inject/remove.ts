@@ -2,7 +2,6 @@ import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { normalizeStructuralWhitespace, rootAssignmentKey, rootSourceLines, sourceAssignment, sourceText } from "../toml-source-lines";
 import { atomicWriteFile } from "../../config";
 import {
-  CHATGPT_BASE_URL_KEY,
   REALTIME_WS_BASE_URL_KEY,
   hasInjectedOpenaiBaseUrl,
   rootTomlString,
@@ -11,7 +10,6 @@ import {
 import { HISTORY_RELABEL_STANDS_DOWN, preflightCodexHistoryInjection } from "../history-provider";
 import {
   journaledInjectedOpenaiBaseUrl,
-  journaledInjectedChatgptBaseUrl,
   journaledInjectedRealtimeWsBaseUrl,
   journaledInjectedRootWebSearch,
   journaledReplacedRootWebSearch,
@@ -82,7 +80,6 @@ function stripOpencodexConfigResult(
   journaledRealtimeWsBaseUrl: string | null = null,
   journaledRootWebSearch: string | null = null,
   journaledReplacedWebSearch: string | null = null,
-  journaledChatgptBaseUrl: string | null = null,
 ): StripOpencodexConfigResult {
   let out = content;
   const hadRootOcxProvider =
@@ -100,7 +97,7 @@ function stripOpencodexConfigResult(
     injectedValue: journaledRootWebSearch,
     replacedUserLine: journaledReplacedWebSearch,
   }).content;
-  out = stripJournaledOpenaiBaseUrl(out, journaledBaseUrl, journaledRealtimeWsBaseUrl, journaledChatgptBaseUrl);
+  out = stripJournaledOpenaiBaseUrl(out, journaledBaseUrl, journaledRealtimeWsBaseUrl);
   if (hasOcxProviderTable(out)) {
     out = removeOcxSection(out);
   }
@@ -204,22 +201,18 @@ export function removeCodexConfig(
   // ownership verdict, which must agree with what was actually removed.
   const journaledBaseUrl = journaledInjectedOpenaiBaseUrl();
   const journaledRealtimeWsBaseUrl = journaledInjectedRealtimeWsBaseUrl();
-  const journaledChatgptBaseUrl = journaledInjectedChatgptBaseUrl();
   const journaledRootWebSearch = journaledInjectedRootWebSearch();
   const journaledReplaced = journaledReplacedRootWebSearch();
   const had = hasOpencodexRouting(content)
     || (journaledBaseUrl !== null && rootTomlString(content, "openai_base_url") === journaledBaseUrl)
     || (journaledRealtimeWsBaseUrl !== null
-      && rootTomlString(content, REALTIME_WS_BASE_URL_KEY) === journaledRealtimeWsBaseUrl)
-    || (journaledChatgptBaseUrl !== null
-      && rootTomlString(content, CHATGPT_BASE_URL_KEY) === journaledChatgptBaseUrl);
+      && rootTomlString(content, REALTIME_WS_BASE_URL_KEY) === journaledRealtimeWsBaseUrl);
   const stripped = stripOpencodexConfigResult(
     content,
     journaledBaseUrl,
     journaledRealtimeWsBaseUrl,
     journaledRootWebSearch,
     journaledReplaced,
-    journaledChatgptBaseUrl,
   );
   // Captured from the pre-strip bytes: the strip is what removes the table, so reading it
   // afterwards would find nothing.

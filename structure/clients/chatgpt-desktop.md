@@ -15,15 +15,14 @@ subscription quota is exhausted and the turn is routed to another provider. It l
 
 ## Listeners
 
-All bind `127.0.0.1` and share one relay (`relayWithSendUnblock`) and one set of rewrites:
+The listeners bind `127.0.0.1` and share one relay (`relayWithSendUnblock`) and one set of rewrites:
 
 | Listener | Port | Purpose |
 |---|---|---|
 | TLS origin | `chatgptDesktop.port`, else public port + 200 | Receives the Chromium app's `chatgpt.com` traffic; certificate from the shared local intercept CA. |
 | CONNECT entry | origin + 1 | PAC mode only. Accepts `CONNECT chatgpt.com:443` and nothing else, then splices onto the origin listener. |
-| App-server HTTPS | origin + 2 | Only with `chatgptDesktop.appServer`. The bundled `codex app-server`, reached through `chatgpt_base_url`; TLS with a loopback certificate (`127.0.0.1`, `localhost`) from the same local CA. |
 
-The three ports wrap inside the TCP range without colliding. A bind failure degrades to a warning;
+The two ports wrap inside the TCP range without colliding. A bind failure degrades to a warning;
 the proxy's other duties never depend on these listeners.
 
 ## Rewrites
@@ -38,24 +37,29 @@ every other response passes through byte-identical.
 - Displayed usage (percentages, reset times, banners) is never changed.
 - A JSON body over `MAX_REWRITE_BODY_BYTES` streams through unchanged instead of being buffered.
 
-## Two routes to the same relay
+## Two places the gate is read
 
-The gate is read by two different clients, and each needs its own switch:
+The composer's send gate can come from two different clients, and each needs its own switch:
 
 - **The Chromium app** is launched with `--host-resolver-rules` (default mode) or an inline
   `--proxy-pac-url=data:` switch (PAC mode). A `file://` PAC is ignored by the app and an `http://`
   one would need opencodex alive to be fetched, so the script travels inline. When opencodex stops,
   the refused CONNECT makes Chromium fall through to the captured system chain with no restart. The
   launch watcher rebuilds the switch from the PAC file written at each start.
-- **The bundled `codex app-server`** issues the account reads with its own HTTP client, which no
-  Chromium switch reaches. It also validates `chatgpt_base_url` as a workspace backend during login
-  and refuses anything but an HTTPS origin without credentials, so the listener above speaks TLS. The
-  route is experimental and opt-in (`chatgptDesktop.appServer`): it has not been proven against a real
-  sign-in, and an earlier plain-HTTP form broke sign-in outright. While it is on, the Codex injector
-  writes a marker-owned root `chatgpt_base_url`. It follows the other injected root keys: journaled by
-  value (`injectedChatgptBaseUrl`), removed by restore, by `ocx stop` and when the switch goes off, and
-  a `chatgpt_base_url` the user set is kept and never journaled. It is written in both loopback and
-  provider-table routing modes, ahead of the first table.
+- **The bundled `codex app-server`** fetches the account rate limits with its own HTTP client, which
+  no Chromium switch reaches, and reports them to the app over stdio JSON-RPC. The app picks the
+  server binary from `CODEX_CLI_PATH`, so with `chatgptDesktop.appServerShim` the launch passes
+  `open --env CODEX_CLI_PATH=<config dir>/chatgpt-codex-shim.sh`. That script runs
+  `app-server-shim.ts`, which starts the real binary with inherited stdin/stderr and filters only its
+  stdout: a line that mentions no rate-limit field is written back as the exact bytes it arrived in,
+  and `rewriteAppServerLine` opens a plain-quota `rateLimitReachedType` and `ordinaryUsageAllowed`
+  (also when a quota window reads 100%), keeping workspace or credit reasons and spend controls. The
+  exported protocol schema shows these two messages, `account/rateLimits/read` and
+  `account/rateLimits/updated`, as the ones that carry it. The shim sets no environment variable,
+  address or config key, so the server's children and other Codex clients are unaffected, and it fails
+  open to the real binary, so it never depends on opencodex running.
 
-`ocx chatgpt launch|restore|status|install-watcher` (`src/cli/chatgpt-command.ts`) follow the
-configured mode; `restore` undoes either launch switch.
+The watcher decides whether an app is already launched correctly from its command line plus its
+environment (`ps eww`), so an app started without the shim is corrected once, and `restore` hands back
+an app carrying either switch. `ocx chatgpt launch|restore|status|install-watcher`
+(`src/cli/chatgpt-command.ts`) follow the configured modes.

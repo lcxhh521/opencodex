@@ -43,12 +43,6 @@ interface Journal {
    */
   injectedRealtimeWsBaseUrl?: string | null;
   /**
-   * The root `chatgpt_base_url` this injection wrote for the ChatGPT desktop send-unblock relay,
-   * when it wrote one. Recorded on its own so restore proves ownership by value after a Codex app
-   * reserialize drops the marker comment, and never mistakes a user's own `chatgpt_base_url`.
-   */
-  injectedChatgptBaseUrl?: string | null;
-  /**
    * The root `web_search` value this injection wrote, when it wrote one.
    *
    * Same reasoning as {@link injectedOpenaiBaseUrl}, for the one other root key whose value is a
@@ -181,8 +175,6 @@ export function writeJournal(options: WriteJournalOptions = {}): void {
 export interface InjectedJournalOwnership {
   injectedOpenaiBaseUrl: string | null;
   injectedRealtimeWsBaseUrl: string | null;
-  /** Omitted by callers that inject no `chatgpt_base_url`, which is the value it then records. */
-  injectedChatgptBaseUrl?: string | null;
   injectedCatalogPath: string | null;
   /** Omitted by callers that inject no `web_search` line, which is the value it then records. */
   injectedRootWebSearch?: string | null;
@@ -209,7 +201,6 @@ export function markJournalInjectedState(
   // would mistake a preserved user override for injected routing.
   journal.injectedOpenaiBaseUrl = ownership.injectedOpenaiBaseUrl;
   journal.injectedRealtimeWsBaseUrl = ownership.injectedRealtimeWsBaseUrl;
-  journal.injectedChatgptBaseUrl = ownership.injectedChatgptBaseUrl ?? null;
   journal.injectedRootWebSearch = ownership.injectedRootWebSearch ?? null;
   journal.replacedRootWebSearch = ownership.replacedRootWebSearch ?? null;
   journal.injectedCatalogPath = ownership.injectedCatalogPath;
@@ -231,11 +222,6 @@ export function journaledInjectedOpenaiBaseUrl(options: { readOnly?: boolean } =
 /** The root `experimental_realtime_ws_base_url` the last injection wrote, or null. */
 export function journaledInjectedRealtimeWsBaseUrl(options: { readOnly?: boolean } = {}): string | null {
   return readJournal(options.readOnly !== true)?.injectedRealtimeWsBaseUrl ?? null;
-}
-
-/** The root `chatgpt_base_url` the last injection wrote, or null when it wrote none. */
-export function journaledInjectedChatgptBaseUrl(options: { readOnly?: boolean } = {}): string | null {
-  return readJournal(options.readOnly !== true)?.injectedChatgptBaseUrl ?? null;
 }
 
 /** The root `web_search` value the last injection wrote, or null when it wrote none. */

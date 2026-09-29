@@ -66,7 +66,8 @@ test("validateConfigCandidate rejects a typo'd key and a wrong-typed flag", () =
 });
 
 test("validateConfigCandidate accepts a well-formed block and its absence", () => {
-  expect(validateConfigCandidate(candidate({ unblockSend: true, pacFallback: true, port: 10300 })).ok).toBe(true);
+  expect(validateConfigCandidate(candidate({ unblockSend: true, pacFallback: true, appServerShim: true, port: 10300 })).ok).toBe(true);
+  expect(validateConfigCandidate(candidate({ unblockSend: true, appServerShim: "yes" })).ok).toBe(false);
   expect(validateConfigCandidate(candidate({})).ok).toBe(true);
   expect(validateConfigCandidate(candidate(undefined)).ok).toBe(true);
 });

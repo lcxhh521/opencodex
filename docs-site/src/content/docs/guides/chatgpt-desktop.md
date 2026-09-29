@@ -25,17 +25,15 @@ Send locks with any other reason, such as a subscription requirement, are kept, 
 `ocx chatgpt status` lists them. Displayed usage (percentages, reset times, banners) is never
 changed, and OpenAI's servers still enforce every limit on their own requests.
 
-The app's built-in Codex server does not go through those Chromium switches: it reads your
-account state (including the usage snapshot behind the send button) with its own HTTP client.
-An **experimental** route covers it: set `chatgptDesktop.appServer` to `true` (together with
-`unblockSend`) and opencodex writes a marker-owned `chatgpt_base_url` to `~/.codex/config.toml`,
-pointing at an HTTPS loopback listener two ports after the TLS one (default `https://127.0.0.1:10302`)
-that uses the same relay and rewrites and a certificate from the same local CA. The built-in server
-requires this URL to be an HTTPS origin without credentials, which is why it cannot be plain HTTP.
-The route is off by default because it has not yet been proven against a real sign-in; if sign-in
-fails after enabling it, set `appServer` back to `false` and run `ocx sync`. The key is removed again
-by `ocx restore`, by `ocx stop`, or when the switch goes off, and a `chatgpt_base_url` you set yourself
-is never overwritten. Restart Codex after the key changes so the built-in server picks it up.
+On some builds the send button follows what the app's built-in Codex server reports about your
+account, and that server fetches it with its own HTTP client, which neither the resolver rule nor a
+PAC file reaches. For those, set `chatgptDesktop.appServerShim` to `true` (together with
+`unblockSend`) and launch the app with `ocx chatgpt launch`: the app then starts its Codex server
+through a small stdio shim that opens only the subscription-quota part of the rate-limit answer.
+The shim touches nothing else: no environment variable, address or config key is changed, the
+server's own child processes are untouched, and it does not depend on opencodex running. If it
+cannot start, the launcher falls through to the real binary. Everything that is not a plain-quota
+lock (workspace or credit limits, spend controls) is passed through as the server sent it.
 
 ## Setup
 
@@ -149,12 +147,10 @@ shared with opencodex's Claude integrations; remove its trust only if you use ne
 - **The send button is still grey:** check `ocx chatgpt status`. The app may be running
   without the route (run `ocx chatgpt launch`), or the lock may have a reason other than usage
   quota, which is listed under "send blocks kept".
-- **The send button stays grey with the route working:** the built-in Codex server reads the
-  gate through `chatgpt_base_url`, which only the experimental `appServer` route sets. Check that
-  `~/.codex/config.toml` has that key pointing at `127.0.0.1` (a value of your own is kept and
-  disables this path), then restart Codex.
-- **Sign-in fails with "workspace backend must use an HTTPS origin":** `chatgpt_base_url` points at a
-  non-HTTPS URL. Remove the key (or turn `appServer` off) and restart Codex.
+- **The send button stays grey with the route working:** the lock may come from the built-in Codex
+  server rather than from the pages the route covers. Turn on `chatgptDesktop.appServerShim`, run
+  `ocx chatgpt launch`, and check `ocx chatgpt status` (the "app-server shim" line says whether the
+  running app was started through it).
 - **The app cannot load anything after opencodex stops:** in the default mode a routed app
   depends on the listener. Start opencodex again or run `ocx chatgpt restore`, or turn on
   PAC fallback so the app falls back on its own.
