@@ -128,6 +128,21 @@ const INJECT_OVER_USER_KEY = [
   "})();",
 ].join(String.fromCharCode(10));
 
+const INJECT_PROVIDER_TABLE = [
+  'const fs = require("fs");',
+  'const path = require("path");',
+  'const { injectCodexConfig, removeCodexConfig } = require("./src/codex/inject");',
+  "(async () => {",
+  '  const cfgPath = path.join(process.env.CODEX_HOME, "config.toml");',
+  '  const base = { port: 10100, providers: {}, defaultProvider: "openai", injectionModel: "gpt-5.6-sol", injectionEffort: "high", codexClientCompaction: true, chatgptDesktop: { unblockSend: true } };',
+  "  await injectCodexConfig(10100, base, { catalogPath: null });",
+  '  const injected = fs.readFileSync(cfgPath, "utf8");',
+  "  await injectCodexConfig(10100, { ...base, chatgptDesktop: { unblockSend: false } }, { catalogPath: null });",
+  '  const switchedOff = fs.readFileSync(cfgPath, "utf8");',
+  "  console.log(JSON.stringify({ injected, switchedOff }));",
+  "})();",
+].join(String.fromCharCode(10));
+
 function runChild(codexHome: string, script: string): { stdout: string; stderr: string; status: number } {
   const result = spawnSync(process.execPath, ["--eval", script], {
     cwd: repoRoot(),
@@ -183,6 +198,26 @@ describe("chatgpt_base_url injection", () => {
       expect(out.injected).not.toContain(RELAY_URL);
       expect(out.journalUrl).toBeNull();
       expect(out.restored).toContain(userLine);
+    } finally {
+      removeTreeWithRetry(home);
+    }
+  }, 2 * SPAWN_BUDGET_MS);
+
+  test("is written in provider-table routing mode too, ahead of the first table", () => {
+    const home = mkdtempSync(join(tmpdir(), "ocx-chatgpt-base-url-table-"));
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
+    try {
+      const r = runChild(home, INJECT_PROVIDER_TABLE);
+      if (r.status !== 0) throw new Error(r.stderr || r.stdout);
+      const out = JSON.parse(r.stdout) as { injected: string; switchedOff: string };
+
+      expect(out.injected).toContain("[model_providers.opencodex]");
+      expect(out.injected).toContain(RELAY_URL);
+      // A root key: it must sit before the first table header or Codex would read it as part of it.
+      expect(out.injected.indexOf(RELAY_URL)).toBeLessThan(out.injected.indexOf("[model_providers.opencodex]"));
+      expect(out.switchedOff).not.toContain("chatgpt_base_url");
+      expect(out.switchedOff).toContain("[model_providers.opencodex]");
     } finally {
       removeTreeWithRetry(home);
     }

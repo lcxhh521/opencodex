@@ -569,6 +569,15 @@
       "documents": [
         "tests/"
       ]
+    },
+    {
+      "path": "clients/chatgpt-desktop.md",
+      "tier": 5,
+      "title": "ChatGPT Desktop Send-Unblock",
+      "scope": "Opt-in composer send-unblock: listeners, rewrites, and the Chromium and app-server routes to the relay.",
+      "documents": [
+        "src/chatgpt/"
+      ]
     }
   ],
   "contracts": {
@@ -643,12 +652,7 @@
     ]
   },
   "grace": {
-    "undocumentedSourceAreas": [
-      {
-        "path": "src/chatgpt/",
-        "reason": "ChatGPT desktop send-unblock intercept; upstream PR ships no structure doc for this feature area"
-      }
-    ],
+    "undocumentedSourceAreas": [],
     "unboundInvariants": [
       {
         "id": "INV-HOME-01",

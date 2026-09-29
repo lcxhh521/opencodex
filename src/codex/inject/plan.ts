@@ -282,14 +282,16 @@ export function deriveCodexInjectionPlan(
       content = realtime.content;
       keptUserRealtimeWsBaseUrl = realtime.keptUserRealtimeWsBaseUrl;
     }
-    // The bundled app-server reads the composer's account gate through `chatgpt_base_url`, which
-    // no Chromium switch reaches. Additive to the routing override: only while the send-unblock
-    // is on, and never over a user-owned `chatgpt_base_url`.
-    if (ctx.chatgptBaseUrl) {
-      const chatgpt = setRootChatgptBaseUrl(content, ctx.chatgptBaseUrl);
-      content = chatgpt.content;
-      if (!chatgpt.keptUserChatgptBaseUrl) injectedChatgptBaseUrl = ctx.chatgptBaseUrl;
-    }
+  }
+
+  // The bundled app-server reads the composer's account gate through `chatgpt_base_url`, which
+  // no Chromium switch reaches. Additive to whichever routing form was chosen (the relay is
+  // local either way): only while the send-unblock is on, and never over a user-owned
+  // `chatgpt_base_url`.
+  if (ctx.chatgptBaseUrl) {
+    const chatgpt = setRootChatgptBaseUrl(content, ctx.chatgptBaseUrl);
+    content = chatgpt.content;
+    if (!chatgpt.keptUserChatgptBaseUrl) injectedChatgptBaseUrl = ctx.chatgptBaseUrl;
   }
 
   const desiredSubagentDefaults = configuredManagedSubagentDefaults(config);

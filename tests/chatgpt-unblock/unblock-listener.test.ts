@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   CHATGPT_UNBLOCK_IDENTITY_PATH,
+  MAX_REWRITE_BODY_BYTES,
   CHATGPT_UNBLOCK_SERVICE_ID,
   ChatgptUnblockDiagnostics,
   relayWithSendUnblock,
@@ -147,5 +148,33 @@ describe("chatgpt unblock SSE rewriting", () => {
     const source = new Response(`data: ${locked}\n\n`).body!;
     const text = await collect(source.pipeThrough(sseRewriteStream({ surface: "conversation" })));
     expect(text).toBe(`data: ${locked}\n\n`);
+  });
+});
+
+describe("chatgpt unblock relay body cap", () => {
+  const closedUsage = (padding: string) => JSON.stringify({ padding, rate_limit: { allowed: false, limit_reached: true } });
+
+  test("a JSON body over the cap streams through unchanged, whatever content-length says", async () => {
+    const body = closedUsage("x".repeat(MAX_REWRITE_BODY_BYTES + 1024));
+    // Chunked: no content-length, so the cap has to be enforced while reading.
+    const chunked = upstreamReturning(() => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        const bytes = new TextEncoder().encode(body);
+        for (let i = 0; i < bytes.length; i += 1 << 20) controller.enqueue(bytes.slice(i, i + (1 << 20)));
+        controller.close();
+      },
+    }), { headers: { "content-type": "application/json" } }));
+    const res = await relayWithSendUnblock(new Request("https://chatgpt.com/backend-api/wham/usage"), UPSTREAM, chunked.fetchImpl);
+    expect(await res.text()).toBe(body);
+
+    const declared = upstreamReturning(() => new Response(body, { headers: { "content-type": "application/json", "content-length": String(body.length) } }));
+    const res2 = await relayWithSendUnblock(new Request("https://chatgpt.com/backend-api/wham/usage"), UPSTREAM, declared.fetchImpl);
+    expect(await res2.text()).toBe(body);
+  });
+
+  test("a JSON body under the cap is still rewritten", async () => {
+    const { fetchImpl } = upstreamReturning(() => new Response(closedUsage("y".repeat(1024)), { headers: { "content-type": "application/json" } }));
+    const res = await relayWithSendUnblock(new Request("https://chatgpt.com/backend-api/wham/usage"), UPSTREAM, fetchImpl);
+    expect((await res.json() as { rate_limit: { allowed: boolean } }).rate_limit.allowed).toBe(true);
   });
 });

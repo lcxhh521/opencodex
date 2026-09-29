@@ -128,6 +128,52 @@ export function sseRewriteStream(options: {
   });
 }
 
+/** Largest JSON body the relay buffers to rewrite; anything bigger passes through unchanged. */
+export const MAX_REWRITE_BODY_BYTES = 8 * 1024 * 1024;
+
+type BoundedText = { text: string } | { overflow: ReadableStream<Uint8Array> };
+
+/**
+ * Read a body as text up to `cap` bytes. Past the cap the bytes already read are replayed in
+ * front of the rest of the stream, so the caller can pass the whole body on unchanged.
+ */
+async function readBoundedText(body: ReadableStream<Uint8Array> | null, cap: number): Promise<BoundedText> {
+  if (!body) return { text: "" };
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    size += value.byteLength;
+    if (size > cap) {
+      return {
+        overflow: new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (const chunk of chunks) controller.enqueue(chunk);
+          },
+          async pull(controller) {
+            const next = await reader.read();
+            if (next.done) controller.close();
+            else controller.enqueue(next.value);
+          },
+          cancel(reason) {
+            return reader.cancel(reason);
+          },
+        }),
+      };
+    }
+  }
+  const whole = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    whole.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { text: new TextDecoder().decode(whole) };
+}
+
 function isJsonContentType(contentType: string): boolean {
   return contentType.includes("application/json") || contentType.endsWith("+json");
 }
@@ -173,12 +219,18 @@ export async function relayWithSendUnblock(
   if (surface === null) return new Response(upstream.body, init);
   const contentType = upstream.headers.get("content-type") ?? "";
   if (isJsonContentType(contentType)) {
-    let text: string;
+    // The gate payloads are small; a body past the cap is a transcript or listing that carries
+    // nothing to rewrite, so it streams through untouched instead of being buffered and copied.
+    const declared = Number(upstream.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > MAX_REWRITE_BODY_BYTES) return new Response(upstream.body, init);
+    let read: BoundedText;
     try {
-      text = await upstream.text();
+      read = await readBoundedText(upstream.body, MAX_REWRITE_BODY_BYTES);
     } catch {
       return new Response(JSON.stringify({ error: { message: "chatgpt unblock upstream read failed" } }), { status: 502, headers });
     }
+    if ("overflow" in read) return new Response(read.overflow, init);
+    const text = read.text;
     const preserved: PreservedSendBlock[] = [];
     const rewritten = stripSendBlocksFromJson(text, surface, preserved);
     diagnostics?.record(preserved);
