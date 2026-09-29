@@ -149,8 +149,27 @@ export function stripSendBlocks(value: unknown, preserved: PreservedSendBlock[] 
  *
  * Returns whether anything changed.
  */
+/**
+ * Whether a workspace, credit or spend-control reason stands anywhere in a payload. It is
+ * collected before anything is rewritten, so a reason in one branch keeps the gate closed in
+ * every other branch of the same response.
+ */
+function hasNonQuotaBlock(node: unknown): boolean {
+  if (Array.isArray(node)) return node.some(hasNonQuotaBlock);
+  if (!isRecord(node)) return false;
+  if (node.spendControlReached !== undefined && node.spendControlReached !== null && node.spendControlReached !== false) return true;
+  if (isRecord(node.spend_control) && node.spend_control.reached === true) return true;
+  const reached = node.rate_limit_reached_type;
+  if (isRecord(reached) && typeof reached.type === "string" && reached.type !== PLAIN_QUOTA_REACHED_TYPE) return true;
+  const rpcReached = node.rateLimitReachedType;
+  const rpcType = typeof rpcReached === "string" ? rpcReached : isRecord(rpcReached) ? rpcReached.type : undefined;
+  if (typeof rpcType === "string" && rpcType !== PLAIN_QUOTA_REACHED_TYPE) return true;
+  return Object.values(node).some(hasNonQuotaBlock);
+}
+
 export function unlockRateLimitGate(value: unknown): boolean {
   let changed = false;
+  const payloadBlocked = hasNonQuotaBlock(value);
   // A subtree shows the plain quota as the reason when a plain-quota reached type was removed in
   // it or a usage window reads 100%; it stays "blocked" when a non-quota reason (workspace or
   // credit reached type, spend control) is still standing in it.
@@ -197,7 +216,7 @@ export function unlockRateLimitGate(value: unknown): boolean {
     }
     // The rate-limit flags are opened only when no workspace, credit or spend-control reason
     // stands anywhere in this payload; with one present the flags stay as the server sent them.
-    if (!blocked) {
+    if (!blocked && !payloadBlocked) {
       for (const key of ["rate_limit", "rateLimit"] as const) {
         const rateLimit = node[key];
         if (!isRecord(rateLimit)) continue;
@@ -216,7 +235,7 @@ export function unlockRateLimitGate(value: unknown): boolean {
     // `ordinaryUsageAllowed: false` is the same quota gate seen from the RPC side, and the only
     // field the app reads for it. Open it only when the plain quota is the visible reason and
     // nothing else still explains the block.
-    if (node.ordinaryUsageAllowed === false && (cleared || exhausted) && !blocked) {
+    if (node.ordinaryUsageAllowed === false && (cleared || exhausted) && !blocked && !payloadBlocked) {
       node.ordinaryUsageAllowed = true;
       changed = true;
     }

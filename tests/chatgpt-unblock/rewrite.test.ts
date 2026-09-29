@@ -204,6 +204,10 @@ describe("unlockRateLimitGate", () => {
       expect(unlockRateLimitGate(snapshot)).toBe(false);
       expect(snapshot).toEqual({ rate_limit: { allowed: false, limit_reached: true }, rate_limit_reached_type: { type } });
     }
+    // The reason may sit in another branch than the flags; the whole payload counts.
+    const apart = { usage: { rate_limit: { allowed: false, limit_reached: true } }, rate_limit_reached_type: { type: "workspace_owner_usage_limit_reached" } };
+    expect(unlockRateLimitGate(apart)).toBe(false);
+    expect(apart.usage.rate_limit).toEqual({ allowed: false, limit_reached: true });
     const spend = structuredClone(usageSnapshot);
     (spend.usage.spend_control as Record<string, unknown>).reached = true;
     expect(unlockRateLimitGate(spend)).toBe(false);
