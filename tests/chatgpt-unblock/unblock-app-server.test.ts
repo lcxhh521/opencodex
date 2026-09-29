@@ -143,6 +143,24 @@ const INJECT_PROVIDER_TABLE = [
   "})();",
 ].join(String.fromCharCode(10));
 
+const INJECT_STRIP_MARKERS_THEN_OFF = [
+  'const fs = require("fs");',
+  'const path = require("path");',
+  'const { injectCodexConfig } = require("./src/codex/inject");',
+  "(async () => {",
+  '  const cfgPath = path.join(process.env.CODEX_HOME, "config.toml");',
+  '  const base = { port: 10100, providers: {}, defaultProvider: "openai", injectionModel: "gpt-5.6-sol", injectionEffort: "high" };',
+  "  await injectCodexConfig(10100, { ...base, chatgptDesktop: { unblockSend: true } }, { catalogPath: null });",
+  "  // What a Codex app reserialize does: keep the values, drop the ownership comments.",
+  '  const NL = String.fromCharCode(10);',
+  '  fs.writeFileSync(cfgPath, fs.readFileSync(cfgPath, "utf8").split(NL).filter(l => !l.trim().startsWith("#")).join(NL));',
+  '  const withoutMarkers = fs.readFileSync(cfgPath, "utf8");',
+  "  await injectCodexConfig(10100, base, { catalogPath: null });",
+  '  const switchedOff = fs.readFileSync(cfgPath, "utf8");',
+  "  console.log(JSON.stringify({ withoutMarkers, switchedOff }));",
+  "})();",
+].join(String.fromCharCode(10));
+
 function runChild(codexHome: string, script: string): { stdout: string; stderr: string; status: number } {
   const result = spawnSync(process.execPath, ["--eval", script], {
     cwd: repoRoot(),
@@ -218,6 +236,24 @@ describe("chatgpt_base_url injection", () => {
       expect(out.injected.indexOf(RELAY_URL)).toBeLessThan(out.injected.indexOf("[model_providers.opencodex]"));
       expect(out.switchedOff).not.toContain("chatgpt_base_url");
       expect(out.switchedOff).toContain("[model_providers.opencodex]");
+    } finally {
+      removeTreeWithRetry(home);
+    }
+  }, 2 * SPAWN_BUDGET_MS);
+
+  test("is still recognised as ours by value after a reserialize drops the markers", () => {
+    const home = mkdtempSync(join(tmpdir(), "ocx-chatgpt-base-url-nomarker-"));
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
+    try {
+      const r = runChild(home, INJECT_STRIP_MARKERS_THEN_OFF);
+      if (r.status !== 0) throw new Error(r.stderr || r.stdout);
+      const out = JSON.parse(r.stdout) as { withoutMarkers: string; switchedOff: string };
+
+      expect(out.withoutMarkers).toContain(RELAY_URL);
+      expect(out.withoutMarkers).not.toContain("opencodex");
+      // Without the journaled value the bare key would read as user-owned and outlive the switch.
+      expect(out.switchedOff).not.toContain("chatgpt_base_url");
     } finally {
       removeTreeWithRetry(home);
     }

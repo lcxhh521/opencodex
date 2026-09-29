@@ -15,6 +15,7 @@ import {
   preflightCodexHistoryInjection,
 } from "../history-provider";
 import {
+  journaledInjectedChatgptBaseUrl,
   journaledInjectedOpenaiBaseUrl,
   journaledInjectedRealtimeWsBaseUrl,
   journaledInjectedRootWebSearch,
@@ -182,6 +183,7 @@ export function deriveCodexInjectionPlan(
     content,
     journaledInjectedOpenaiBaseUrl({ readOnly: ctx.journalReadOnly }),
     journaledInjectedRealtimeWsBaseUrl({ readOnly: ctx.journalReadOnly }),
+    journaledInjectedChatgptBaseUrl({ readOnly: ctx.journalReadOnly }),
   );
   // Whether this home already published the provider id that its thread rows may reference.
   // Design B strips the table below; it may only stay stripped if those rows can be relabeled.
