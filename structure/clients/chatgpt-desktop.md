@@ -33,7 +33,8 @@ every other response passes through byte-identical.
 - Send blocks whose reason is usage quota (or absent) are removed from `blocked_features` and
   `limits_progress`; any other reason is kept and listed by `ocx chatgpt status`.
 - On the usage snapshot `rate_limit.allowed` becomes true, `rate_limit.limit_reached` false, and a
-  plain-quota `rate_limit_reached_type` is dropped. Workspace and credit variants are kept.
+  plain-quota `rate_limit_reached_type` is dropped. Workspace and credit variants are kept, and while
+  one of them or a reached `spend_control` stands in the payload the flags stay as sent.
 - Displayed usage (percentages, reset times, banners) is never changed.
 - A JSON body over `MAX_REWRITE_BODY_BYTES` streams through unchanged instead of being buffered.
 

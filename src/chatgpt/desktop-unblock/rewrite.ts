@@ -170,11 +170,14 @@ export function unlockRateLimitGate(value: unknown): boolean {
     if (!isRecord(node)) return { cleared, exhausted, blocked };
     if (typeof node.usedPercent === "number" && node.usedPercent >= 100) exhausted = true;
     if (node.spendControlReached !== undefined && node.spendControlReached !== null && node.spendControlReached !== false) blocked = true;
+    if (isRecord(node.spend_control) && node.spend_control.reached === true) blocked = true;
     const reachedType = node.rate_limit_reached_type;
     if (isRecord(reachedType) && reachedType.type === PLAIN_QUOTA_REACHED_TYPE) {
       delete node.rate_limit_reached_type;
       changed = true;
       cleared = true;
+    } else if (isRecord(reachedType) && typeof reachedType.type === "string") {
+      blocked = true;
     }
     // The app-server's JSON-RPC spelling of the same field: a nullable string.
     const rpcReached = node.rateLimitReachedType;
@@ -186,25 +189,29 @@ export function unlockRateLimitGate(value: unknown): boolean {
     } else if (typeof rpcType === "string") {
       blocked = true;
     }
-    for (const key of ["rate_limit", "rateLimit"] as const) {
-      const rateLimit = node[key];
-      if (!isRecord(rateLimit)) continue;
-      if (rateLimit.allowed === false) {
-        rateLimit.allowed = true;
-        changed = true;
-      }
-      for (const limitKey of ["limit_reached", "limitReached"] as const) {
-        if (rateLimit[limitKey] === true) {
-          rateLimit[limitKey] = false;
-          changed = true;
-        }
-      }
-    }
     for (const child of Object.values(node)) {
       const r = visit(child);
       cleared ||= r.cleared;
       exhausted ||= r.exhausted;
       blocked ||= r.blocked;
+    }
+    // The rate-limit flags are opened only when no workspace, credit or spend-control reason
+    // stands anywhere in this payload; with one present the flags stay as the server sent them.
+    if (!blocked) {
+      for (const key of ["rate_limit", "rateLimit"] as const) {
+        const rateLimit = node[key];
+        if (!isRecord(rateLimit)) continue;
+        if (rateLimit.allowed === false) {
+          rateLimit.allowed = true;
+          changed = true;
+        }
+        for (const limitKey of ["limit_reached", "limitReached"] as const) {
+          if (rateLimit[limitKey] === true) {
+            rateLimit[limitKey] = false;
+            changed = true;
+          }
+        }
+      }
     }
     // `ordinaryUsageAllowed: false` is the same quota gate seen from the RPC side, and the only
     // field the app reads for it. Open it only when the plain quota is the visible reason and

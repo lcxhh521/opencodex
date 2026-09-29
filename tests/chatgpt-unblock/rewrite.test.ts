@@ -198,6 +198,19 @@ describe("unlockRateLimitGate", () => {
     expect(snapshot).toEqual({ rate_limit: { allowed: true, limit_reached: false, primary_window: { used_percent: 100 } } });
   });
 
+  test("leaves the gate flags closed when a workspace, credit or spend-control reason stands beside them", () => {
+    for (const type of ["workspace_owner_usage_limit_reached", "workspace_member_credits_depleted"]) {
+      const snapshot = { rate_limit: { allowed: false, limit_reached: true }, rate_limit_reached_type: { type } };
+      expect(unlockRateLimitGate(snapshot)).toBe(false);
+      expect(snapshot).toEqual({ rate_limit: { allowed: false, limit_reached: true }, rate_limit_reached_type: { type } });
+    }
+    const spend = structuredClone(usageSnapshot);
+    (spend.usage.spend_control as Record<string, unknown>).reached = true;
+    expect(unlockRateLimitGate(spend)).toBe(false);
+    expect(spend.usage.rate_limit.allowed).toBe(false);
+    expect(spend.usage.rate_limit.limit_reached).toBe(true);
+  });
+
   test("keeps workspace and credit reached types, which are not the subscription quota", () => {
     for (const type of ["workspace_owner_usage_limit_reached", "workspace_member_credits_depleted", "workspace_owner_credits_depleted"]) {
       const snapshot = { rate_limit_reached_type: { type } };
