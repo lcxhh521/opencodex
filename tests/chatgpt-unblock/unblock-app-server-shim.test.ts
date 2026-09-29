@@ -57,6 +57,25 @@ describe("app-server line rewrite", () => {
     expect(out.result.ordinaryUsageAllowed).toBe(false);
   });
 
+  test("a Plus account with only the 5-hour window exhausted is opened and both windows are kept (#6196)", () => {
+    // The reported state: 5-hour window at 100 %, weekly window at 32 %, Send disabled.
+    const line = rpcResult({
+      ordinaryUsageAllowed: false,
+      rateLimits: {
+        limitId: "codex",
+        primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: 1790000000 },
+        secondary: { usedPercent: 32, windowDurationMins: 10080, resetsAt: 1790500000 },
+        planType: "plus",
+        rateLimitReachedType: "rate_limit_reached",
+      },
+    });
+    const out = JSON.parse(rewriteAppServerLine(line)!);
+    expect(out.result.ordinaryUsageAllowed).toBe(true);
+    expect(out.result.rateLimits.rateLimitReachedType).toBeNull();
+    expect(out.result.rateLimits.primary).toEqual({ usedPercent: 100, windowDurationMins: 300, resetsAt: 1790000000 });
+    expect(out.result.rateLimits.secondary).toEqual({ usedPercent: 32, windowDurationMins: 10080, resetsAt: 1790500000 });
+  });
+
   test("a quota window at 100% opens ordinary usage even when no reached type is sent", () => {
     const line = rpcResult({ ordinaryUsageAllowed: false, rateLimits: { primary: { usedPercent: 100, windowDurationMins: 10080 }, rateLimitReachedType: null } });
     const out = JSON.parse(rewriteAppServerLine(line)!);
