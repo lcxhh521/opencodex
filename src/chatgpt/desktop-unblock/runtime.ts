@@ -132,18 +132,21 @@ function shellQuote(value: string): string {
 }
 
 /**
- * The launcher the desktop app runs in place of the bundled `codex`. It fails open: when the
- * shim's runtime or source is gone it executes the real binary directly, so a removed or moved
- * opencodex can never leave the app without an app-server.
+ * The launcher the desktop app runs in place of the bundled `codex`. It `exec`s the real binary,
+ * so the app-server keeps the pid, parent and code-signing identity the app expects (the app
+ * rejects its app-tools pipe for any other peer), and only redirects the server's stdout into the
+ * filter. It fails open: when the filter's runtime or source is gone it executes the real binary
+ * with its stdout untouched, so a removed or moved opencodex can never leave the app without an
+ * app-server.
  */
 export function buildChatgptShimLauncher(bun: string, shimEntry: string, real: string = CHATGPT_APP_CODEX_BINARY): string {
   return `#!/bin/bash
-# opencodex: runs the ChatGPT app-server through the send-unblock stdio shim.
+# opencodex: runs the ChatGPT app-server with its stdout passed through the send-unblock filter.
 REAL=${shellQuote(real)}
 BUN=${shellQuote(bun)}
 SHIM=${shellQuote(shimEntry)}
 if [ -x "$BUN" ] && [ -f "$SHIM" ]; then
-  OCX_REAL_CODEX="$REAL" exec "$BUN" "$SHIM" "$@"
+  exec "$REAL" "$@" > >(exec "$BUN" "$SHIM")
 fi
 exec "$REAL" "$@"
 `;

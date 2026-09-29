@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { buildChatgptShimLauncher } from "../../src/chatgpt/desktop-unblock/runtime";
 import { rewriteAppServerLine } from "../../src/chatgpt/desktop-unblock/app-server-rewrite";
-import { createRpcLineFilter, runAppServerShim } from "../../src/chatgpt/desktop-unblock/app-server-shim";
+import { createRpcLineFilter, runStdoutFilter } from "../../src/chatgpt/desktop-unblock/app-server-shim";
+import { repoPath } from "../helpers/repo-root";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 /**
@@ -134,68 +135,47 @@ describe("app-server line filter", () => {
   });
 });
 
-describe("app-server shim process", () => {
-  function stubCodex(dir: string, body: string): string {
-    const path = join(dir, "codex-stub.sh");
-    writeFileSync(path, `#!/bin/bash\n${body}\n`);
-    chmodSync(path, 0o755);
-    return path;
-  }
-  const run = async (stub: string, argv: string[]) => {
+describe("app-server stdout filter", () => {
+  const chunksOf = async function* (parts: string[]) {
+    for (const part of parts) yield new TextEncoder().encode(part);
+  };
+  const run = async (parts: string[], rewrite?: (line: string) => string | null) => {
     const written: Uint8Array[] = [];
-    const code = await runAppServerShim(argv, { ...process.env, OCX_REAL_CODEX: stub }, bytes => void written.push(bytes));
-    return { code, out: new TextDecoder().decode(Buffer.concat(written)) };
+    await runStdoutFilter(chunksOf(parts), bytes => void written.push(bytes), rewrite);
+    return new TextDecoder().decode(Buffer.concat(written));
   };
 
-  test("runs the real binary with the same arguments, rewrites its gate output and returns its exit code", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "ocx-shim-"));
-    try {
-      const gate = rpcResult(EXHAUSTED_RATE_LIMITS).replace(/'/g, "'\\''");
-      const stub = stubCodex(dir, `echo "ARGS:$*"\necho '${gate}'\necho '{"method":"done"}'\nexit 7`);
-      const { code, out } = await run(stub, ["app-server", "--analytics-default-enabled"]);
-      const lines = out.trim().split("\n");
-      expect(code).toBe(7);
-      expect(lines[0]).toBe("ARGS:app-server --analytics-default-enabled");
-      expect(JSON.parse(lines[1]!).result.rateLimits.rateLimitReachedType).toBeNull();
-      expect(lines[2]).toBe('{"method":"done"}');
-    } finally {
-      removeTreeWithRetry(dir);
-    }
+  test("copies the server's stdout through, rewriting only the gate lines", async () => {
+    const out = await run([`${JSON.stringify({ method: "a" })}\n${rpcResult(EXHAUSTED_RATE_LIMITS)}\n`, '{"method":"done"}']);
+    const lines = out.split("\n");
+    expect(lines[0]).toBe('{"method":"a"}');
+    expect(JSON.parse(lines[1]!).result.rateLimits.rateLimitReachedType).toBeNull();
+    expect(lines[2]).toBe('{"method":"done"}');
   });
 
-  test("the real binary's path is not leaked into its own environment", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "ocx-shim-env-"));
-    try {
-      const stub = stubCodex(dir, 'echo "REAL=${OCX_REAL_CODEX:-unset}"');
-      expect((await run(stub, [])).out.trim()).toBe("REAL=unset");
-    } finally {
-      removeTreeWithRetry(dir);
-    }
-  });
-
-  test("a missing real binary fails loudly with 127 instead of hanging the app", async () => {
-    const written: Uint8Array[] = [];
-    const code = await runAppServerShim([], { ...process.env, OCX_REAL_CODEX: "/nonexistent/codex" }, bytes => void written.push(bytes));
-    expect(code).toBe(127);
-    expect(written).toHaveLength(0);
+  test("a rewrite that throws passes its line through unchanged instead of breaking the stream", async () => {
+    const text = `${rpcResult(EXHAUSTED_RATE_LIMITS)}\n{"method":"after"}\n`;
+    const out = await run([text], () => {
+      throw new Error("boom");
+    });
+    expect(out).toBe(text);
   });
 });
 
-describe("app-server shim launcher", () => {
-  const scriptIn = (dir: string, text: string) => {
-    const path = join(dir, "launcher.sh");
+describe("app-server launcher", () => {
+  const entry = repoPath("src/chatgpt/desktop-unblock/app-server-shim.ts");
+  const scriptIn = (dir: string, name: string, text: string) => {
+    const path = join(dir, name);
     writeFileSync(path, text);
     chmodSync(path, 0o755);
     return path;
   };
 
-  test("fails open: with the shim's runtime gone it executes the real binary directly", () => {
+  test("fails open: with the filter's runtime gone it executes the real binary directly", () => {
     const dir = mkdtempSync(join(tmpdir(), "ocx-launcher-"));
     try {
-      const real = join(dir, "real.sh");
-      writeFileSync(real, '#!/bin/bash\necho "REAL:$*"\n');
-      chmodSync(real, 0o755);
-      const launcher = scriptIn(dir, buildChatgptShimLauncher("/nonexistent/bun", "/nonexistent/shim.ts", real));
+      const real = scriptIn(dir, "real.sh", '#!/bin/bash\necho "REAL:$*"\n');
+      const launcher = scriptIn(dir, "launcher.sh", buildChatgptShimLauncher("/nonexistent/bun", "/nonexistent/shim.ts", real));
       const out = spawnSync(launcher, ["app-server", "--flag"], { encoding: "utf8" });
       expect(out.stdout.trim()).toBe("REAL:app-server --flag");
       expect(out.status).toBe(0);
@@ -204,16 +184,25 @@ describe("app-server shim launcher", () => {
     }
   });
 
-  test("with the runtime present it goes through the shim and hands the real path over", () => {
-    const dir = mkdtempSync(join(tmpdir(), "ocx-launcher-ok-"));
+  test("the real binary replaces the launcher: same pid, stdin and stderr untouched, exit code kept", () => {
+    // The app checks the code-signing identity of the process on its app-tools pipe, so the server
+    // must stay the process the app started rather than a child of a wrapper.
+    const dir = mkdtempSync(join(tmpdir(), "ocx-launcher-exec-"));
     try {
-      const real = join(dir, "real with space.sh");
-      writeFileSync(real, `#!/bin/bash\necho '${rpcResult(EXHAUSTED_RATE_LIMITS)}'\n`);
-      chmodSync(real, 0o755);
-      const entry = join(import.meta.dir, "../../src/chatgpt/desktop-unblock/app-server-shim.ts");
-      const launcher = scriptIn(dir, buildChatgptShimLauncher(process.execPath, entry, real));
-      const out = spawnSync(launcher, ["app-server"], { encoding: "utf8" });
-      expect(JSON.parse(out.stdout).result.rateLimits.rateLimitReachedType).toBeNull();
+      const gate = rpcResult(EXHAUSTED_RATE_LIMITS).replace(/'/g, "'\\''");
+      const real = scriptIn(
+        dir,
+        "real with space.sh",
+        `#!/bin/bash\necho "PID:$$ ARGS:$*"\nread -r line\necho "STDIN:$line"\necho '${gate}'\necho "to-stderr" >&2\nexit 7\n`,
+      );
+      const launcher = scriptIn(dir, "launcher.sh", buildChatgptShimLauncher(process.execPath, entry, real));
+      const out = spawnSync(launcher, ["app-server", "--analytics-default-enabled"], { encoding: "utf8", input: "hello from the app\n" });
+      const lines = out.stdout.trim().split("\n");
+      expect(lines[0]).toBe(`PID:${out.pid} ARGS:app-server --analytics-default-enabled`);
+      expect(lines[1]).toBe("STDIN:hello from the app");
+      expect(JSON.parse(lines[2]!).result.rateLimits.rateLimitReachedType).toBeNull();
+      expect(out.stderr).toBe("to-stderr\n");
+      expect(out.status).toBe(7);
     } finally {
       removeTreeWithRetry(dir);
     }

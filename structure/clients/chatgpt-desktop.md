@@ -49,15 +49,17 @@ The composer's send gate can come from two different clients, and each needs its
 - **The bundled `codex app-server`** fetches the account rate limits with its own HTTP client, which
   no Chromium switch reaches, and reports them to the app over stdio JSON-RPC. The app picks the
   server binary from `CODEX_CLI_PATH`, so with `chatgptDesktop.appServerShim` the launch passes
-  `open --env CODEX_CLI_PATH=<config dir>/chatgpt-codex-shim.sh`. That script runs
-  `app-server-shim.ts`, which starts the real binary with inherited stdin/stderr and filters only its
-  stdout: a line that mentions no rate-limit field is written back as the exact bytes it arrived in,
-  and `rewriteAppServerLine` opens a plain-quota `rateLimitReachedType` and `ordinaryUsageAllowed`
-  (also when a quota window reads 100%), keeping workspace or credit reasons and spend controls. The
-  exported protocol schema shows these two messages, `account/rateLimits/read` and
-  `account/rateLimits/updated`, as the ones that carry it. The shim sets no environment variable,
-  address or config key, so the server's children and other Codex clients are unaffected, and it fails
-  open to the real binary, so it never depends on opencodex running.
+  `open --env CODEX_CLI_PATH=<config dir>/chatgpt-codex-shim.sh`. That script `exec`s the real
+  binary, so the server stays the process the app started (same pid, parent and code-signing
+  identity; the app rejects any other peer on its app-tools pipe), and redirects only its stdout into
+  `app-server-shim.ts`, a line filter: a line that mentions no rate-limit field is written back as
+  the exact bytes it arrived in, and `rewriteAppServerLine` opens a plain-quota
+  `rateLimitReachedType` and `ordinaryUsageAllowed` (also when a quota window reads 100%), keeping
+  workspace or credit reasons and spend controls. The exported protocol schema shows these two
+  messages, `account/rateLimits/read` and `account/rateLimits/updated`, as the ones that carry it.
+  Stdin, stderr and signals go straight between the app and the server. The shim sets no environment
+  variable, address or config key, so the server's children and other Codex clients are unaffected,
+  and it fails open to the real binary, so it never depends on opencodex running.
 
 The watcher decides whether an app is already launched correctly from its command line plus its
 environment (`ps eww`), so an app started without the shim is corrected once, and `restore` hands back
