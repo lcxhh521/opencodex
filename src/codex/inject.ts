@@ -37,6 +37,7 @@ import {
 import {
   hasUnverifiedJournalBaseline,
   markJournalInjectedState,
+  journaledInjectedChatgptBaseUrl,
   journaledInjectedOpenaiBaseUrl,
   journaledInjectedRealtimeWsBaseUrl,
   removeJournal,
@@ -51,6 +52,7 @@ import {
   type CodexHistoryJobOutcome,
 } from "./history-job";
 import {
+  CHATGPT_BASE_URL_KEY,
   REALTIME_WS_BASE_URL_KEY,
   hasInjectedCodexRouting,
   hasInjectedOpenaiBaseUrl,
@@ -182,6 +184,16 @@ export function setInjectPublishCurrentTxIdForTests(hook: typeof publishCurrentT
   publishCurrentTxIdForTests = hook;
 }
 
+/**
+ * The relay URL for `chatgpt_base_url`, resolved lazily so an install without the ChatGPT desktop
+ * send-unblock never loads its module. Null whenever the feature is off.
+ */
+async function resolveChatgptBaseUrl(config: OcxConfig | undefined, port: number): Promise<string | null> {
+  if (config?.chatgptDesktop?.unblockSend !== true) return null;
+  const { chatgptAppServerBaseUrl } = await import("../chatgpt/desktop-unblock/runtime");
+  return chatgptAppServerBaseUrl(config, port);
+}
+
 export async function injectCodexConfig(
   port: number,
   config?: OcxConfig,
@@ -287,6 +299,7 @@ async function injectCodexConfigImpl(
     routingTarget,
     catalogPathOption: options.catalogPath,
     journalReadOnly: !!options.beforeClientWrite,
+    chatgptBaseUrl: await resolveChatgptBaseUrl(config, port),
   };
   const admittedPlan = deriveCodexInjectionPlan(rawContent, planContext);
   if (admittedPlan.kind === "refused") {
@@ -363,10 +376,13 @@ async function injectCodexConfigImpl(
     // Value evidence survives an app rewrite that removes the ownership comments.
     const journaledBaseUrl = journaledInjectedOpenaiBaseUrl({ readOnly: true });
     const journaledRealtimeWsBaseUrl = journaledInjectedRealtimeWsBaseUrl({ readOnly: true });
+    const journaledChatgptBaseUrl = journaledInjectedChatgptBaseUrl({ readOnly: true });
     const looksInjectedByValue =
       (journaledBaseUrl !== null && rootTomlString(nativeInput, "openai_base_url") === journaledBaseUrl)
       || (journaledRealtimeWsBaseUrl !== null
-        && rootTomlString(nativeInput, REALTIME_WS_BASE_URL_KEY) === journaledRealtimeWsBaseUrl);
+        && rootTomlString(nativeInput, REALTIME_WS_BASE_URL_KEY) === journaledRealtimeWsBaseUrl)
+      || (journaledChatgptBaseUrl !== null
+        && rootTomlString(nativeInput, CHATGPT_BASE_URL_KEY) === journaledChatgptBaseUrl);
     return !hasInjectedCodexRouting(nativeInput) && !looksInjectedByValue;
   };
   const readCurrentProfile = (): string | null => existsSync(CODEX_PROFILE_PATH)
@@ -479,6 +495,8 @@ async function injectCodexConfigImpl(
       injectedRealtimeWsBaseUrl: plan.providerTableMode || plan.keptUserBaseUrl || plan.keptUserRealtimeWsBaseUrl
         ? null
         : rootTomlString(plan.content, REALTIME_WS_BASE_URL_KEY),
+      // The send-unblock relay URL is ours only when this pass wrote it (never over a user's own key).
+      injectedChatgptBaseUrl: plan.injectedChatgptBaseUrl,
       // The web-search pair follows the sidecar's master switch, and it is the one root value we
       // REPLACE rather than only add: the operator's own mode has to leave the file while the
       // switch is off. Both halves are recorded here — the value we wrote (the marker comment is

@@ -25,6 +25,15 @@ Send locks with any other reason, such as a subscription requirement, are kept, 
 `ocx chatgpt status` lists them. Displayed usage (percentages, reset times, banners) is never
 changed, and OpenAI's servers still enforce every limit on their own requests.
 
+The app's built-in Codex server does not go through those Chromium switches: it reads your
+account state (including the usage snapshot behind the send button) with its own HTTP client.
+While the feature is on, opencodex therefore also writes a marker-owned `chatgpt_base_url` to
+`~/.codex/config.toml`, pointing at a plain-HTTP loopback listener two ports after the TLS one
+(default `10302`). That listener uses the same relay and the same two rewrites, needs no
+certificate, and is removed again by `ocx restore`, by `ocx stop`, or by turning `unblockSend`
+off. A `chatgpt_base_url` you set yourself is never overwritten. Restart Codex after the key
+changes so the built-in server picks it up.
+
 ## Setup
 
 1. Enable the feature in `~/.opencodex/config.json` and restart opencodex:
@@ -136,6 +145,9 @@ shared with opencodex's Claude integrations; remove its trust only if you use ne
 - **The send button is still grey:** check `ocx chatgpt status`. The app may be running
   without the route (run `ocx chatgpt launch`), or the lock may have a reason other than usage
   quota, which is listed under "send blocks kept".
+- **The send button stays grey with the route working:** the built-in Codex server reads the
+  gate through `chatgpt_base_url`. Check that `~/.codex/config.toml` has that key pointing at
+  `127.0.0.1` (a user-set value of your own is kept and disables this path), then restart Codex.
 - **The app cannot load anything after opencodex stops:** in the default mode a routed app
   depends on the listener. Start opencodex again or run `ocx chatgpt restore`, or turn on
   PAC fallback so the app falls back on its own.

@@ -38,6 +38,7 @@ import {
   setRootModelCatalogPath,
   setRootModelProvider,
   setRootOpenaiBaseUrlForTarget,
+  setRootChatgptBaseUrl,
   setRootRealtimeWsBaseUrl,
   stripExistingModelProvider,
   stripInjectedOpenaiBaseUrl,
@@ -60,6 +61,8 @@ export interface CodexInjectionPlanContext {
   readonly catalogPathOption: string | null | undefined;
   /** Journal reads stay read-only while a client guard owns the write channel. */
   readonly journalReadOnly: boolean;
+  /** The local send-unblock relay URL for `chatgpt_base_url`, or null/undefined when the feature is off. */
+  readonly chatgptBaseUrl?: string | null;
 }
 
 /** The ok-variant of the plan: every derived artifact and reportable warning. */
@@ -77,6 +80,8 @@ export interface CodexInjectionPlanOk {
   keepRootOverrideAlongsideTable: boolean;
   keptUserBaseUrl: boolean;
   keptUserRealtimeWsBaseUrl: boolean;
+  /** The root `chatgpt_base_url` this plan writes for the send-unblock relay, or null when none. */
+  injectedChatgptBaseUrl: string | null;
   /** The root `web_search` value this plan writes, or null when it writes none. */
   injectedRootWebSearch: string | null;
   /** The user-owned root `web_search` line this plan removed, for the journal to carry. */
@@ -242,6 +247,7 @@ export function deriveCodexInjectionPlan(
     && routingTarget.requiresAdmissionToken !== true;
   let keptUserBaseUrl = false;
   let keptUserRealtimeWsBaseUrl = false;
+  let injectedChatgptBaseUrl: string | null = null;
   if (providerTableMode) {
     // Legacy (non-loopback) injection: the built-in openai provider cannot carry the
     // x-opencodex-api-key env header, so keep the opencodex provider table + root re-tag.
@@ -275,6 +281,14 @@ export function deriveCodexInjectionPlan(
       const realtime = setRootRealtimeWsBaseUrl(content, routingTarget);
       content = realtime.content;
       keptUserRealtimeWsBaseUrl = realtime.keptUserRealtimeWsBaseUrl;
+    }
+    // The bundled app-server reads the composer's account gate through `chatgpt_base_url`, which
+    // no Chromium switch reaches. Additive to the routing override: only while the send-unblock
+    // is on, and never over a user-owned `chatgpt_base_url`.
+    if (ctx.chatgptBaseUrl) {
+      const chatgpt = setRootChatgptBaseUrl(content, ctx.chatgptBaseUrl);
+      content = chatgpt.content;
+      if (!chatgpt.keptUserChatgptBaseUrl) injectedChatgptBaseUrl = ctx.chatgptBaseUrl;
     }
   }
 
@@ -386,6 +400,7 @@ export function deriveCodexInjectionPlan(
     keepRootOverrideAlongsideTable,
     keptUserBaseUrl,
     keptUserRealtimeWsBaseUrl,
+    injectedChatgptBaseUrl,
     injectedRootWebSearch: webSearch.wroteValue,
     replacedRootWebSearch: webSearch.replacedUserLine,
     nativeSubagentDefaultsWarning,

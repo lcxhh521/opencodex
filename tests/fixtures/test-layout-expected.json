@@ -1531,6 +1531,7 @@
   "restore-completes-shared-teardown.test.ts": "cli",
   "rewrite.test.ts": "chatgpt-unblock",
   "retry-after-429.test.ts": "server",
+  "unblock-app-server.test.ts": "chatgpt-unblock",
   "unblock-ca-trust.test.ts": "chatgpt-unblock",
   "unblock-config-boundary.test.ts": "chatgpt-unblock",
   "unblock-entry-proxy.test.ts": "chatgpt-unblock",

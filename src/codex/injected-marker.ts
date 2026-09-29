@@ -53,6 +53,19 @@ export function isRootRealtimeWsBaseUrlLine(line: string): boolean {
   return rootAssignmentKey(line) === REALTIME_WS_BASE_URL_KEY;
 }
 
+/**
+ * codex-rs root key that redirects the ChatGPT backend base URL (default
+ * `https://chatgpt.com/backend-api`). The bundled `codex app-server` issues the account reads
+ * that gate the composer (`wham/usage`, conversation init) through this URL with its own HTTP
+ * client, so it is the only lever that reaches them. Injected only while the ChatGPT desktop
+ * send-unblock is enabled, pointing at the local plain-HTTP relay.
+ */
+export const CHATGPT_BASE_URL_KEY = "chatgpt_base_url";
+
+export function isRootChatgptBaseUrlLine(line: string): boolean {
+  return /^\s*chatgpt_base_url\s*=/.test(line);
+}
+
 export function tomlStringPattern(key: string): RegExp {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const keyToken = `(?:${escaped}|"${escaped}"|'${escaped}')`;
@@ -107,8 +120,9 @@ export function stripJournaledOpenaiBaseUrl(
   content: string,
   injectedUrl: string | null,
   injectedRealtimeWsUrl: string | null = null,
+  injectedChatgptBaseUrl: string | null = null,
 ): string {
-  if (!injectedUrl && !injectedRealtimeWsUrl) return content;
+  if (!injectedUrl && !injectedRealtimeWsUrl && !injectedChatgptBaseUrl) return content;
   const { bom, lines, rootEnd } = rootSourceLines(content);
   const drop = new Set<number>();
   for (let i = 0; i < rootEnd; i++) {
@@ -121,6 +135,8 @@ export function stripJournaledOpenaiBaseUrl(
       if (!injectedUrl || rootTomlString(line, "openai_base_url") !== injectedUrl) continue;
     } else if (isRootRealtimeWsBaseUrlLine(line)) {
       if (!injectedRealtimeWsUrl || rootTomlString(line, REALTIME_WS_BASE_URL_KEY) !== injectedRealtimeWsUrl) continue;
+    } else if (isRootChatgptBaseUrlLine(line)) {
+      if (!injectedChatgptBaseUrl || rootTomlString(line, CHATGPT_BASE_URL_KEY) !== injectedChatgptBaseUrl) continue;
     } else {
       continue;
     }

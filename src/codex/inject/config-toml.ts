@@ -4,9 +4,11 @@ import { contextCompatibleBaseLine } from "../context-compat";
 import { resolveEffectiveProjectModelProvider } from "../project-config-warnings";
 import {
   OCX_ROUTING_MARKER_LINE,
+  CHATGPT_BASE_URL_KEY,
   REALTIME_WS_BASE_URL_KEY,
   isOcxRoutingMarkerLine,
   isRootOpenaiBaseUrlLine,
+  isRootChatgptBaseUrlLine,
   isRootRealtimeWsBaseUrlLine,
   providerTableStart,
   providerTableString,
@@ -205,6 +207,10 @@ function buildOpenaiBaseUrlLineForTarget(target: CodexRoutingTarget): string {
  * where the same Pool account is reused. codex-rs turns `http` into `ws` and appends
  * `/live/{callId}` itself; the value must stay the canonical `/v1` root.
  */
+export function buildChatgptBaseUrlLine(url: string): string {
+  return `${CHATGPT_BASE_URL_KEY} = ${tomlString(url)}`;
+}
+
 export function buildRealtimeWsBaseUrlLine(target: CodexRoutingTarget): string {
   return `${REALTIME_WS_BASE_URL_KEY} = ${tomlString(target.baseUrl)}`;
 }
@@ -434,7 +440,8 @@ export function stripInjectedRootWebSearch(content: string, injectedValue?: stri
  * Remove the marker-owned root `openai_base_url` (marker line + the key line right after it).
  * A user's own root override (no marker) survives; an orphaned marker with no key line after
  * it is dropped too so repeated strip/inject cycles cannot accumulate marker comments.
- * A marker-owned `experimental_realtime_ws_base_url` pair is removed by the same rule.
+ * A marker-owned `experimental_realtime_ws_base_url` or `chatgpt_base_url` pair is removed by
+ * the same rule.
  */
 export function stripInjectedOpenaiBaseUrl(content: string): string {
   const { bom, lines, rootEnd } = rootSourceLines(content);
@@ -444,7 +451,7 @@ export function stripInjectedOpenaiBaseUrl(content: string): string {
     if (!line.structural || !isOcxRoutingMarkerLine(line.text)) continue;
     const next = lines[index + 1];
     if (index + 1 < rootEnd && next?.structural
-      && (isRootOpenaiBaseUrlLine(next.text) || isRootRealtimeWsBaseUrlLine(next.text))) {
+      && (isRootOpenaiBaseUrlLine(next.text) || isRootRealtimeWsBaseUrlLine(next.text) || isRootChatgptBaseUrlLine(next.text))) {
       const key = rootAssignmentKey(next.text)!;
       if (rootTomlString(next.text, key) === null) continue;
       drop.add(index);
@@ -454,6 +461,40 @@ export function stripInjectedOpenaiBaseUrl(content: string): string {
     }
   }
   return drop.size ? bom + sourceText(lines.filter((_, index) => !drop.has(index))) : content;
+}
+
+/**
+ * Marker-owned root `chatgpt_base_url` for the send-unblock relay. Same ownership rule as the
+ * realtime override: the line is ours only when its own marker sits directly above it, and a
+ * user's `chatgpt_base_url` (no marker) is kept untouched with nothing injected. Placement follows
+ * the routing override: the end of the root block, before the first table header.
+ */
+export function setRootChatgptBaseUrl(
+  content: string,
+  url: string,
+): { content: string; keptUserChatgptBaseUrl: boolean } {
+  const lines = content.split("\n");
+  const firstTable = lines.findIndex((line) => /^\s*\[/.test(line));
+  const rootEnd = firstTable === -1 ? lines.length : firstTable;
+  const key = buildChatgptBaseUrlLine(url);
+  for (let index = 0; index < rootEnd; index += 1) {
+    if (!isRootChatgptBaseUrlLine(lines[index])) continue;
+    const markerOwned = index > 0 && lines[index - 1].includes(OCX_SECTION_MARKER);
+    if (!markerOwned) return { content, keptUserChatgptBaseUrl: true };
+    lines[index - 1] = OCX_ROUTING_MARKER_LINE;
+    lines[index] = key;
+    return { content: lines.join("\n"), keptUserChatgptBaseUrl: false };
+  }
+  if (firstTable === -1) {
+    return {
+      content: content.replace(/\n+$/, "") + "\n" + OCX_ROUTING_MARKER_LINE + "\n" + key + "\n",
+      keptUserChatgptBaseUrl: false,
+    };
+  }
+  let insertAt = firstTable;
+  while (insertAt > 0 && lines[insertAt - 1].trim() === "") insertAt -= 1;
+  lines.splice(insertAt, 0, OCX_ROUTING_MARKER_LINE, key);
+  return { content: lines.join("\n"), keptUserChatgptBaseUrl: false };
 }
 
 /**
