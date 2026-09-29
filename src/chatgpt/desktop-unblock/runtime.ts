@@ -219,7 +219,15 @@ export async function startChatgptUnblock<T = undefined>(options: StartChatgptUn
       throw error;
     }
   }
-  if (chatgptAppServerShimEnabled(options.config)) writeChatgptShimLauncher(configDir);
+  if (chatgptAppServerShimEnabled(options.config)) {
+    try {
+      writeChatgptShimLauncher(configDir);
+    } catch (error) {
+      await entryProxy?.stop();
+      await listener.stop(true);
+      throw error;
+    }
+  }
   return {
     port,
     caCertPath: claudeInterceptCaCertPath(configDir),

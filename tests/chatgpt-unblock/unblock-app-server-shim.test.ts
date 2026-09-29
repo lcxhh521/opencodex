@@ -95,14 +95,18 @@ describe("app-server line rewrite", () => {
     expect(JSON.parse(rewriteAppServerLine(line)!).params.rateLimits.rateLimitReachedType).toBeNull();
   });
 
-  test("camelCase send blocks and snake_case gate payloads are both handled", () => {
-    const blocks = JSON.stringify({ result: { blockedFeatures: [{ name: "send", blockReason: "usage_limit" }, { name: "tpp_send", blockReason: "work_subscription_required" }], limitsProgress: [{ featureName: "send", remaining: 0 }] } });
-    const out = JSON.parse(rewriteAppServerLine(blocks)!);
-    expect(out.result.blockedFeatures).toEqual([{ name: "tpp_send", blockReason: "work_subscription_required" }]);
-    expect(out.result.limitsProgress).toEqual([]);
+  test("only rate-limit messages are rewritten; tool results and other results that nest gate fields are left alone", () => {
+    const toolResult = JSON.stringify({
+      method: "item/completed",
+      params: { item: { type: "commandExecution", output: { rate_limit: { allowed: false, limit_reached: true }, rateLimitReachedType: "rate_limit_reached" } } },
+    });
+    expect(rewriteAppServerLine(toolResult)).toBeNull();
 
-    const snake = JSON.stringify({ result: { rate_limit: { allowed: false, limit_reached: true } } });
-    expect(JSON.parse(rewriteAppServerLine(snake)!).result.rate_limit).toEqual({ allowed: true, limit_reached: false });
+    const otherResult = JSON.stringify({ id: 9, result: { data: { rate_limit: { allowed: false }, rateLimits: { rateLimitReachedType: "rate_limit_reached" } } } });
+    expect(rewriteAppServerLine(otherResult)).toBeNull();
+
+    const blocks = JSON.stringify({ id: 10, result: { blockedFeatures: [{ name: "send", blockReason: "usage_limit" }] } });
+    expect(rewriteAppServerLine(blocks)).toBeNull();
   });
 
   test("lines without gate fields, unparseable lines and already-open gates are not touched", () => {

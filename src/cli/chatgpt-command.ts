@@ -126,7 +126,14 @@ export async function handleChatgptCommand(args: string[], platform: NodeJS.Plat
   const shimMode = chatgptAppServerShimEnabled(config);
   // The launcher normally comes from the running server; write it here too so a launch never
   // points the app at a script that does not exist yet.
-  if (sub === "launch" && shimMode) writeChatgptShimLauncher(getConfigDir());
+  if (sub === "launch" && shimMode) {
+    try {
+      writeChatgptShimLauncher(getConfigDir());
+    } catch (error) {
+      console.error(`ChatGPT not launched: could not write the app-server launcher: ${error instanceof Error ? error.message : String(error)}`);
+      return 1;
+    }
+  }
   if (sub === "launch") return report(launchChatgptWithRule(port, undefined, pacMode, entryPort, shimMode));
 
   // restore: the watcher would put the switches straight back on the relaunch while opencodex runs.

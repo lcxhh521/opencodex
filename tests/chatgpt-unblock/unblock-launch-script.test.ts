@@ -61,7 +61,7 @@ const SCUTIL_PAC = `<dictionary> {
   SOCKSEnable : 0
 }`;
 
-type AppState = "none" | "plain" | "flagged" | "pac";
+type AppState = "none" | "plain" | "flagged" | "pac" | "flagged-shim" | "shim-only";
 
 const APP_BINARY = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT";
 // A shell whose command line mentions the rule, e.g. someone grepping for it. Matching on

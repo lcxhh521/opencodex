@@ -86,6 +86,21 @@ describe("stripSendBlocks", () => {
     expect(preserved).toEqual([{ name: "send", reason: "policy_violation" }]);
   });
 
+  test("a workspace or credit send block is preserved even though its reason mentions a limit", () => {
+    const preserved: PreservedSendBlock[] = [];
+    const blocks = [
+      { name: "send", block_reason: "workspace_owner_usage_limit_reached" },
+      { name: "send", block_reason: "workspace_member_credits_depleted" },
+      { name: "send", block_reason: "usage_limit" },
+    ];
+    const result = stripSendBlocks({ blocked_features: blocks }, preserved);
+    expect((result.value as { blocked_features: unknown[] }).blocked_features).toEqual(blocks.slice(0, 2));
+    expect(preserved).toEqual([
+      { name: "send", reason: "workspace_owner_usage_limit_reached" },
+      { name: "send", reason: "workspace_member_credits_depleted" },
+    ]);
+  });
+
   test("keeps malformed entries and recurses into nested payloads", () => {
     const nested = { conversation: { blocked_features: [{ name: "send" }, "junk", 7] } };
     const result = stripSendBlocks(nested);

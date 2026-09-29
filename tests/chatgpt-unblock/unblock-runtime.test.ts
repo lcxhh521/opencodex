@@ -9,6 +9,7 @@ import {
   chatgptUnblockPacArg,
   chatgptUnblockPacPath,
   chatgptUnblockPort,
+  chatgptUnblockShimPath,
   startChatgptUnblock,
 } from "../../src/chatgpt/desktop-unblock/runtime";
 import { CHATGPT_INTERCEPT_HOST } from "../../src/chatgpt/desktop-unblock/listener";
@@ -131,6 +132,15 @@ describe("chatgpt unblock PAC-mode startup", () => {
     // A directory where the PAC file goes makes the write fail after both listeners bound.
     mkdirSync(chatgptUnblockPacPath(dir));
     await expect(startChatgptUnblock({ config: config({ pacFallback: true, port: origin }), publicPort: 0, configDir: dir })).rejects.toThrow();
+    expect(await accepts(origin)).toBe(false);
+    expect(await accepts(origin + 1)).toBe(false);
+  });
+
+  test("an app-server launcher write failure releases the listeners", async () => {
+    const origin = freePortPair();
+    // A directory where the launcher goes makes the write fail after the listeners bound.
+    mkdirSync(chatgptUnblockShimPath(dir));
+    await expect(startChatgptUnblock({ config: config({ pacFallback: true, appServerShim: true, port: origin }), publicPort: 0, configDir: dir })).rejects.toThrow();
     expect(await accepts(origin)).toBe(false);
     expect(await accepts(origin + 1)).toBe(false);
   });

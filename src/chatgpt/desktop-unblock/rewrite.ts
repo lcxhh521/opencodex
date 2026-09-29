@@ -33,10 +33,11 @@ const SEND_BLOCKED_FEATURE_NAMES = new Set(["send", "tpp_send"]);
 const SEND_LIMIT_FEATURE_NAME = "send";
 
 /**
- * `block_reason` values that describe usage quota, e.g. `usage_limit`. Anything else --
- * subscription, policy, or a reason this code has never seen -- is left in place.
+ * `block_reason` values that describe the account's own usage quota. Anything else --
+ * subscription, policy, a workspace or credit limit such as `workspace_owner_usage_limit_reached`,
+ * or a reason this code has never seen -- is left in place.
  */
-const QUOTA_BLOCK_REASON = /limit|quota|exhaust/i;
+const QUOTA_BLOCK_REASONS = new Set(["usage_limit", "usage_limit_reached", "rate_limit_exceeded", "rate_limit_reached", "quota_exhausted"]);
 
 /**
  * `rate_limit_reached_type.type` value for the plain subscription quota. The workspace and
@@ -85,7 +86,7 @@ function isSendBlockedFeature(entry: unknown): entry is Record<string, unknown> 
 /** Absent/empty reason is the plain usage-limit shape; otherwise the reason must say quota. */
 function isQuotaBlockReason(reason: unknown): boolean {
   if (reason === undefined || reason === null || reason === "") return true;
-  return typeof reason === "string" && QUOTA_BLOCK_REASON.test(reason);
+  return typeof reason === "string" && QUOTA_BLOCK_REASONS.has(reason);
 }
 
 function isExhaustedSendLimit(entry: unknown): boolean {
