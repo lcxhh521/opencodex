@@ -9,7 +9,8 @@
  *     `send` with `remaining <= 0`.
  *  2. The desktop usage snapshot (`/backend-api/wham/usage[/stream]`) carries
  *     `rate_limit.allowed: false` + `rate_limit.limit_reached: true` while the logged-in
- *     ChatGPT subscription quota is exhausted.
+ *     ChatGPT subscription quota is exhausted. The bundled `codex app-server` additionally
+ *     derives its own "limit reached" state from the sibling `rate_limit_reached_type` object.
  *
  * Only the account's own usage quota is lifted -- data that is meaningless for turns whose
  * model calls opencodex routes to third-party providers. Scope is deliberately narrow:
@@ -36,6 +37,13 @@ const SEND_LIMIT_FEATURE_NAME = "send";
  * subscription, policy, or a reason this code has never seen -- is left in place.
  */
 const QUOTA_BLOCK_REASON = /limit|quota|exhaust/i;
+
+/**
+ * `rate_limit_reached_type.type` value for the plain subscription quota. The workspace and
+ * credit variants (`workspace_owner_usage_limit_reached`, `workspace_member_credits_depleted`,
+ * ...) describe an organisation or billing state the relay cannot argue with, so they stay.
+ */
+const PLAIN_QUOTA_REACHED_TYPE = "rate_limit_reached";
 
 /** Which part of the rewrite applies to a response. */
 export type RewriteSurface = "conversation" | "usage";
@@ -131,7 +139,8 @@ export function stripSendBlocks(value: unknown, preserved: PreservedSendBlock[] 
 
 /**
  * Flip the desktop usage snapshot's send gate in place: `rate_limit.allowed` false -> true and
- * `rate_limit.limit_reached` true -> false, at any depth (top-level for the snapshot endpoint,
+ * `rate_limit.limit_reached` true -> false and a plain-quota `rate_limit_reached_type` dropped,
+ * at any depth (top-level for the snapshot endpoint,
  * under `usage` for stream events). Callers apply this to the usage endpoints only. Window
  * percentages, reset timestamps, the upsell banner and every other display field are left
  * exactly as the backend sent them.
@@ -146,6 +155,11 @@ export function unlockRateLimitGate(value: unknown): boolean {
       return;
     }
     if (!isRecord(node)) return;
+    const reachedType = node.rate_limit_reached_type;
+    if (isRecord(reachedType) && reachedType.type === PLAIN_QUOTA_REACHED_TYPE) {
+      delete node.rate_limit_reached_type;
+      changed = true;
+    }
     const rateLimit = node.rate_limit;
     if (isRecord(rateLimit)) {
       if (rateLimit.allowed === false) {

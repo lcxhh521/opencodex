@@ -171,6 +171,25 @@ describe("unlockRateLimitGate", () => {
     expect(snapshot.rate_limit.allowed).toBe(true);
     expect(snapshot.rate_limit.primary_window.used_percent).toBe(42);
   });
+
+  test("drops a plain-quota rate_limit_reached_type, which the bundled app-server reads", () => {
+    // `codex app-server` derives its own limit-reached state from this sibling object, so the
+    // allowed/limit_reached flip alone left it reporting `rate_limit_reached` (#6196).
+    const snapshot = {
+      rate_limit: { allowed: false, limit_reached: true, primary_window: { used_percent: 100 } },
+      rate_limit_reached_type: { type: "rate_limit_reached" },
+    };
+    expect(unlockRateLimitGate(snapshot)).toBe(true);
+    expect(snapshot).toEqual({ rate_limit: { allowed: true, limit_reached: false, primary_window: { used_percent: 100 } } });
+  });
+
+  test("keeps workspace and credit reached types, which are not the subscription quota", () => {
+    for (const type of ["workspace_owner_usage_limit_reached", "workspace_member_credits_depleted", "workspace_owner_credits_depleted"]) {
+      const snapshot = { rate_limit_reached_type: { type } };
+      expect(unlockRateLimitGate(snapshot)).toBe(false);
+      expect(snapshot).toEqual({ rate_limit_reached_type: { type } });
+    }
+  });
 });
 
 describe("stripSendBlocksFromSseLine", () => {
