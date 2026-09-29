@@ -21,7 +21,7 @@ All bind `127.0.0.1` and share one relay (`relayWithSendUnblock`) and one set of
 |---|---|---|
 | TLS origin | `chatgptDesktop.port`, else public port + 200 | Receives the Chromium app's `chatgpt.com` traffic; certificate from the shared local intercept CA. |
 | CONNECT entry | origin + 1 | PAC mode only. Accepts `CONNECT chatgpt.com:443` and nothing else, then splices onto the origin listener. |
-| Plain HTTP | origin + 2 | The bundled `codex app-server`, reached through `chatgpt_base_url`; needs no certificate. |
+| App-server HTTPS | origin + 2 | Only with `chatgptDesktop.appServer`. The bundled `codex app-server`, reached through `chatgpt_base_url`; TLS with a loopback certificate (`127.0.0.1`, `localhost`) from the same local CA. |
 
 The three ports wrap inside the TCP range without colliding. A bind failure degrades to a warning;
 the proxy's other duties never depend on these listeners.
@@ -48,11 +48,14 @@ The gate is read by two different clients, and each needs its own switch:
   the refused CONNECT makes Chromium fall through to the captured system chain with no restart. The
   launch watcher rebuilds the switch from the PAC file written at each start.
 - **The bundled `codex app-server`** issues the account reads with its own HTTP client, which no
-  Chromium switch reaches. While the switch is on, the Codex injector writes a marker-owned root
-  `chatgpt_base_url` pointing at the plain-HTTP listener. It follows the other injected root keys:
-  journaled by value (`injectedChatgptBaseUrl`), removed by restore, by `ocx stop` and when the
-  switch goes off, and a `chatgpt_base_url` the user set is kept and never journaled. It is written in
-  both loopback and provider-table routing modes, ahead of the first table.
+  Chromium switch reaches. It also validates `chatgpt_base_url` as a workspace backend during login
+  and refuses anything but an HTTPS origin without credentials, so the listener above speaks TLS. The
+  route is experimental and opt-in (`chatgptDesktop.appServer`): it has not been proven against a real
+  sign-in, and an earlier plain-HTTP form broke sign-in outright. While it is on, the Codex injector
+  writes a marker-owned root `chatgpt_base_url`. It follows the other injected root keys: journaled by
+  value (`injectedChatgptBaseUrl`), removed by restore, by `ocx stop` and when the switch goes off, and
+  a `chatgpt_base_url` the user set is kept and never journaled. It is written in both loopback and
+  provider-table routing modes, ahead of the first table.
 
 `ocx chatgpt launch|restore|status|install-watcher` (`src/cli/chatgpt-command.ts`) follow the
 configured mode; `restore` undoes either launch switch.

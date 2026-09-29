@@ -189,7 +189,7 @@ export function setInjectPublishCurrentTxIdForTests(hook: typeof publishCurrentT
  * send-unblock never loads its module. Null whenever the feature is off.
  */
 async function resolveChatgptBaseUrl(config: OcxConfig | undefined, port: number): Promise<string | null> {
-  if (config?.chatgptDesktop?.unblockSend !== true) return null;
+  if (config?.chatgptDesktop?.unblockSend !== true || config.chatgptDesktop.appServer !== true) return null;
   const { chatgptAppServerBaseUrl } = await import("../chatgpt/desktop-unblock/runtime");
   return chatgptAppServerBaseUrl(config, port);
 }

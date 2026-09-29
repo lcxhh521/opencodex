@@ -27,12 +27,15 @@ changed, and OpenAI's servers still enforce every limit on their own requests.
 
 The app's built-in Codex server does not go through those Chromium switches: it reads your
 account state (including the usage snapshot behind the send button) with its own HTTP client.
-While the feature is on, opencodex therefore also writes a marker-owned `chatgpt_base_url` to
-`~/.codex/config.toml`, pointing at a plain-HTTP loopback listener two ports after the TLS one
-(default `10302`). That listener uses the same relay and the same two rewrites, needs no
-certificate, and is removed again by `ocx restore`, by `ocx stop`, or by turning `unblockSend`
-off. A `chatgpt_base_url` you set yourself is never overwritten. Restart Codex after the key
-changes so the built-in server picks it up.
+An **experimental** route covers it: set `chatgptDesktop.appServer` to `true` (together with
+`unblockSend`) and opencodex writes a marker-owned `chatgpt_base_url` to `~/.codex/config.toml`,
+pointing at an HTTPS loopback listener two ports after the TLS one (default `https://127.0.0.1:10302`)
+that uses the same relay and rewrites and a certificate from the same local CA. The built-in server
+requires this URL to be an HTTPS origin without credentials, which is why it cannot be plain HTTP.
+The route is off by default because it has not yet been proven against a real sign-in; if sign-in
+fails after enabling it, set `appServer` back to `false` and run `ocx sync`. The key is removed again
+by `ocx restore`, by `ocx stop`, or when the switch goes off, and a `chatgpt_base_url` you set yourself
+is never overwritten. Restart Codex after the key changes so the built-in server picks it up.
 
 ## Setup
 
@@ -147,8 +150,11 @@ shared with opencodex's Claude integrations; remove its trust only if you use ne
   without the route (run `ocx chatgpt launch`), or the lock may have a reason other than usage
   quota, which is listed under "send blocks kept".
 - **The send button stays grey with the route working:** the built-in Codex server reads the
-  gate through `chatgpt_base_url`. Check that `~/.codex/config.toml` has that key pointing at
-  `127.0.0.1` (a user-set value of your own is kept and disables this path), then restart Codex.
+  gate through `chatgpt_base_url`, which only the experimental `appServer` route sets. Check that
+  `~/.codex/config.toml` has that key pointing at `127.0.0.1` (a value of your own is kept and
+  disables this path), then restart Codex.
+- **Sign-in fails with "workspace backend must use an HTTPS origin":** `chatgpt_base_url` points at a
+  non-HTTPS URL. Remove the key (or turn `appServer` off) and restart Codex.
 - **The app cannot load anything after opencodex stops:** in the default mode a routed app
   depends on the listener. Start opencodex again or run `ocx chatgpt restore`, or turn on
   PAC fallback so the app falls back on its own.

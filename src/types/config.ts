@@ -1096,9 +1096,12 @@ export interface OcxConfig {
    * routes chatgpt.com through the local entry first and falls back to the system route).
    * In both modes the intercept CA must be trusted once (see the startup log). A malformed
    * value reads as off. `port` (1–65535) overrides the default listener port (public
-   * port + 200).
+   * port + 200). `appServer: true` additionally points the bundled `codex app-server` at an
+   * HTTPS loopback listener through `chatgpt_base_url`; it is experimental and off by default
+   * because the app-server validates that URL during login and it has not been proven against
+   * a real sign-in.
    */
-  chatgptDesktop?: { unblockSend?: boolean; pacFallback?: boolean; port?: number };
+  chatgptDesktop?: { unblockSend?: boolean; pacFallback?: boolean; appServer?: boolean; port?: number };
   /**
    * Shared account-pool kernel, opt-in and off by default.
    *

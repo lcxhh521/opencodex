@@ -1,14 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startChatgptUnblockListener } from "../../src/chatgpt/desktop-unblock/listener";
+import { CHATGPT_UNBLOCK_IDENTITY_PATH, startChatgptUnblockListener } from "../../src/chatgpt/desktop-unblock/listener";
 import {
   chatgptAppServerBaseUrl,
   chatgptUnblockAppServerPort,
   chatgptUnblockEntryPort,
   chatgptUnblockPort,
+  startChatgptUnblock,
 } from "../../src/chatgpt/desktop-unblock/runtime";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -24,18 +25,33 @@ import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
  */
 
 function config(overrides: Partial<NonNullable<OcxConfig["chatgptDesktop"]>> = {}, extra: Partial<OcxConfig> = {}): OcxConfig {
-  return { chatgptDesktop: { unblockSend: true, ...overrides }, ...extra } as OcxConfig;
+  return { chatgptDesktop: { unblockSend: true, appServer: true, ...overrides }, ...extra } as OcxConfig;
 }
 
 describe("app-server listener port and URL", () => {
   test("the URL is two ports after the origin and carries the backend-api prefix", () => {
     expect(chatgptUnblockAppServerPort(config(), 10100)).toBe(10302);
-    expect(chatgptAppServerBaseUrl(config(), 10100)).toBe("http://127.0.0.1:10302/backend-api");
+    expect(chatgptAppServerBaseUrl(config(), 10100)).toBe("https://127.0.0.1:10302/backend-api");
+  });
+
+  test("the route is opt-in: unblockSend alone injects nothing", () => {
+    // The app-server validates chatgpt_base_url during login; the route stays off until it has
+    // been proven against a real sign-in.
+    expect(chatgptAppServerBaseUrl({ chatgptDesktop: { unblockSend: true } } as OcxConfig, 10100)).toBeNull();
+    expect(chatgptAppServerBaseUrl({ chatgptDesktop: { unblockSend: true, appServer: false } } as OcxConfig, 10100)).toBeNull();
+    expect(chatgptAppServerBaseUrl({ chatgptDesktop: { appServer: true } } as OcxConfig, 10100)).toBeNull();
+  });
+
+  test("the URL is an HTTPS origin without credentials, as the app-server requires at login", () => {
+    const url = new URL(chatgptAppServerBaseUrl(config(), 10100)!);
+    expect(url.protocol).toBe("https:");
+    expect(url.username + url.password).toBe("");
+    expect(url.pathname).toBe("/backend-api");
   });
 
   test("no URL when the feature is off or this install is a client", () => {
     expect(chatgptAppServerBaseUrl({} as OcxConfig, 10100)).toBeNull();
-    expect(chatgptAppServerBaseUrl({ chatgptDesktop: { unblockSend: false } } as OcxConfig, 10100)).toBeNull();
+    expect(chatgptAppServerBaseUrl({ chatgptDesktop: { unblockSend: false, appServer: true } } as OcxConfig, 10100)).toBeNull();
     expect(chatgptAppServerBaseUrl(config({}, { runtimeRole: "client" }), 10100)).toBeNull();
   });
 
@@ -53,7 +69,36 @@ describe("app-server listener port and URL", () => {
   });
 });
 
-describe("plain-HTTP app-server listener", () => {
+describe("app-server listener lifecycle", () => {
+  test("with appServer on it serves HTTPS under a certificate the local CA vouches for", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ocx-app-server-tls-"));
+    const handle = await startChatgptUnblock({ config: config(), publicPort: 31100, configDir: dir });
+    try {
+      expect(handle!.appServerPort).toBe(31302);
+      const ca = readFileSync(handle!.caCertPath, "utf8");
+      const res = await fetch(`https://127.0.0.1:${handle!.appServerPort}${CHATGPT_UNBLOCK_IDENTITY_PATH}`, { tls: { ca } } as RequestInit);
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { service: string }).service).toBe("opencodex-chatgpt-unblock");
+    } finally {
+      await handle!.stop();
+      removeTreeWithRetry(dir);
+    }
+  });
+
+  test("with appServer off no app-server listener is bound", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ocx-app-server-off-"));
+    const handle = await startChatgptUnblock({ config: config({ appServer: false }), publicPort: 31200, configDir: dir });
+    try {
+      expect(handle!.appServerPort).toBe(0);
+      await expect(fetch("https://127.0.0.1:31402/", { tls: { rejectUnauthorized: false } } as RequestInit)).rejects.toThrow();
+    } finally {
+      await handle!.stop();
+      removeTreeWithRetry(dir);
+    }
+  });
+});
+
+describe("plain-HTTP listener capability", () => {
   const stops: Array<() => Promise<unknown>> = [];
   afterEach(async () => {
     while (stops.length) await stops.pop()!();
@@ -97,7 +142,7 @@ const INJECT_CYCLE = [
   '  const read = () => fs.readFileSync(cfgPath, "utf8");',
   "  const journalUrl = () => fs.existsSync(journalPath) ? JSON.parse(fs.readFileSync(journalPath, \"utf8\")).injectedChatgptBaseUrl ?? null : null;",
   '  const base = { port: 10100, providers: {}, defaultProvider: "openai", injectionModel: "gpt-5.6-sol", injectionEffort: "high" };',
-  "  const on = { chatgptDesktop: { unblockSend: true } };",
+  "  const on = { chatgptDesktop: { unblockSend: true, appServer: true } };",
   "  await injectCodexConfig(10100, { ...base, ...on }, { catalogPath: null });",
   "  const injected = read(); const injectedJournal = journalUrl();",
   "  await injectCodexConfig(10100, { ...base, ...on }, { catalogPath: null });",
@@ -118,7 +163,7 @@ const INJECT_OVER_USER_KEY = [
   "(async () => {",
   '  const cfgPath = path.join(process.env.CODEX_HOME, "config.toml");',
   '  const journalPath = path.join(process.env.CODEX_HOME, "opencodex-journal.json");',
-  '  const base = { port: 10100, providers: {}, defaultProvider: "openai", injectionModel: "gpt-5.6-sol", injectionEffort: "high", chatgptDesktop: { unblockSend: true } };',
+  '  const base = { port: 10100, providers: {}, defaultProvider: "openai", injectionModel: "gpt-5.6-sol", injectionEffort: "high", chatgptDesktop: { unblockSend: true, appServer: true } };',
   "  await injectCodexConfig(10100, base, { catalogPath: null });",
   '  const injected = fs.readFileSync(cfgPath, "utf8");',
   '  const journalUrl = JSON.parse(fs.readFileSync(journalPath, "utf8")).injectedChatgptBaseUrl ?? null;',
@@ -134,10 +179,10 @@ const INJECT_PROVIDER_TABLE = [
   'const { injectCodexConfig, removeCodexConfig } = require("./src/codex/inject");',
   "(async () => {",
   '  const cfgPath = path.join(process.env.CODEX_HOME, "config.toml");',
-  '  const base = { port: 10100, providers: {}, defaultProvider: "openai", injectionModel: "gpt-5.6-sol", injectionEffort: "high", codexClientCompaction: true, chatgptDesktop: { unblockSend: true } };',
+  '  const base = { port: 10100, providers: {}, defaultProvider: "openai", injectionModel: "gpt-5.6-sol", injectionEffort: "high", codexClientCompaction: true, chatgptDesktop: { unblockSend: true, appServer: true } };',
   "  await injectCodexConfig(10100, base, { catalogPath: null });",
   '  const injected = fs.readFileSync(cfgPath, "utf8");',
-  "  await injectCodexConfig(10100, { ...base, chatgptDesktop: { unblockSend: false } }, { catalogPath: null });",
+  "  await injectCodexConfig(10100, { ...base, chatgptDesktop: { unblockSend: false, appServer: true } }, { catalogPath: null });",
   '  const switchedOff = fs.readFileSync(cfgPath, "utf8");',
   "  console.log(JSON.stringify({ injected, switchedOff }));",
   "})();",
@@ -150,7 +195,7 @@ const INJECT_STRIP_MARKERS_THEN_OFF = [
   "(async () => {",
   '  const cfgPath = path.join(process.env.CODEX_HOME, "config.toml");',
   '  const base = { port: 10100, providers: {}, defaultProvider: "openai", injectionModel: "gpt-5.6-sol", injectionEffort: "high" };',
-  "  await injectCodexConfig(10100, { ...base, chatgptDesktop: { unblockSend: true } }, { catalogPath: null });",
+  "  await injectCodexConfig(10100, { ...base, chatgptDesktop: { unblockSend: true, appServer: true } }, { catalogPath: null });",
   "  // What a Codex app reserialize does: keep the values, drop the ownership comments.",
   '  const NL = String.fromCharCode(10);',
   '  fs.writeFileSync(cfgPath, fs.readFileSync(cfgPath, "utf8").split(NL).filter(l => !l.trim().startsWith("#")).join(NL));',
@@ -172,7 +217,7 @@ function runChild(codexHome: string, script: string): { stdout: string; stderr: 
   return { stdout: result.stdout?.trim() ?? "", stderr: result.stderr?.trim() ?? "", status: result.status ?? 1 };
 }
 
-const RELAY_URL = 'chatgpt_base_url = "http://127.0.0.1:10302/backend-api"';
+const RELAY_URL = 'chatgpt_base_url = "https://127.0.0.1:10302/backend-api"';
 
 describe("chatgpt_base_url injection", () => {
   test("is written while the switch is on, dropped when it goes off, and restored away", () => {
@@ -185,7 +230,7 @@ describe("chatgpt_base_url injection", () => {
       const out = JSON.parse(r.stdout) as Record<string, string | null>;
 
       expect(out.injected).toContain(RELAY_URL);
-      expect(out.injectedJournal).toBe("http://127.0.0.1:10302/backend-api");
+      expect(out.injectedJournal).toBe("https://127.0.0.1:10302/backend-api");
       // Idempotent: a second pass neither duplicates the line nor accumulates markers.
       expect(out.again!.split(RELAY_URL).length - 1).toBe(1);
       // The routing override the feature is additive to is untouched.
@@ -254,6 +299,24 @@ describe("chatgpt_base_url injection", () => {
       expect(out.withoutMarkers).not.toContain("opencodex");
       // Without the journaled value the bare key would read as user-owned and outlive the switch.
       expect(out.switchedOff).not.toContain("chatgpt_base_url");
+    } finally {
+      removeTreeWithRetry(home);
+    }
+  }, 2 * SPAWN_BUDGET_MS);
+
+  test("unblockSend without appServer injects no chatgpt_base_url", () => {
+    const home = mkdtempSync(join(tmpdir(), "ocx-chatgpt-base-url-optin-"));
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
+    const script = INJECT_PROVIDER_TABLE
+      .replace("codexClientCompaction: true, ", "")
+      .replace("chatgptDesktop: { unblockSend: true, appServer: true }", "chatgptDesktop: { unblockSend: true }");
+    try {
+      const r = runChild(home, script);
+      if (r.status !== 0) throw new Error(r.stderr || r.stdout);
+      const out = JSON.parse(r.stdout) as { injected: string };
+      expect(out.injected).not.toContain("chatgpt_base_url");
+      expect(out.injected).toContain("openai_base_url");
     } finally {
       removeTreeWithRetry(home);
     }

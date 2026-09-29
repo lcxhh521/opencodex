@@ -29,7 +29,7 @@ export const CHATGPT_UNBLOCK_PORT_OFFSET = 200;
 /** The CONNECT entry listener sits right after the TLS origin listener. */
 export const CHATGPT_UNBLOCK_ENTRY_PORT_OFFSET = 1;
 
-/** The plain-HTTP listener for the bundled app-server sits two ports after the origin. */
+/** The HTTPS listener for the bundled app-server sits two ports after the origin. */
 export const CHATGPT_UNBLOCK_APP_SERVER_PORT_OFFSET = 2;
 
 export function chatgptUnblockEnabled(config: Pick<OcxConfig, "chatgptDesktop" | "runtimeRole">): boolean {
@@ -92,19 +92,27 @@ export function chatgptUnblockAppServerPort(config: Pick<OcxConfig, "chatgptDesk
     : origin - CHATGPT_UNBLOCK_APP_SERVER_PORT_OFFSET;
 }
 
+/** Whether the experimental app-server route (`chatgptDesktop.appServer`) is on. */
+export function chatgptAppServerRouteEnabled(config: Pick<OcxConfig, "chatgptDesktop" | "runtimeRole">): boolean {
+  return chatgptUnblockEnabled(config) && config.chatgptDesktop?.appServer === true;
+}
+
 /**
  * The `chatgpt_base_url` to inject so the bundled `codex app-server` sends its ChatGPT backend
  * reads (`wham/usage`, conversation init, ...) through the send-unblock relay. Those reads come
  * from the app-server's own HTTP client, which neither `--host-resolver-rules` nor a PAC file
- * reaches. Null when the feature is off or its port cannot be derived.
+ * reaches. The app-server validates this URL as a workspace backend during login and refuses
+ * anything but an HTTPS origin without credentials ("workspace backend must use an HTTPS origin
+ * without credentials"), so the listener speaks TLS with a loopback certificate from the shared
+ * local CA. Null when the route is off or its port cannot be derived.
  */
 export function chatgptAppServerBaseUrl(
   config: Pick<OcxConfig, "chatgptDesktop" | "runtimeRole">,
   publicPort: number,
 ): string | null {
-  if (!chatgptUnblockEnabled(config)) return null;
+  if (!chatgptAppServerRouteEnabled(config)) return null;
   try {
-    return `http://127.0.0.1:${chatgptUnblockAppServerPort(config, publicPort)}/backend-api`;
+    return `https://127.0.0.1:${chatgptUnblockAppServerPort(config, publicPort)}/backend-api`;
   } catch {
     return null;
   }
@@ -143,7 +151,7 @@ export function chatgptUnblockPacArg(configDir: string): string {
 
 export interface ChatgptUnblockState {
   port: number;
-  /** The plain-HTTP listener `chatgpt_base_url` points the bundled app-server at. */
+  /** The HTTPS listener `chatgpt_base_url` points the bundled app-server at; 0 when the route is off. */
   appServerPort: number;
   caCertPath: string;
   /** Set in PAC-fallback mode: the CONNECT entry listener the PAC points chatgpt.com at. */
@@ -182,12 +190,17 @@ export async function startChatgptUnblock<T = undefined>(options: StartChatgptUn
   // The port must be the configured one, not ephemeral: the launcher's launch arguments name it.
   const port = chatgptUnblockPort(options.config, options.publicPort);
   const listener = startChatgptUnblockListener({ leaf, port });
-  let appServerListener: Server<WsRelaySocketData>;
-  try {
-    appServerListener = startChatgptUnblockListener({ port: chatgptUnblockAppServerPort(options.config, options.publicPort) });
-  } catch (error) {
-    await listener.stop(true);
-    throw error;
+  let appServerListener: Server<WsRelaySocketData> | undefined;
+  if (chatgptAppServerRouteEnabled(options.config)) {
+    try {
+      appServerListener = startChatgptUnblockListener({
+        leaf: issueLocalInterceptLeaf(ca, ["localhost", "127.0.0.1"]),
+        port: chatgptUnblockAppServerPort(options.config, options.publicPort),
+      });
+    } catch (error) {
+      await listener.stop(true);
+      throw error;
+    }
   }
   let entryProxy: EntryProxyHandle | undefined;
   let pacRoute: ChatgptUnblockPacRoute | undefined;
@@ -205,21 +218,21 @@ export async function startChatgptUnblock<T = undefined>(options: StartChatgptUn
       writeFileSync(chatgptUnblockPacPath(configDir), buildChatgptUnblockPac(entryProxy.port, chain, systemPac), { mode: 0o644 });
     } catch (error) {
       await entryProxy?.stop();
-      await appServerListener.stop(true);
+      await appServerListener?.stop(true);
       await listener.stop(true);
       throw error;
     }
   }
   return {
     port,
-    appServerPort: appServerListener.port ?? chatgptUnblockAppServerPort(options.config, options.publicPort),
+    appServerPort: appServerListener?.port ?? 0,
     caCertPath: claudeInterceptCaCertPath(configDir),
     ...(entryProxy ? { entryProxy } : {}),
     ...(pacRoute ? { pacRoute } : {}),
     listener,
     stop: async () => {
       await entryProxy?.stop();
-      await appServerListener.stop(true);
+      await appServerListener?.stop(true);
       await listener.stop(true);
     },
   };
