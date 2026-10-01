@@ -111,10 +111,12 @@ the way the system routes it:
 | VPN in system-proxy mode | The system proxy, then direct. |
 | PAC file | The system PAC, embedded in the generated file. |
 
-When opencodex stops, the app keeps working on that route without a restart; only the send
-unblock pauses until opencodex is back. The route is captured when opencodex starts: after
-changing the VPN mode, restart opencodex and run `ocx chatgpt launch`. If a system PAC is set but
-cannot be read at that moment, other hosts go direct and opencodex prints a warning.
+When opencodex stops, the app keeps working on that route without a restart; only the send unblock
+pauses until opencodex is back. The route is captured when opencodex starts: after changing the
+VPN mode, restart opencodex and run `ocx chatgpt launch`. If a system PAC is set but cannot be
+read at that moment, or is too large to pass to the app (the PAC travels inside one launch
+argument, limited to 512 KiB once encoded), other hosts follow the system proxy, if there is one,
+then go direct, and opencodex prints a warning.
 
 After turning `pacFallback` on or off, restart opencodex, run `ocx chatgpt launch`, and run
 `ocx chatgpt install-watcher` again if you use the watcher.

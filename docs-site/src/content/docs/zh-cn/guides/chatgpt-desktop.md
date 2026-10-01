@@ -21,6 +21,14 @@ app 自己的凭据转发到真正的 `chatgpt.com`，WebSocket（例如语音�
 其他原因的发送锁（例如需要订阅）会保留，并在 `ocx chatgpt status` 中列出。显示的用量
 （百分比、重置时间、横幅）不会被修改，OpenAI 服务器仍会对其自身的请求执行所有限制。
 
+在某些版本上，发送按钮跟随的是 app 内置 Codex 服务器报告的账户状态，而这个服务器用自己的 HTTP 客户端
+获取这些信息，解析规则和 PAC 文件都管不到它。遇到这种情况，把 `chatgptDesktop.appServerShim` 设为
+`true`（与 `unblockSend` 一起），并用 `ocx chatgpt launch` 启动 app：app 会通过一个小的 stdio 中间层
+启动它的 Codex 服务器，中间层只放开额度回复里属于订阅用量额度的那部分。中间层不碰别的东西：不修改任
+何环境变量、地址或配置项，不影响服务器自己的子进程，也不依赖 opencodex 是否在运行。中间层启动不了时，
+启动脚本会直接运行原来的程序。不是普通额度锁的情况（工作区或点数额度、消费上限）都按服务器发来的原
+样传递。
+
 ## 设置
 
 1. 在 `~/.opencodex/config.json` 中开启该功能，然后重启 opencodex：
@@ -91,7 +99,8 @@ opencodex 通过自己的 `proxy` 设置访问真正的 `chatgpt.com`，与它�
 
 opencodex 停止后，app 无需重启就会沿这条路由继续工作；只有发送解锁会暂停，直到 opencodex 恢复。路由在
 opencodex 启动时读取：切换 VPN 模式后，请重启 opencodex 并运行 `ocx chatgpt launch`。如果当时设置了系统
-PAC 却读取不到，其他主机会直连，opencodex 会打印警告。
+PAC 却读取不到，或者大到无法传给 app（PAC 是放在一个启动参数里传过去的，编码后限制在 512 KiB 以内），其
+他主机会先走系统代理（如果有），再直连，opencodex 会打印警告。
 
 开启或关闭 `pacFallback` 后，请重启 opencodex、运行 `ocx chatgpt launch`；如果在用 watcher，还要重新运行
 `ocx chatgpt install-watcher`。
@@ -122,5 +131,8 @@ ocx chatgpt restore
   会显示信任状态。
 - **发送按钮仍是灰色：** 查看 `ocx chatgpt status`。app 可能没有带着路径运行（运行
   `ocx chatgpt launch`），或者锁的原因不是用量额度，会列在 “send blocks kept” 下。
+- **路径正常但发送按钮仍是灰色：** 锁可能来自内置的 Codex 服务器，而不是路径覆盖的页面。开启
+  `chatgptDesktop.appServerShim`，运行 `ocx chatgpt launch`，再查看 `ocx chatgpt status`
+  （“app-server shim” 这一行会显示当前 app 是否是通过它启动的）。
 - **opencodex 停止后 app 什么都加载不出来：** 默认模式下，已接管的 app 依赖监听器。重新启动 opencodex，
   或运行 `ocx chatgpt restore`；开启 PAC 回退后，app 会自行回退。

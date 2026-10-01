@@ -21,6 +21,14 @@ app 自己的憑證轉發到真正的 `chatgpt.com`，WebSocket（例如語音�
 其他原因的傳送鎖（例如需要訂閱）會保留，並在 `ocx chatgpt status` 中列出。顯示的用量
 （百分比、重置時間、橫幅）不會被修改，OpenAI 伺服器仍會對其自身的請求執行所有限制。
 
+在某些版本上，傳送按鈕跟隨的是 app 內建 Codex 伺服器回報的帳戶狀態，而這個伺服器用自己的 HTTP 用戶端
+取得這些資訊，解析規則和 PAC 檔案都管不到它。遇到這種情況，把 `chatgptDesktop.appServerShim` 設為
+`true`（與 `unblockSend` 一起），並用 `ocx chatgpt launch` 啟動 app：app 會透過一個小的 stdio 中介層
+啟動它的 Codex 伺服器，中介層只放開額度回覆裡屬於訂閱用量額度的那部分。中介層不碰別的東西：不修改任
+何環境變數、位址或設定項，不影響伺服器自己的子程序，也不依賴 opencodex 是否在執行。中介層啟動不了時，
+啟動腳本會直接執行原本的程式。不是一般額度鎖的情況（工作區或點數額度、消費上限）都按伺服器傳來的原
+樣傳遞。
+
 ## 設定
 
 1. 在 `~/.opencodex/config.json` 中開啟此功能，然後重新啟動 opencodex：
@@ -89,9 +97,10 @@ opencodex 透過自己的 `proxy` 設定連到真正的 `chatgpt.com`，與它�
 | VPN 系統代理模式 | 系統代理，然後直連。 |
 | PAC 檔案 | 系統 PAC（嵌入產生的檔案中）。 |
 
-opencodex 停止後，app 不需重新啟動就會沿這條路由繼續運作；只有傳送解鎖會暫停，直到 opencodex 恢復。路由
-在 opencodex 啟動時讀取：切換 VPN 模式後，請重新啟動 opencodex 並執行 `ocx chatgpt launch`。如果當時設定了
-系統 PAC 卻讀取不到，其他主機會直連，opencodex 會印出警告。
+opencodex 停止後，app 不需重新啟動就會沿這條路由繼續運作；只有傳送解鎖會暫停，直到 opencodex 恢復。路由在
+opencodex 啟動時讀取：切換 VPN 模式後，請重新啟動 opencodex 並執行 `ocx chatgpt launch`。如果當時設定了系
+統 PAC 卻讀取不到，或者大到無法傳給 app（PAC 是放在一個啟動參數裡傳過去的，編碼後限制在 512 KiB 以內），其
+他主機會先走系統代理（如果有），再直連，opencodex 會印出警告。
 
 開啟或關閉 `pacFallback` 後，請重新啟動 opencodex、執行 `ocx chatgpt launch`；如果在用 watcher，還要重新
 執行 `ocx chatgpt install-watcher`。
@@ -122,5 +131,8 @@ ocx chatgpt restore
   會顯示信任狀態。
 - **傳送按鈕仍是灰色：** 查看 `ocx chatgpt status`。app 可能沒有帶著路徑執行（執行
   `ocx chatgpt launch`），或者鎖的原因不是用量額度，會列在「send blocks kept」下。
+- **路徑正常但傳送按鈕仍是灰色：** 鎖可能來自內建的 Codex 伺服器，而不是路徑涵蓋的頁面。開啟
+  `chatgptDesktop.appServerShim`，執行 `ocx chatgpt launch`，再查看 `ocx chatgpt status`
+  （「app-server shim」這一行會顯示目前的 app 是否是透過它啟動的）。
 - **opencodex 停止後 app 什麼都載入不出來：** 預設模式下，已接管的 app 依賴監聽器。重新啟動 opencodex，
   或執行 `ocx chatgpt restore`；開啟 PAC 備援後，app 會自行切換回原本的路由。

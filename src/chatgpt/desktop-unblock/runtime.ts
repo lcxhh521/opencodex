@@ -10,6 +10,7 @@ import { CHATGPT_INTERCEPT_HOST, startChatgptUnblockListener } from "./listener"
 import { startChatgptUnblockEntryProxy } from "./entry-proxy";
 import type { EntryProxyHandle } from "./entry-proxy";
 import { CHATGPT_UNBLOCK_PAC_FILENAME, buildChatgptUnblockPac, loadSystemPac, systemProxyChain } from "./pac";
+import type { SystemProxyChain } from "./pac";
 import type { WsRelaySocketData } from "./ws-relay";
 import { join } from "node:path";
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
@@ -135,9 +136,10 @@ function shellQuote(value: string): string {
  * The launcher the desktop app runs in place of the bundled `codex`. It `exec`s the real binary,
  * so the app-server keeps the pid, parent and code-signing identity the app expects (the app
  * rejects its app-tools pipe for any other peer), and only redirects the server's stdout into the
- * filter. It fails open: when the filter's runtime or source is gone it executes the real binary
- * with its stdout untouched, so a removed or moved opencodex can never leave the app without an
- * app-server.
+ * filter. It fails open: the filter is first run once on empty input, and when that fails (its
+ * runtime or source is gone, or the source no longer loads) the launcher executes the real binary
+ * with its stdout untouched. A removed, moved or broken opencodex can never leave the app talking
+ * to a dead pipe.
  */
 export function buildChatgptShimLauncher(bun: string, shimEntry: string, real: string = CHATGPT_APP_CODEX_BINARY): string {
   return `#!/bin/bash
@@ -145,7 +147,7 @@ export function buildChatgptShimLauncher(bun: string, shimEntry: string, real: s
 REAL=${shellQuote(real)}
 BUN=${shellQuote(bun)}
 SHIM=${shellQuote(shimEntry)}
-if [ -x "$BUN" ] && [ -f "$SHIM" ]; then
+if [ -x "$BUN" ] && [ -f "$SHIM" ] && "$BUN" "$SHIM" </dev/null >/dev/null 2>&1; then
   exec "$REAL" "$@" > >(exec "$BUN" "$SHIM")
 fi
 exec "$REAL" "$@"
@@ -176,9 +178,37 @@ export interface ChatgptUnblockHandle<T = undefined> extends ChatgptUnblockState
 
 /**
  * `system-proxy`: the scutil proxies (or DIRECT in TUN mode); `system-pac`: the system PAC,
- * embedded; `system-pac-unreadable`: a system PAC is set but could not be read, so DIRECT.
+ * embedded; `system-pac-unreadable`: a system PAC is set but could not be read, so the scutil
+ * proxies then DIRECT; `system-pac-too-large`: the same fallback, because embedding the system
+ * PAC would make the launch switch too long to pass to the app.
  */
-export type ChatgptUnblockPacRoute = "system-proxy" | "system-pac" | "system-pac-unreadable";
+export type ChatgptUnblockPacRoute = "system-proxy" | "system-pac" | "system-pac-unreadable" | "system-pac-too-large";
+
+/**
+ * The longest PAC switch handed to the app. The switch carries the script inline as base64, and
+ * macOS limits one exec's arguments plus environment to 1 MiB (`ARG_MAX`): past that `open`
+ * fails with E2BIG after the watcher has already quit the app. Half the limit leaves room for the
+ * environment and the other switches.
+ */
+export const CHATGPT_UNBLOCK_PAC_SWITCH_MAX_BYTES = 512 * 1024;
+
+/**
+ * The PAC script to write and the route it encodes. A system PAC is embedded only while the
+ * resulting switch fits {@link CHATGPT_UNBLOCK_PAC_SWITCH_MAX_BYTES}.
+ */
+export function chooseChatgptUnblockPac(
+  entryPort: number,
+  chain: SystemProxyChain,
+  systemPac: string | null,
+  maxSwitchBytes: number = CHATGPT_UNBLOCK_PAC_SWITCH_MAX_BYTES,
+): { text: string; route: ChatgptUnblockPacRoute } {
+  if (systemPac) {
+    const text = buildChatgptUnblockPac(entryPort, chain, systemPac);
+    if (chatgptUnblockPacArgFor(text).length <= maxSwitchBytes) return { text, route: "system-pac" };
+    return { text: buildChatgptUnblockPac(entryPort, chain, null), route: "system-pac-too-large" };
+  }
+  return { text: buildChatgptUnblockPac(entryPort, chain, null), route: chain.autoConfig ? "system-pac-unreadable" : "system-proxy" };
+}
 
 export interface StartChatgptUnblockOptions {
   config: OcxConfig;
@@ -211,8 +241,9 @@ export async function startChatgptUnblock<T = undefined>(options: StartChatgptUn
       // network change would point the app at a dead chain.
       const chain = systemProxyChain();
       const systemPac = chain.autoConfigUrl ? await loadSystemPac(chain.autoConfigUrl) : null;
-      pacRoute = systemPac ? "system-pac" : chain.autoConfig ? "system-pac-unreadable" : "system-proxy";
-      writeFileSync(chatgptUnblockPacPath(configDir), buildChatgptUnblockPac(entryProxy.port, chain, systemPac), { mode: 0o644 });
+      const pac = chooseChatgptUnblockPac(entryProxy.port, chain, systemPac);
+      pacRoute = pac.route;
+      writeFileSync(chatgptUnblockPacPath(configDir), pac.text, { mode: 0o644 });
     } catch (error) {
       await entryProxy?.stop();
       await listener.stop(true);

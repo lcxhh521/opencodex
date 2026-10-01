@@ -140,16 +140,6 @@ export function stripSendBlocks(value: unknown, preserved: PreservedSendBlock[] 
 }
 
 /**
- * Flip the desktop usage snapshot's send gate in place: `rate_limit.allowed` false -> true and
- * `rate_limit.limit_reached` true -> false and a plain-quota `rate_limit_reached_type` dropped,
- * at any depth (top-level for the snapshot endpoint,
- * under `usage` for stream events). Callers apply this to the usage endpoints only. Window
- * percentages, reset timestamps, the upsell banner and every other display field are left
- * exactly as the backend sent them.
- *
- * Returns whether anything changed.
- */
-/**
  * Whether a workspace, credit or spend-control reason stands anywhere in a payload. It is
  * collected before anything is rewritten, so a reason in one branch keeps the gate closed in
  * every other branch of the same response.
@@ -167,6 +157,16 @@ function hasNonQuotaBlock(node: unknown): boolean {
   return Object.values(node).some(hasNonQuotaBlock);
 }
 
+/**
+ * Flip the desktop usage snapshot's send gate in place: `rate_limit.allowed` false -> true and
+ * `rate_limit.limit_reached` true -> false and a plain-quota `rate_limit_reached_type` dropped,
+ * at any depth (top-level for the snapshot endpoint,
+ * under `usage` for stream events). Callers apply this to the usage endpoints only. Window
+ * percentages, reset timestamps, the upsell banner and every other display field are left
+ * exactly as the backend sent them.
+ *
+ * Returns whether anything changed.
+ */
 export function unlockRateLimitGate(value: unknown): boolean {
   let changed = false;
   const payloadBlocked = hasNonQuotaBlock(value);

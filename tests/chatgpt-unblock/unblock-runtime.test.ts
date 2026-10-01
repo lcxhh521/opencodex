@@ -9,6 +9,9 @@ import {
   chatgptUnblockPacArg,
   chatgptUnblockPacPath,
   chatgptUnblockPort,
+  CHATGPT_UNBLOCK_PAC_SWITCH_MAX_BYTES,
+  chatgptUnblockPacArgFor,
+  chooseChatgptUnblockPac,
   chatgptUnblockShimPath,
   startChatgptUnblock,
 } from "../../src/chatgpt/desktop-unblock/runtime";
@@ -87,6 +90,41 @@ function accepts(port: number): Promise<boolean> {
     }).catch(() => resolve(false));
   });
 }
+
+describe("chatgpt unblock PAC choice", () => {
+  const chain = { entries: ["PROXY 127.0.0.1:7892"], autoConfig: true, autoConfigUrl: "http://127.0.0.1:7892/proxy.pac" };
+  const systemPac = 'function FindProxyForURL(url, host) { return "PROXY 127.0.0.1:7892"; }';
+
+  test("a system PAC that fits the launch switch is embedded", () => {
+    const pac = chooseChatgptUnblockPac(10301, chain, systemPac);
+    expect(pac.route).toBe("system-pac");
+    expect(pac.text).toContain(systemPac);
+  });
+
+  test("a system PAC too large for the launch switch falls back to the proxy chain", () => {
+    // The switch is base64 inside one argv entry; past ARG_MAX `open` fails after the app quit.
+    const bigger = `${systemPac}\n// ${"x".repeat(3_000)}`;
+    const pac = chooseChatgptUnblockPac(10301, chain, bigger, 2_000);
+    expect(pac.route).toBe("system-pac-too-large");
+    expect(pac.text).not.toContain(bigger);
+    expect(pac.text).toContain("PROXY 127.0.0.1:7892");
+    expect(chatgptUnblockPacArgFor(pac.text).length).toBeLessThanOrEqual(2_000);
+  });
+
+  test("the default limit refuses a whitelist-sized PAC and keeps the switch well under ARG_MAX", () => {
+    const large = `function FindProxyForURL(url, host) { ${"if (dnsDomainIs(host, '.example.test')) return 'DIRECT';\n".repeat(12_000)} return "PROXY 127.0.0.1:7892"; }`;
+    expect(large.length).toBeGreaterThan(600 * 1024);
+    const pac = chooseChatgptUnblockPac(10301, chain, large);
+    expect(pac.route).toBe("system-pac-too-large");
+    expect(chatgptUnblockPacArgFor(pac.text).length).toBeLessThanOrEqual(CHATGPT_UNBLOCK_PAC_SWITCH_MAX_BYTES);
+    expect(CHATGPT_UNBLOCK_PAC_SWITCH_MAX_BYTES).toBeLessThan(1024 * 1024);
+  });
+
+  test("without a system PAC the route says whether one was configured", () => {
+    expect(chooseChatgptUnblockPac(10301, chain, null).route).toBe("system-pac-unreadable");
+    expect(chooseChatgptUnblockPac(10301, { ...chain, autoConfig: false, autoConfigUrl: null }, null).route).toBe("system-proxy");
+  });
+});
 
 describe("chatgpt unblock PAC-mode startup", () => {
   let dir: string;

@@ -46,7 +46,11 @@ The composer's send gate can come from two different clients, and each needs its
   `--proxy-pac-url=data:` switch (PAC mode). A `file://` PAC is ignored by the app and an `http://`
   one would need opencodex alive to be fetched, so the script travels inline. When opencodex stops,
   the refused CONNECT makes Chromium fall through to the captured system chain with no restart. The
-  launch watcher rebuilds the switch from the PAC file written at each start.
+  launch watcher rebuilds the switch from the PAC file written at each start. Because the switch is
+  one argv entry, `chooseChatgptUnblockPac` embeds a system PAC only while the encoded switch stays
+  within `CHATGPT_UNBLOCK_PAC_SWITCH_MAX_BYTES` (512 KiB, half of macOS `ARG_MAX`); a larger one
+  falls back to the scutil chain then DIRECT (`system-pac-too-large`, warned at start), since an
+  oversized switch would make `open` fail after the watcher has already quit the app.
 - **The bundled `codex app-server`** fetches the account rate limits with its own HTTP client, which
   no Chromium switch reaches, and reports them to the app over stdio JSON-RPC. The app picks the
   server binary from `CODEX_CLI_PATH`, so with `chatgptDesktop.appServerShim` the launch passes
@@ -60,7 +64,9 @@ The composer's send gate can come from two different clients, and each needs its
   messages, `account/rateLimits/read` and `account/rateLimits/updated`, as the ones that carry it.
   Stdin, stderr and signals go straight between the app and the server. The shim sets no environment
   variable, address or config key, so the server's children and other Codex clients are unaffected,
-  and it fails open to the real binary, so it never depends on opencodex running.
+  and it fails open to the real binary: the launcher first runs the filter on empty input and
+  `exec`s the binary with stdout untouched when that fails, so a missing or broken filter never
+  leaves the server writing into a dead pipe, and it never depends on opencodex running.
 
 The watcher decides whether an app is already launched correctly from its command line plus its
 environment (`ps eww`), so an app started without the shim is corrected once. It finds the app with
