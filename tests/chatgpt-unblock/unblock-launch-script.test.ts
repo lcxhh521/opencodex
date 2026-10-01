@@ -96,6 +96,7 @@ while IFS='|' read -r pid pname command; do
 done < "$STUB_DIR/processes"
 exit $found`);
   stub("ps", `pid="\${@: -1}"
+case "$*" in *etime=*) [ -n "$STUB_APP_ETIME" ] && { echo "$STUB_APP_ETIME"; exit 0; }; exit 1 ;; esac
 while IFS='|' read -r p name command; do
   [ "$p" = "$pid" ] && { echo "$command"; exit 0; }
 done < "$STUB_DIR/processes"
@@ -163,6 +164,8 @@ function run(mode: "watch" | "launch" | "native", options: {
   pac?: boolean;
   shim?: boolean;
   entryPort?: number;
+  /** What `ps -o etime=` reports for the app; unset makes the age unreadable. */
+  appEtime?: string;
   /** The app is an ancestor of the caller, as for `ocx` run in a terminal inside the app. */
   appIsAncestor?: boolean;
 }) {
@@ -193,6 +196,7 @@ function run(mode: "watch" | "launch" | "native", options: {
       STUB_LISTENER: options.listener ?? "ours",
       STUB_QUIT_IGNORED: options.quitIgnored ? "1" : "0",
       STUB_ENTRY: options.entry ?? (pacMode ? "up" : "n/a"),
+      STUB_APP_ETIME: options.appEtime ?? "",
       STUB_ANCESTORS: options.appIsAncestor ? "400" : "",
     },
   });
@@ -359,6 +363,37 @@ describe("chatgpt restore (native networking)", () => {
   });
 });
 
+describe("chatgpt launch watcher and the app's age", () => {
+  // The agent also wakes when opencodex's listener comes up, possibly hours into a session.
+  test("watch restarts an app that started within the last five minutes", () => {
+    const r = run("watch", { app: "plain", appEtime: "04:59" });
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.openArgs).toEqual([RESOLVER]);
+  });
+
+  test("watch leaves an app the user has been working in, whatever the elapsed-time format", () => {
+    for (const appEtime of ["05:01", "02:03:04", "1-02:03:04"]) {
+      const r = run("watch", { app: "plain", appEtime });
+      expect(r.status).toBe(0);
+      expect(r.calls).toEqual([]);
+      expect(r.log).toContain("without the launch switches; leaving it");
+    }
+  });
+
+  test("a missing age counts as a fresh launch", () => {
+    expect(run("watch", { app: "plain" }).calls).toEqual(["quit", "open"]);
+  });
+
+  test("an unparseable age counts as a fresh launch", () => {
+    expect(run("watch", { app: "plain", appEtime: "garbage" }).calls).toEqual(["quit", "open"]);
+  });
+
+  test("the explicit launch command restarts an old app too", () => {
+    const r = run("launch", { app: "plain", appEtime: "1-00:00:00" });
+    expect(r.calls).toEqual(["quit", "open"]);
+  });
+});
+
 describe("chatgpt launch run from a terminal inside the app", () => {
   // pgrep leaves out its own ancestors unless asked; the app must still be found.
   test("launch sees the app that is its own ancestor and leaves a correctly launched one alone", () => {
@@ -398,6 +433,11 @@ describe("chatgpt launch helpers", () => {
   test("the launchd agent runs the script in watch mode", () => {
     const plist = buildChatgptUnblockWatcherPlist("/x/launch.sh", "/x/SingletonLock", "/x/err");
     expect(plist).toContain("<string>/x/launch.sh</string>\n    <string>watch</string>");
+  });
+
+  test("the agent wakes on every watched path", () => {
+    const plist = buildChatgptUnblockWatcherPlist("/x/launch.sh", ["/x/SingletonLock", "/x/chatgpt-unblock.ready"], "/x/err");
+    expect(plist).toContain("<key>WatchPaths</key>\n  <array>\n    <string>/x/SingletonLock</string>\n    <string>/x/chatgpt-unblock.ready</string>\n  </array>");
   });
 
   test("plist paths are XML-escaped", () => {

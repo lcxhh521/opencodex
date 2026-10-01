@@ -9,6 +9,7 @@ import {
   chatgptUnblockPacArg,
   chatgptUnblockPacPath,
   chatgptUnblockPort,
+  chatgptUnblockReadyPath,
   chatgptUnblockShimPath,
   startChatgptUnblock,
 } from "../../src/chatgpt/desktop-unblock/runtime";
@@ -99,6 +100,13 @@ describe("chatgpt unblock PAC-mode startup", () => {
     expect(handle!.entryProxy).toBeUndefined();
     expect(handle!.pacRoute).toBeUndefined();
     expect(existsSync(chatgptUnblockPacPath(dir))).toBe(false);
+    await handle!.stop();
+  });
+
+  test("a started intercept writes the readiness marker the launch watcher wakes on", async () => {
+    const origin = freePortPair();
+    const handle = await startChatgptUnblock({ config: config({ port: origin }), publicPort: 0, configDir: dir });
+    expect(readFileSync(chatgptUnblockReadyPath(dir), "utf8")).toStartWith(`${origin} `);
     await handle!.stop();
   });
 

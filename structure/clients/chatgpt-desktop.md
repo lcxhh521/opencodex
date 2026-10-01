@@ -66,6 +66,10 @@ The watcher decides whether an app is already launched correctly from its comman
 environment (`ps eww`), so an app started without the shim is corrected once. It finds the app with
 `pgrep -a -x ChatGPT`: without `-a`, pgrep skips its own ancestors, and `ocx chatgpt` run from a
 terminal inside the app has the app as one. `install-watcher` runs `bash -n` on the generated script
-and refuses to load one that does not parse, and `restore` hands back an app carrying either switch.
-`ocx chatgpt launch|restore|status|install-watcher`
+and refuses to load one that does not parse, and `restore` hands back
+an app carrying either switch. Its launchd agent wakes on the app's `SingletonLock` and on
+`chatgpt-unblock.ready`, which `startChatgptUnblock` rewrites once the listener is up, so an app
+that opened before opencodex (both at login) is still routed. In watch mode it only restarts an
+app that started within the last five minutes (`ps -o etime=`), so an opencodex restart never quits
+an app in use; `ocx chatgpt launch` always acts. `ocx chatgpt launch|restore|status|install-watcher`
 (`src/cli/chatgpt-command.ts`) follow the configured modes.

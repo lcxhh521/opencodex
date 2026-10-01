@@ -53,9 +53,10 @@ app 自己的凭据转发到真正的 `chatgpt.com`，WebSocket（例如语音�
    ocx chatgpt install-watcher
    ```
 
-   watcher 在 app 每次启动时运行。如果 opencodex 正在运行而 app 是以普通方式打开的，它会在
-   启动后立即退出 app 并带上路径重新打开。它不会对正在使用中的 app 做任何操作，opencodex
-   未运行时也什么都不做。该命令会请求确认；`--yes` 可以非交互式确认。
+   watcher 在 app 每次启动时运行，opencodex 启动时也会运行一次。如果 app 是以普通方式打开的，它会在
+   启动后立即退出 app 并带上路径重新打开。登录时如果 app 比 opencodex 先打开，它会在 opencodex 运行
+   起来后立即这样做。它只处理最近五分钟内启动的 app，不会对正在使用中的 app 做任何操作，opencodex 未
+   运行时也什么都不做。该命令会请求确认；`--yes` 可以非交互式确认。
 
 ## 网络环境
 

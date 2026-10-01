@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { getConfigDir } from "../../config/paths";
 import { CHATGPT_INTERCEPT_HOST, CHATGPT_UNBLOCK_IDENTITY_PATH, CHATGPT_UNBLOCK_SERVICE_ID } from "./listener";
 import type { PreservedSendBlock } from "./rewrite";
-import { CHATGPT_UNBLOCK_PAC_ARG_PREFIX, chatgptUnblockShimPath, chatgptUnblockPacArg, chatgptUnblockPacPath, chatgptUnblockResolverArg } from "./runtime";
+import { CHATGPT_UNBLOCK_PAC_ARG_PREFIX, chatgptUnblockReadyPath, chatgptUnblockShimPath, chatgptUnblockPacArg, chatgptUnblockPacPath, chatgptUnblockResolverArg } from "./runtime";
 
 /**
  * Launch integration for the ChatGPT desktop send-unblock intercept.
@@ -16,9 +16,11 @@ import { CHATGPT_UNBLOCK_PAC_ARG_PREFIX, chatgptUnblockShimPath, chatgptUnblockP
  * Dock/Spotlight start reaches the real chatgpt.com and the composer locks again. This module
  * installs a launchd agent that watches the app's Electron `SingletonLock` -- written on every
  * launch -- and, exactly once per launch, restarts the app with the switches if it was
- * started without them. There is no resident polling process: launchd wakes the script on the
- * lock event and the script exits after one check. Because it fires on launch, it never quits
- * an app the user is already working in.
+ * started without them. It also watches a readiness marker opencodex writes once its listener is
+ * up, so an app that started before opencodex (both open at login) is corrected as soon as the
+ * listener answers. There is no resident polling process: launchd wakes the script on either
+ * event and the script exits after one check. In watch mode it only restarts an app that started
+ * within the last five minutes, so it never quits an app the user has been working in.
  *
  * The watcher only acts when the opencodex intercept listener answers its identity path, so
  * with the feature off -- or another process holding the port -- the app is left native.
@@ -49,6 +51,9 @@ import { CHATGPT_UNBLOCK_PAC_ARG_PREFIX, chatgptUnblockShimPath, chatgptUnblockP
 export const CHATGPT_APP_PATH = "/Applications/ChatGPT.app";
 /** The desktop app is `openai-codex-electron` internally: its Electron userData dir is `Codex`. */
 export const CHATGPT_SINGLETON_LOCK_PATH = "Library/Application Support/Codex/SingletonLock";
+
+/** How recently the app must have started for watch mode to restart it. */
+export const CHATGPT_WATCHER_FRESH_APP_SECONDS = 300;
 export const CHATGPT_UNBLOCK_WATCHER_LABEL = "com.opencodex.chatgpt-unblock-watcher";
 
 function expandHome(path: string): string {
@@ -70,6 +75,8 @@ export interface ChatgptUnblockWatcherPaths {
   plistPath: string;
   errPath: string;
   lockPath: string;
+  /** Written by opencodex once its listener is up; the agent wakes on it too. */
+  readyPath: string;
 }
 
 export function chatgptUnblockWatcherPaths(configDir?: string): ChatgptUnblockWatcherPaths {
@@ -79,6 +86,7 @@ export function chatgptUnblockWatcherPaths(configDir?: string): ChatgptUnblockWa
     plistPath: expandHome(`~/Library/LaunchAgents/${CHATGPT_UNBLOCK_WATCHER_LABEL}.plist`),
     errPath: join(dir, "chatgpt-unblock-watcher.err"),
     lockPath: expandHome(`~/${CHATGPT_SINGLETON_LOCK_PATH}`),
+    readyPath: chatgptUnblockReadyPath(dir),
   };
 }
 
@@ -102,9 +110,11 @@ export function buildChatgptUnblockWatcherScript(port: number, configDir?: strin
   const pacFile = chatgptUnblockPacPath(configDir ?? getConfigDir());
   return `#!/bin/bash
 # opencodex ChatGPT send-unblock launcher.
-#   watch  (launchd, fired by the app's Electron SingletonLock on every launch): if the app is
-#          running WITHOUT the launch switches (a normal Dock/Spotlight launch), restart it once
-#          with them. A correctly launched app, or an absent intercept, is left alone.
+#   watch  (launchd, fired by the app's Electron SingletonLock on every launch and by the
+#          readiness marker opencodex writes once its listener is up): if the app is running
+#          WITHOUT the launch switches (a normal Dock/Spotlight launch) and started within the
+#          last FRESH_APP_SECONDS, restart it once with them. A correctly launched app, an app
+#          the user has been working in, or an absent intercept, is left alone.
 #   launch (ocx chatgpt launch): same, and start the app if it is not running.
 #   native (ocx chatgpt restore): restart an app that carries the switches without them.
 
@@ -123,6 +133,7 @@ ENTRY_URL=${shellQuote(`http://127.0.0.1:${entryPort ?? 0}/`)}
 SERVICE_ID=${shellQuote(`"service":"${CHATGPT_UNBLOCK_SERVICE_ID}"`)}
 LOG=${shellQuote(chatgptUnblockWatcherLogPath(configDir))}
 LOCK_DIR="\${TMPDIR:-/tmp}/opencodex-chatgpt-launch.lock"
+FRESH_APP_SECONDS=${CHATGPT_WATCHER_FRESH_APP_SECONDS}
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 say() { [ "$MODE" != watch ] && echo "$*"; log "$*"; }
@@ -145,6 +156,18 @@ app_pid() {
   return 1
 }
 app_running() { app_pid >/dev/null; }
+# Seconds a process has been running, from ps's [[dd-]hh:]mm:ss elapsed time. Fails when it
+# cannot be read, which the caller treats as a fresh launch.
+app_age() {
+  local etime days=0 h=0 m s a b c
+  etime=$(ps -o etime= -p "$1" 2>/dev/null | tr -d ' ')
+  [ -n "$etime" ] || return 1
+  case "$etime" in *-*) days=\${etime%%-*}; etime=\${etime#*-} ;; esac
+  IFS=: read -r a b c <<< "$etime"
+  if [ -n "$c" ]; then h=$a; m=$b; s=$c; else m=$a; s=$b; fi
+  case "$days:$h:$m:$s" in *::*|:*|*:|*[!0-9:]*) return 1 ;; esac
+  echo $(( 10#$days * 86400 + 10#$h * 3600 + 10#$m * 60 + 10#$s ))
+}
 # The PAC travels inline as a data: URL (a file:// PAC is ignored by the app), so the switch is
 # rebuilt from the file opencodex regenerated at its last start. Fails when there is no file.
 pac_arg() {
@@ -264,6 +287,13 @@ if app_running; then
     say "ChatGPT is already running with the launch switches"
     exit 0
   fi
+  # The readiness marker fires this while the app may have been open for hours (opencodex
+  # restarted under it). Only an app that just started is restarted; the explicit launch command
+  # always acts.
+  if [ "$MODE" = watch ] && age=$(app_age "$(app_pid)") && [ "$age" -gt "$FRESH_APP_SECONDS" ]; then
+    log "ChatGPT has been running for \${age}s without the launch switches; leaving it (run 'ocx chatgpt launch' to restart it with them)"
+    exit 0
+  fi
   say "ChatGPT is running without the launch switches; restarting it"
   quit_app || { say "ChatGPT did not quit; leaving it running without the switches"; exit 1; }
 elif [ "$MODE" != launch ]; then
@@ -292,8 +322,9 @@ export function checkChatgptWatcherScriptSyntax(scriptPath: string): CommandResu
   return sh("/bin/bash", ["-n", scriptPath]);
 }
 
-/** One-shot launchd agent: wake on the app's SingletonLock event, run the script, exit. */
-export function buildChatgptUnblockWatcherPlist(scriptPath: string, watchPath: string, errPath: string): string {
+/** One-shot launchd agent: wake on the app's SingletonLock or the readiness marker, run the script, exit. */
+export function buildChatgptUnblockWatcherPlist(scriptPath: string, watchPaths: string | readonly string[], errPath: string): string {
+  const watched = (typeof watchPaths === "string" ? [watchPaths] : watchPaths).map(path => `    <string>${xmlEscape(path)}</string>`).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -308,7 +339,7 @@ export function buildChatgptUnblockWatcherPlist(scriptPath: string, watchPath: s
   </array>
   <key>WatchPaths</key>
   <array>
-    <string>${xmlEscape(watchPath)}</string>
+${watched}
   </array>
   <key>StandardErrorPath</key>
   <string>${xmlEscape(errPath)}</string>
@@ -399,7 +430,7 @@ export function installChatgptUnblockWatcher(options: InstallChatgptUnblockWatch
     rmSync(paths.scriptPath, { force: true });
     throw new Error(`the generated watcher script is not valid bash: ${syntax.output || `bash -n exited ${syntax.status}`}`);
   }
-  writeFileSync(paths.plistPath, buildChatgptUnblockWatcherPlist(paths.scriptPath, paths.lockPath, paths.errPath));
+  writeFileSync(paths.plistPath, buildChatgptUnblockWatcherPlist(paths.scriptPath, [paths.lockPath, paths.readyPath], paths.errPath));
   const loaded = launchctl(["bootstrap", watcherDomain(), paths.plistPath]);
   if (!loaded.ok) {
     rmSync(paths.plistPath, { force: true });

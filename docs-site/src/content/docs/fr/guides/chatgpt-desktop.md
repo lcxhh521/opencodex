@@ -62,9 +62,11 @@ requêtes.
    ocx chatgpt install-watcher
    ```
 
-   Le surveillant s'exécute à chaque démarrage de l'application. Si l'application a été ouverte
-   normalement pendant qu'opencodex tourne, il la quitte juste après son lancement et la rouvre avec
-   la route. Il n'agit jamais sur une application déjà en cours d'utilisation et ne fait rien quand
+   Le surveillant s'exécute à chaque démarrage de l'application, et à nouveau au démarrage
+   d'opencodex. Si l'application a été ouverte normalement, il la quitte juste après son lancement et
+   la rouvre avec la route. Si l'application s'ouvre à la connexion avant qu'opencodex ne soit prêt,
+   il le fait dès qu'opencodex tourne. Il n'agit que sur une application lancée dans les cinq
+   dernières minutes, jamais sur une application déjà en cours d'utilisation, et ne fait rien quand
    opencodex ne tourne pas. La commande demande une confirmation ; `--yes` confirme sans interaction.
 
 ## Configurations réseau

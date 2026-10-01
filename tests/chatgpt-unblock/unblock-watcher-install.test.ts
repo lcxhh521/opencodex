@@ -48,6 +48,10 @@ describe("chatgpt launch watcher install", () => {
     expect(fake.calls).toEqual(["bootout", "bootstrap"]);
     expect(existsSync(plistPath)).toBe(true);
     expect(existsSync(scriptPath)).toBe(true);
+    // Woken by the app's launch and by opencodex's readiness marker.
+    const plist = readFileSync(plistPath, "utf8");
+    expect(plist).toContain("Codex/SingletonLock</string>");
+    expect(plist).toContain(`<string>${join(dir, "chatgpt-unblock.ready")}</string>`);
   });
 
   test("a script that is not valid bash is refused before launchd ever loads it", () => {

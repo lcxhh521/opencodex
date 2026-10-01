@@ -122,6 +122,16 @@ export function chatgptUnblockPacArg(configDir: string): string {
 
 export const CHATGPT_UNBLOCK_SHIM_FILENAME = "chatgpt-codex-shim.sh";
 
+/**
+ * Rewritten once the listener is up. The launch watcher wakes on it as well as on the app's own
+ * launch, so an app that started before opencodex (both opened at login) is still routed.
+ */
+export const CHATGPT_UNBLOCK_READY_FILENAME = "chatgpt-unblock.ready";
+
+export function chatgptUnblockReadyPath(configDir: string): string {
+  return join(configDir, CHATGPT_UNBLOCK_READY_FILENAME);
+}
+
 /** The launcher script the app is pointed at through `CODEX_CLI_PATH`. */
 export function chatgptUnblockShimPath(configDir: string): string {
   return join(configDir, CHATGPT_UNBLOCK_SHIM_FILENAME);
@@ -227,6 +237,12 @@ export async function startChatgptUnblock<T = undefined>(options: StartChatgptUn
       await listener.stop(true);
       throw error;
     }
+  }
+  // Best effort: without the marker the watcher still acts on the app's next launch.
+  try {
+    writeFileSync(chatgptUnblockReadyPath(configDir), `${listener.port ?? port} ${new Date().toISOString()}\n`, { mode: 0o644 });
+  } catch {
+    // An unwritable config dir already fails earlier writes; nothing to add here.
   }
   return {
     port,

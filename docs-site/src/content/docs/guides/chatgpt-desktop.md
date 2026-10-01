@@ -69,9 +69,11 @@ lock (workspace or credit limits, spend controls) is passed through as the serve
    ocx chatgpt install-watcher
    ```
 
-   The watcher runs each time the app starts. If the app was opened normally while opencodex
-   is running, it quits the app right after launch and reopens it with the route. It never acts
-   on an app that is already in use, and does nothing while opencodex is not running. The
+   The watcher runs each time the app starts, and again when opencodex starts. If the app was
+   opened normally, it quits the app right after launch and reopens it with the route. When the
+   app opens at login before opencodex is up, it does this as soon as opencodex is running. It
+   only acts on an app that started in the last five minutes, never on one that is already in
+   use, and does nothing while opencodex is not running. The
    command asks for confirmation; `--yes` confirms non-interactively.
 
 ## Network setups
