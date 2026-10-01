@@ -27,6 +27,17 @@ Les verrous d'envoi ayant une autre raison, comme un abonnement requis, sont con
 n'est jamais modifiée, et les serveurs d'OpenAI appliquent toujours toutes les limites à leurs propres
 requêtes.
 
+Sur certaines versions, le bouton d'envoi suit ce que le serveur Codex intégré à l'application
+rapporte sur votre compte, et ce serveur l'obtient avec son propre client HTTP, que ni la règle de
+résolution ni un fichier PAC n'atteignent. Dans ce cas, mettez `chatgptDesktop.appServerShim` à
+`true` (avec `unblockSend`) et lancez l'application avec `ocx chatgpt launch` : l'application démarre
+alors son serveur Codex à travers un petit shim stdio qui n'ouvre que la partie quota d'abonnement de
+la réponse sur les limites. Le shim ne touche à rien d'autre : aucune variable d'environnement,
+adresse ou clé de configuration n'est modifiée, les processus enfants du serveur restent intacts, et
+il ne dépend pas d'opencodex en cours d'exécution. S'il ne peut pas démarrer, le lanceur exécute
+directement le vrai binaire. Tout ce qui n'est pas un simple verrou de quota (limites d'espace de
+travail ou de crédits, plafonds de dépenses) est transmis tel que le serveur l'a envoyé.
+
 ## Configuration
 
 1. Activez la fonctionnalité dans `~/.opencodex/config.json` puis redémarrez opencodex :
@@ -108,8 +119,10 @@ routage du système :
 Quand opencodex s'arrête, l'application continue de fonctionner par ce chemin, sans redémarrage ;
 seul le déblocage de l'envoi est suspendu jusqu'au retour d'opencodex. Le routage est capturé au
 démarrage d'opencodex : après un changement de mode du VPN, redémarrez opencodex et lancez
-`ocx chatgpt launch`. Si un PAC système est configuré mais illisible à ce moment, les autres hôtes
-passent en direct et opencodex affiche un avertissement.
+`ocx chatgpt launch`. Si un PAC système est configuré mais illisible à ce moment, ou trop
+volumineux pour être transmis à l'application (le PAC voyage dans un seul argument de lancement,
+limité à 512 Kio une fois encodé), les autres hôtes passent par le proxy système s'il y en a un,
+puis en direct, et opencodex affiche un avertissement.
 
 Après avoir activé ou désactivé `pacFallback`, redémarrez opencodex, lancez `ocx chatgpt launch`, et
 relancez `ocx chatgpt install-watcher` si vous utilisez le surveillant.
@@ -143,6 +156,10 @@ ni l'une ni l'autre.
 - **Le bouton d'envoi reste grisé :** consultez `ocx chatgpt status`. L'application tourne peut-être
   sans la route (lancez `ocx chatgpt launch`), ou le verrou a une raison autre que le quota
   d'utilisation, listée sous « send blocks kept ».
+- **Le bouton d'envoi reste grisé alors que la route fonctionne :** le verrou vient peut-être du
+  serveur Codex intégré plutôt que des pages couvertes par la route. Activez
+  `chatgptDesktop.appServerShim`, lancez `ocx chatgpt launch` et consultez `ocx chatgpt status` (la
+  ligne « app-server shim » indique si l'application en cours a été démarrée à travers lui).
 - **L'application ne charge plus rien après l'arrêt d'opencodex :** en mode par défaut, une
   application routée dépend de l'écouteur. Redémarrez opencodex ou lancez `ocx chatgpt restore`, ou
   activez le repli PAC pour que l'application se replie d'elle-même.

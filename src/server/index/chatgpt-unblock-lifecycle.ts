@@ -33,6 +33,9 @@ export function createChatgptUnblockLifecycle<T>(): ChatgptUnblockLifecycle {
             if (handle.pacRoute === "system-pac-unreadable") {
               console.warn("⚠ A system PAC is configured but could not be read; the generated PAC routes other hosts DIRECT until opencodex restarts with it readable.");
             }
+            if (handle.pacRoute === "system-pac-too-large") {
+              console.warn("⚠ The system PAC is too large to pass to the app inline; the generated PAC routes other hosts through the system proxy chain, then DIRECT, instead of the system PAC.");
+            }
           }
           console.log("   Launch the ChatGPT app with: ocx chatgpt launch   (or `ocx chatgpt install-watcher` for Dock launches)");
         }

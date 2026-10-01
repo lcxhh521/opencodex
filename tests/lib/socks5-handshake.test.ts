@@ -196,6 +196,14 @@ describe("shared socks5 handshake", () => {
       .toThrow("must each fit in 255 UTF-8 bytes");
   });
 
+  test("a username without a password, or a password without a username, is refused", () => {
+    // RFC 1929 lengths are 1-255; an empty field would go out as ULEN or PLEN 0.
+    for (const url of ["socks5://user@proxy.example.test:1080", "socks5://user:@proxy.example.test:1080", "socks5://:pass@proxy.example.test:1080"]) {
+      expect(() => socks5Credentials(new URL(url))).toThrow("need both a username and a password");
+    }
+    expect(socks5Credentials(new URL("socks5://proxy.example.test:1080"))).toEqual({});
+  });
+
   test("errors are the named handshake type", async () => {
     const reader = new ScriptedReader();
     reader.reply([0x05, 0x80]);

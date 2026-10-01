@@ -26,6 +26,17 @@ Abonelik gerekmesi gibi başka nedenli gönderme kilitleri korunur ve `ocx chatg
 listelenir. Gösterilen kullanım (yüzdeler, sıfırlanma zamanları, afişler) hiçbir zaman değiştirilmez
 ve OpenAI sunucuları kendi isteklerinde tüm sınırları uygulamaya devam eder.
 
+Bazı sürümlerde gönder düğmesi, uygulamanın yerleşik Codex sunucusunun hesabınız hakkında
+bildirdiklerini izler; bu sunucu bilgiyi kendi HTTP istemcisiyle alır ve ne çözümleyici kuralı ne de
+bir PAC dosyası ona ulaşır. Bu durumda `chatgptDesktop.appServerShim` değerini `true` yapın
+(`unblockSend` ile birlikte) ve uygulamayı `ocx chatgpt launch` ile başlatın: uygulama Codex
+sunucusunu, oran sınırı yanıtının yalnızca abonelik kotası bölümünü açan küçük bir stdio ara katmanı
+üzerinden başlatır. Ara katman başka hiçbir şeye dokunmaz: hiçbir ortam değişkeni, adres veya
+yapılandırma anahtarı değiştirilmez, sunucunun alt süreçleri etkilenmez ve opencodex'in çalışmasına
+bağlı değildir. Başlayamazsa başlatıcı gerçek ikili dosyayı doğrudan çalıştırır. Basit kota kilidi
+olmayan her şey (çalışma alanı veya kredi sınırları, harcama denetimleri) sunucunun gönderdiği gibi
+iletilir.
+
 ## Kurulum
 
 1. Özelliği `~/.opencodex/config.json` içinde açın ve opencodex'i yeniden başlatın:
@@ -104,8 +115,9 @@ yönlendirdiği şekilde gönderir:
 opencodex durduğunda uygulama yeniden başlatılmadan bu yoldan çalışmaya devam eder; yalnızca gönderme
 kilidinin kaldırılması opencodex geri gelene kadar durur. Yol, opencodex başlarken alınır: VPN modunu
 değiştirdikten sonra opencodex'i yeniden başlatın ve `ocx chatgpt launch` çalıştırın. O anda bir
-sistem PAC'i ayarlı olduğu hâlde okunamıyorsa diğer sunucular doğrudan gider ve opencodex bir uyarı
-yazdırır.
+sistem PAC'i ayarlı olduğu hâlde okunamıyorsa ya da uygulamaya aktarılamayacak kadar büyükse (PAC tek
+bir başlatma argümanı içinde taşınır ve kodlandıktan sonra 512 KiB ile sınırlıdır), diğer sunucular
+varsa sistem proxy'sinden, ardından doğrudan gider ve opencodex bir uyarı yazdırır.
 
 `pacFallback`'i açıp kapattıktan sonra opencodex'i yeniden başlatın, `ocx chatgpt launch` çalıştırın
 ve izleyiciyi kullanıyorsanız `ocx chatgpt install-watcher` komutunu yeniden çalıştırın.
@@ -139,6 +151,10 @@ kullanmıyorsanız kaldırın.
 - **Gönder düğmesi hâlâ gri:** `ocx chatgpt status` çıktısına bakın. Uygulama yol olmadan çalışıyor
   olabilir (`ocx chatgpt launch` çalıştırın) ya da kilidin nedeni kullanım kotası değildir ve
   "send blocks kept" altında listelenir.
+- **Yol çalıştığı hâlde gönder düğmesi gri kalıyor:** kilit, yolun kapsadığı sayfalardan değil
+  yerleşik Codex sunucusundan geliyor olabilir. `chatgptDesktop.appServerShim` değerini açın,
+  `ocx chatgpt launch` çalıştırın ve `ocx chatgpt status` çıktısına bakın ("app-server shim"
+  satırı, çalışan uygulamanın ara katman üzerinden başlatılıp başlatılmadığını gösterir).
 - **opencodex durduktan sonra uygulama hiçbir şey yükleyemiyor:** varsayılan modda yönlendirilmiş bir
   uygulama dinleyiciye bağlıdır. opencodex'i yeniden başlatın ya da `ocx chatgpt restore` çalıştırın;
   PAC yedeğini açarsanız uygulama kendiliğinden yedek yola geçer.

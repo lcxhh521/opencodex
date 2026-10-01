@@ -22,6 +22,15 @@ Chromium 스위치와 함께 실행되며, 서브도메인을 포함한 다른 �
 구독 필요 등 다른 이유의 전송 잠금은 그대로 두며 `ocx chatgpt status`에 표시됩니다. 표시되는
 사용량(비율, 초기화 시각, 배너)은 바뀌지 않으며, OpenAI 서버는 자체 요청에 모든 한도를 계속 적용합니다.
 
+일부 빌드에서는 전송 버튼이 앱에 내장된 Codex 서버가 계정에 대해 보고하는 내용을 따릅니다. 이 서버는
+자체 HTTP 클라이언트로 그 정보를 가져오므로 리졸버 규칙도 PAC 파일도 닿지 않습니다. 이런 경우
+`unblockSend`와 함께 `chatgptDesktop.appServerShim`을 `true`로 설정하고 `ocx chatgpt launch`로 앱을
+실행하세요. 그러면 앱은 작은 stdio 심을 거쳐 Codex 서버를 시작하며, 심은 사용 한도 응답 중 구독
+사용량 한도 부분만 엽니다. 심은 그 밖의 것은 건드리지 않습니다. 환경 변수, 주소, 설정 키를 바꾸지
+않고, 서버의 하위 프로세스에도 영향을 주지 않으며, opencodex 실행 여부에도 의존하지 않습니다. 심을
+시작할 수 없으면 실행기는 원래 바이너리를 그대로 실행합니다. 일반 사용량 한도가 아닌
+잠금(워크스페이스나 크레딧 한도, 지출 제한)은 서버가 보낸 그대로 전달됩니다.
+
 ## 설정
 
 1. `~/.opencodex/config.json`에서 기능을 켜고 opencodex를 다시 시작합니다.
@@ -96,8 +105,9 @@ opencodex는 다른 외부 트래픽과 마찬가지로 자체 `proxy` 설정으
 
 opencodex가 멈춰도 앱은 재시작 없이 이 경로로 계속 동작하며, 보내기 잠금 해제만 opencodex가 돌아올
 때까지 멈춥니다. 경로는 opencodex가 시작될 때 가져옵니다. VPN 모드를 바꾼 뒤에는 opencodex를 다시
-시작하고 `ocx chatgpt launch`를 실행하세요. 그 시점에 시스템 PAC가 설정되어 있지만 읽을 수 없으면 다른
-호스트는 직접 연결되고 opencodex가 경고를 출력합니다.
+시작하고 `ocx chatgpt launch`를 실행하세요. 그 시점에 시스템 PAC가 설정되어 있지만 읽을 수 없거나 앱에
+넘기기에 너무 크면(PAC는 실행 인수 하나에 담겨 전달되며, 인코딩 후 512KiB로 제한됩니다) 다른 호스트는
+시스템 프록시가 있으면 그것을 거친 뒤 직접 연결되고 opencodex가 경고를 출력합니다.
 
 `pacFallback`을 켜거나 끈 뒤에는 opencodex를 다시 시작하고 `ocx chatgpt launch`를 실행하며, 감시자를
 쓰고 있다면 `ocx chatgpt install-watcher`도 다시 실행하세요.
@@ -128,6 +138,10 @@ opencodex의 Claude 통합과 공유되므로, 둘 다 쓰지 않을 때만 신�
   실행하세요. `ocx chatgpt status`가 신뢰 상태를 보여 줍니다.
 - **전송 버튼이 여전히 회색:** `ocx chatgpt status`를 확인하세요. 앱이 경로 없이 실행 중이거나
   (`ocx chatgpt launch` 실행), 잠금 이유가 사용량 한도가 아니어서 "send blocks kept"에 표시될 수 있습니다.
+- **경로는 동작하는데 전송 버튼이 여전히 회색:** 잠금이 경로가 다루는 페이지가 아니라 내장 Codex
+  서버에서 올 수 있습니다. `chatgptDesktop.appServerShim`을 켜고 `ocx chatgpt launch`를 실행한 뒤
+  `ocx chatgpt status`를 확인하세요("app-server shim" 줄이 실행 중인 앱이 심을 거쳐 시작되었는지 알려
+  줍니다).
 - **opencodex를 멈추면 앱이 아무것도 불러오지 못함:** 기본 모드에서는 경로가 적용된 앱이 리스너에
   의존합니다. opencodex를 다시 시작하거나 `ocx chatgpt restore`를 실행하세요. PAC 폴백을 켜면 앱이
   스스로 폴백합니다.

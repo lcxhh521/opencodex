@@ -207,6 +207,21 @@ describe("app-server launcher", () => {
     }
   });
 
+  test("fails open: a filter that does not load leaves the real binary's stdout untouched", () => {
+    // Otherwise the app-server would write its JSON-RPC answers into a dead pipe.
+    const dir = mkdtempSync(join(tmpdir(), "ocx-launcher-broken-"));
+    try {
+      const real = scriptIn(dir, "real.sh", `#!/bin/bash\necho '${rpcResult(EXHAUSTED_RATE_LIMITS)}'\n`);
+      const broken = scriptIn(dir, "broken-shim.ts", 'throw new Error("the filter does not load");\n');
+      const launcher = scriptIn(dir, "launcher.sh", buildChatgptShimLauncher(process.execPath, broken, real));
+      const out = spawnSync(launcher, ["app-server"], { encoding: "utf8" });
+      expect(out.status).toBe(0);
+      expect(out.stdout.trim()).toBe(rpcResult(EXHAUSTED_RATE_LIMITS));
+    } finally {
+      removeTreeWithRetry(dir);
+    }
+  });
+
   test("the real binary replaces the launcher: same pid, stdin and stderr untouched, exit code kept", () => {
     // The app checks the code-signing identity of the process on its app-tools pipe, so the server
     // must stay the process the app started rather than a child of a wrapper.
