@@ -76,6 +76,7 @@ and refuses to load one that does not parse, and `restore` hands back
 an app carrying either switch. Its launchd agent wakes on the app's `SingletonLock` and on
 `chatgpt-unblock.ready`, which `startChatgptUnblock` rewrites once the listener is up, so an app
 that opened before opencodex (both at login) is still routed. In watch mode it only restarts an
-app that started within the last five minutes (`ps -o etime=`), so an opencodex restart never quits
-an app in use; `ocx chatgpt launch` always acts. `ocx chatgpt launch|restore|status|install-watcher`
+app that started within the last five minutes (`ps -o etime=`), so an opencodex restart does not
+quit an app that has been open longer. It is an age check, not an activity check, and an
+unreadable age counts as a fresh launch; `ocx chatgpt launch` always acts. `ocx chatgpt launch|restore|status|install-watcher`
 (`src/cli/chatgpt-command.ts`) follow the configured modes.

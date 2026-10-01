@@ -76,9 +76,11 @@ travail ou de crédits, plafonds de dépenses) est transmis tel que le serveur l
    Le surveillant s'exécute à chaque démarrage de l'application, et à nouveau au démarrage
    d'opencodex. Si l'application a été ouverte normalement, il la quitte juste après son lancement et
    la rouvre avec la route. Si l'application s'ouvre à la connexion avant qu'opencodex ne soit prêt,
-   il le fait dès qu'opencodex tourne. Il n'agit que sur une application lancée dans les cinq
-   dernières minutes, jamais sur une application déjà en cours d'utilisation, et ne fait rien quand
-   opencodex ne tourne pas. La commande demande une confirmation ; `--yes` confirme sans interaction.
+   il le fait dès qu'opencodex tourne. Pour ne pas quitter une application ouverte depuis un moment,
+   il ne redémarre qu'une application lancée dans les cinq dernières minutes (si son âge ne peut pas
+   être lu, elle est considérée comme tout juste lancée) ; `ocx chatgpt launch` la redémarre quel que
+   soit son âge. Il ne fait rien quand opencodex ne tourne pas. La commande demande une confirmation ;
+   `--yes` confirme sans interaction.
 
 ## Configurations réseau
 

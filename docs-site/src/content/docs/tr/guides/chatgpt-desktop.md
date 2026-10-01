@@ -73,9 +73,11 @@ iletilir.
 
    İzleyici, uygulama her başladığında ve opencodex başladığında da çalışır. Uygulama normal şekilde
    açıldıysa, başlatmanın hemen ardından uygulamayı kapatır ve yolla yeniden açar. Oturum açılışında
-   uygulama opencodex'ten önce açılırsa, bunu opencodex çalışır çalışmaz yapar. Yalnızca son beş
-   dakika içinde başlamış bir uygulamaya müdahale eder; kullanımda olan bir uygulamaya asla dokunmaz
-   ve opencodex çalışmıyorken hiçbir şey yapmaz. Komut onay ister; `--yes` etkileşimsiz onay verir.
+   uygulama opencodex'ten önce açılırsa, bunu opencodex çalışır çalışmaz yapar. Bir süredir
+   kullandığınız uygulamayı kapatmamak için yalnızca son beş dakika içinde başlamış bir uygulamayı
+   yeniden başlatır (çalışma süresi okunamazsa uygulama yeni başlamış sayılır); `ocx chatgpt launch`
+   ise süreye bakmadan yeniden başlatır. opencodex çalışmıyorken hiçbir şey yapmaz. Komut onay ister;
+   `--yes` etkileşimsiz onay verir.
 
 ## Ağ kurulumları
 

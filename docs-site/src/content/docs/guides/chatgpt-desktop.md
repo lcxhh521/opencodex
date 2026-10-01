@@ -71,10 +71,11 @@ lock (workspace or credit limits, spend controls) is passed through as the serve
 
    The watcher runs each time the app starts, and again when opencodex starts. If the app was
    opened normally, it quits the app right after launch and reopens it with the route. When the
-   app opens at login before opencodex is up, it does this as soon as opencodex is running. It
-   only acts on an app that started in the last five minutes, never on one that is already in
-   use, and does nothing while opencodex is not running. The
-   command asks for confirmation; `--yes` confirms non-interactively.
+   app opens at login before opencodex is up, it does this as soon as opencodex is running. To
+   avoid quitting an app you have been using for a while, it only restarts an app that started
+   in the last five minutes (an app whose age cannot be read counts as just started);
+   `ocx chatgpt launch` restarts the app whatever its age. It does nothing while opencodex is
+   not running. The command asks for confirmation; `--yes` confirms non-interactively.
 
 ## Network setups
 

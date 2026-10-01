@@ -41,10 +41,10 @@ export function resolveChatgptUnblockPort(config: OcxConfig, livePort: number | 
   return chatgptUnblockPort(config, livePort ?? (typeof config.port === "number" ? config.port : 10100));
 }
 
-const WATCHER_CONSENT = `The launch watcher runs each time the ChatGPT app starts. If the app was opened
-normally (Dock, Spotlight) while opencodex is running, it quits the app right after launch
-and reopens it with the opencodex route. It never acts on an app that is already in use,
-and does nothing while opencodex is not running. Remove it any time with
+const WATCHER_CONSENT = `The launch watcher runs each time the ChatGPT app starts, and again when opencodex
+starts. If the app was opened normally (Dock, Spotlight), it quits the app right after launch
+and reopens it with the opencodex route. It only restarts an app that started in the last
+five minutes, and does nothing while opencodex is not running. Remove it any time with
 'ocx chatgpt uninstall-watcher'.`;
 
 export async function handleChatgptCommand(args: string[], platform: NodeJS.Platform = process.platform): Promise<number> {

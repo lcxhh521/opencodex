@@ -178,4 +178,11 @@ describe("chatgpt launch watcher install (PAC mode)", () => {
     const statusResolver = chatgptUnblockWatcherStatus(10300, dir, false);
     expect(statusResolver.scriptUpToDate).toBe(false);
   });
+
+  test("a freshly installed agent plist reads as up to date", () => {
+    // Install and status must build the plist from the same watch paths.
+    const fake = launchctl({ bootout: 3 });
+    install(fake.run);
+    expect(chatgptUnblockWatcherStatus(10300, dir, false, undefined, false, plistPath).plistUpToDate).toBe(true);
+  });
 });

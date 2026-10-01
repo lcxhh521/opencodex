@@ -79,6 +79,11 @@ export interface ChatgptUnblockWatcherPaths {
   readyPath: string;
 }
 
+/** What the agent wakes on: the app's own launch, and opencodex's listener coming up. */
+function watcherWatchPaths(paths: ChatgptUnblockWatcherPaths): string[] {
+  return [paths.lockPath, paths.readyPath];
+}
+
 export function chatgptUnblockWatcherPaths(configDir?: string): ChatgptUnblockWatcherPaths {
   const dir = configDir ?? getConfigDir();
   return {
@@ -430,7 +435,7 @@ export function installChatgptUnblockWatcher(options: InstallChatgptUnblockWatch
     rmSync(paths.scriptPath, { force: true });
     throw new Error(`the generated watcher script is not valid bash: ${syntax.output || `bash -n exited ${syntax.status}`}`);
   }
-  writeFileSync(paths.plistPath, buildChatgptUnblockWatcherPlist(paths.scriptPath, [paths.lockPath, paths.readyPath], paths.errPath));
+  writeFileSync(paths.plistPath, buildChatgptUnblockWatcherPlist(paths.scriptPath, watcherWatchPaths(paths), paths.errPath));
   const loaded = launchctl(["bootstrap", watcherDomain(), paths.plistPath]);
   if (!loaded.ok) {
     rmSync(paths.plistPath, { force: true });
@@ -469,15 +474,23 @@ export interface ChatgptUnblockWatcherStatus {
   plistUpToDate: boolean;
 }
 
-export function chatgptUnblockWatcherStatus(port: number, configDir?: string, pacMode = false, entryPort?: number, shimMode = false): ChatgptUnblockWatcherStatus {
-  const paths = chatgptUnblockWatcherPaths(configDir);
+export function chatgptUnblockWatcherStatus(
+  port: number,
+  configDir?: string,
+  pacMode = false,
+  entryPort?: number,
+  shimMode = false,
+  /** Test seam: where the agent plist was written instead of ~/Library/LaunchAgents. */
+  plistPath?: string,
+): ChatgptUnblockWatcherStatus {
+  const paths = { ...chatgptUnblockWatcherPaths(configDir), ...(plistPath ? { plistPath } : {}) };
   const scriptInstalled = existsSync(paths.scriptPath);
   const plistInstalled = existsSync(paths.plistPath);
   const agentLoaded = sh("launchctl", ["print", `${watcherDomain()}/${CHATGPT_UNBLOCK_WATCHER_LABEL}`]).ok;
   const scriptUpToDate = scriptInstalled
     && readFileSync(paths.scriptPath, "utf8") === buildChatgptUnblockWatcherScript(port, configDir, pacMode, entryPort, shimMode);
   const plistUpToDate = plistInstalled
-    && readFileSync(paths.plistPath, "utf8") === buildChatgptUnblockWatcherPlist(paths.scriptPath, paths.lockPath, paths.errPath);
+    && readFileSync(paths.plistPath, "utf8") === buildChatgptUnblockWatcherPlist(paths.scriptPath, watcherWatchPaths(paths), paths.errPath);
   return { scriptInstalled, plistInstalled, agentLoaded, scriptUpToDate, plistUpToDate };
 }
 
