@@ -64,9 +64,10 @@ The composer's send gate can come from two different clients, and each needs its
   messages, `account/rateLimits/read` and `account/rateLimits/updated`, as the ones that carry it.
   Stdin, stderr and signals go straight between the app and the server. The shim sets no environment
   variable, address or config key, so the server's children and other Codex clients are unaffected,
-  and it fails open to the real binary: the launcher first runs the filter on empty input and
-  `exec`s the binary with stdout untouched when that fails, so a missing or broken filter never
-  leaves the server writing into a dead pipe, and it never depends on opencodex running.
+  and it never depends on opencodex running. Fail-open covers startup only: the launcher first runs
+  the filter on empty input and `exec`s the binary with stdout untouched when that fails, so a
+  filter that is missing or does not load never receives the server's stdout. Once the probe has
+  passed there is no fallback; a filter that dies later takes the server's stdout with it.
 
 The watcher decides whether an app is already launched correctly from its command line plus its
 environment (`ps eww`), so an app started without the shim is corrected once. It finds the app with

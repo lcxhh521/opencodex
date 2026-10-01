@@ -136,10 +136,9 @@ function shellQuote(value: string): string {
  * The launcher the desktop app runs in place of the bundled `codex`. It `exec`s the real binary,
  * so the app-server keeps the pid, parent and code-signing identity the app expects (the app
  * rejects its app-tools pipe for any other peer), and only redirects the server's stdout into the
- * filter. It fails open: the filter is first run once on empty input, and when that fails (its
- * runtime or source is gone, or the source no longer loads) the launcher executes the real binary
- * with its stdout untouched. A removed, moved or broken opencodex can never leave the app talking
- * to a dead pipe.
+ * filter. It fails open at startup: the filter is first run once on empty input, and when that
+ * fails (its runtime or source is gone, or the source no longer loads) the launcher executes the
+ * real binary with its stdout untouched. Once the probe has passed there is no fallback.
  */
 export function buildChatgptShimLauncher(bun: string, shimEntry: string, real: string = CHATGPT_APP_CODEX_BINARY): string {
   return `#!/bin/bash
