@@ -37,6 +37,12 @@ export interface MachineListenerDeps {
   managementAuthState?: ManagementAuthState;
   fetchImpl?: typeof fetch;
   machineApi?: Partial<MachineApiDeps>;
+  /**
+   * What a disconnect does to this machine afterwards. The runtime passes its own recycle here;
+   * a listener started on its own does nothing. Injected rather than imported from `./runtime`,
+   * which starts this listener and would otherwise close a cycle between the two.
+   */
+  scheduleRecycle?: (disconnectedTokenFingerprint: string) => void;
   /** Link mode: the client tunnel supervisor state for `GET /api/link/status`. */
   linkStatus?: () => ClientLinkSupervisorStatus;
   /** Link mode: the sidecar read for `GET /api/link/status`. */
@@ -103,9 +109,7 @@ export function startMachineListener(
   const machineApiDeps: MachineApiDeps = {
     sync: deps.machineApi?.sync ?? syncConnectedClient,
     disconnect: deps.machineApi?.disconnect ?? disconnectClient,
-    scheduleStandaloneRecycle: deps.machineApi?.scheduleStandaloneRecycle ?? (tokenFingerprint => {
-      void import("./runtime").then(module => module.scheduleStandaloneRecycle(tokenFingerprint));
-    }),
+    scheduleStandaloneRecycle: deps.machineApi?.scheduleStandaloneRecycle ?? deps.scheduleRecycle ?? (() => {}),
     hubReachability: deps.machineApi?.hubReachability ?? (() => hubReachability),
     setHubReachability: deps.machineApi?.setHubReachability ?? (value => { hubReachability = value; }),
   };
