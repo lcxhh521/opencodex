@@ -133,9 +133,11 @@ app_has_shim() {
 }
 # The app's main process: found by exact process name, then confirmed by path. Matching the
 # whole command line instead would also match any shell whose command mentions the rule.
+# -a: pgrep skips its own ancestors by default, and a command run from a terminal inside the
+# desktop app has the app as an ancestor.
 app_pid() {
   local pid
-  for pid in $(pgrep -x ChatGPT 2>/dev/null); do
+  for pid in $(pgrep -a -x ChatGPT 2>/dev/null); do
     case "$(ps -o command= -p "$pid" 2>/dev/null)" in
       *"$APP_PATTERN"*) echo "$pid"; return 0 ;;
     esac
@@ -285,6 +287,11 @@ say "launched ChatGPT with: \${ARGS[*]}"
 `;
 }
 
+/** `bash -n` on a script file: parses without running it. */
+export function checkChatgptWatcherScriptSyntax(scriptPath: string): CommandResult {
+  return sh("/bin/bash", ["-n", scriptPath]);
+}
+
 /** One-shot launchd agent: wake on the app's SingletonLock event, run the script, exit. */
 export function buildChatgptUnblockWatcherPlist(scriptPath: string, watchPath: string, errPath: string): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -355,6 +362,8 @@ export interface InstallChatgptUnblockWatcherOptions {
   assumeSupported?: boolean;
   /** Test seam: where the agent plist is written instead of ~/Library/LaunchAgents. */
   plistPath?: string;
+  /** Test seam: the script body written instead of the generated one. */
+  scriptText?: string;
   launchctl?: LaunchctlRunner;
 }
 
@@ -380,9 +389,16 @@ export function installChatgptUnblockWatcher(options: InstallChatgptUnblockWatch
   if (!options.plistPath) mkdirSync(expandHome("~/Library/LaunchAgents"), { recursive: true });
   writeFileSync(
     paths.scriptPath,
-    buildChatgptUnblockWatcherScript(options.port, options.configDir, options.entryPort !== undefined, options.entryPort, options.shimMode === true),
+    options.scriptText ?? buildChatgptUnblockWatcherScript(options.port, options.configDir, options.entryPort !== undefined, options.entryPort, options.shimMode === true),
     { mode: 0o700 },
   );
+  // The script is generated from a template literal and never parsed as bash before launchd runs
+  // it, so a quoting slip would install a watcher that dies on every app launch. Refuse it here.
+  const syntax = checkChatgptWatcherScriptSyntax(paths.scriptPath);
+  if (!syntax.ok) {
+    rmSync(paths.scriptPath, { force: true });
+    throw new Error(`the generated watcher script is not valid bash: ${syntax.output || `bash -n exited ${syntax.status}`}`);
+  }
   writeFileSync(paths.plistPath, buildChatgptUnblockWatcherPlist(paths.scriptPath, paths.lockPath, paths.errPath));
   const loaded = launchctl(["bootstrap", watcherDomain(), paths.plistPath]);
   if (!loaded.ok) {
@@ -435,11 +451,12 @@ export function chatgptUnblockWatcherStatus(port: number, configDir?: string, pa
 }
 
 /**
- * The running app's command line, or null. Mirrors the script's `app_pid`: exact process name,
- * then the bundle path, never a match against every command line.
+ * The running app's command line, or null. Mirrors the script's `app_pid`: exact process name
+ * (ancestors included, since `ocx` may run in a terminal inside the app), then the bundle path,
+ * never a match against every command line.
  */
 export function chatgptAppCommandLine(): string | null {
-  const pids = sh("pgrep", ["-x", "ChatGPT"]);
+  const pids = sh("pgrep", ["-a", "-x", "ChatGPT"]);
   if (!pids.ok) return null;
   for (const pid of pids.output.split(/\s+/).filter(Boolean)) {
     const command = sh("ps", ["-o", "command=", "-p", pid]);
@@ -453,7 +470,7 @@ export function chatgptAppCommandLine(): string | null {
  * app's CODEX_CLI_PATH environment variable, which "ps eww" shows for the app's own process.
  */
 export function chatgptAppHasShim(configDir: string): boolean {
-  const pids = sh("pgrep", ["-x", "ChatGPT"]);
+  const pids = sh("pgrep", ["-a", "-x", "ChatGPT"]);
   if (!pids.ok) return false;
   const marker = `CODEX_CLI_PATH=${chatgptUnblockShimPath(configDir)}`;
   for (const pid of pids.output.split(/\s+/).filter(Boolean)) {

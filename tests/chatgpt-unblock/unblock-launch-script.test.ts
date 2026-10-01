@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildChatgptUnblockWatcherPlist,
+  checkChatgptWatcherScriptSyntax,
   buildChatgptUnblockWatcherScript,
   chatgptCommandLineHasPac,
   chatgptCommandLineHasRule,
@@ -81,10 +82,17 @@ function stub(name: string, body: string): void {
 beforeAll(() => {
   stubs = mkdtempSync(join(tmpdir(), "ocx-chatgpt-launch-bin-"));
   // A process table of "pid|name|command" lines; pgrep and ps answer from it like the real ones.
-  stub("pgrep", `[ "$1" = -x ] || { echo "stub pgrep only supports -x" >&2; exit 2; }
+  // Like the real one, it skips the caller's ancestors (STUB_ANCESTORS) unless -a is given.
+  stub("pgrep", `ancestors=0; exact=0; name=""
+for a in "$@"; do
+  case "$a" in -a) ancestors=1 ;; -x) exact=1 ;; -*) echo "stub pgrep: unsupported $a" >&2; exit 2 ;; *) name="$a" ;; esac
+done
+[ $exact = 1 ] || { echo "stub pgrep only supports -x" >&2; exit 2; }
 found=1
-while IFS='|' read -r pid name command; do
-  [ "$name" = "$2" ] && { echo "$pid"; found=0; }
+while IFS='|' read -r pid pname command; do
+  [ "$pname" = "$name" ] || continue
+  if [ $ancestors = 0 ]; then case " $STUB_ANCESTORS " in *" $pid "*) continue ;; esac; fi
+  echo "$pid"; found=0
 done < "$STUB_DIR/processes"
 exit $found`);
   stub("ps", `pid="\${@: -1}"
@@ -155,6 +163,8 @@ function run(mode: "watch" | "launch" | "native", options: {
   pac?: boolean;
   shim?: boolean;
   entryPort?: number;
+  /** The app is an ancestor of the caller, as for `ocx` run in a terminal inside the app. */
+  appIsAncestor?: boolean;
 }) {
   const pacMode = options.pac === true;
   const entryPort = options.entryPort ?? 10301;
@@ -183,6 +193,7 @@ function run(mode: "watch" | "launch" | "native", options: {
       STUB_LISTENER: options.listener ?? "ours",
       STUB_QUIT_IGNORED: options.quitIgnored ? "1" : "0",
       STUB_ENTRY: options.entry ?? (pacMode ? "up" : "n/a"),
+      STUB_ANCESTORS: options.appIsAncestor ? "400" : "",
     },
   });
   const read = (name: string) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : "");
@@ -345,6 +356,41 @@ describe("chatgpt restore (native networking)", () => {
     const r = run("native", { app: "flagged", quitIgnored: true });
     expect(r.status).toBe(1);
     expect(r.calls).toEqual(["quit", "quit", "quit"]);
+  });
+});
+
+describe("chatgpt launch run from a terminal inside the app", () => {
+  // pgrep leaves out its own ancestors unless asked; the app must still be found.
+  test("launch sees the app that is its own ancestor and leaves a correctly launched one alone", () => {
+    const r = run("launch", { app: "flagged", appIsAncestor: true });
+    expect(r.status).toBe(0);
+    expect(r.calls).toEqual([]);
+    expect(r.stdout).toContain("already running with the launch switches");
+  });
+
+  test("restore finds the ancestor app and hands it back native", () => {
+    const r = run("native", { app: "flagged", appIsAncestor: true });
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.openArgs).toEqual([]);
+  });
+});
+
+describe("generated watcher script syntax", () => {
+  // The script is a template literal; a stray quote or backtick in it would still build and
+  // install, then fail on every launch.
+  test("every mode combination parses as bash", () => {
+    const configDirs = [dir, join(dir, "it's \"quoted\" $dir")];
+    for (const configDir of configDirs) {
+      mkdirSync(configDir, { recursive: true });
+      for (const pac of [false, true]) {
+        for (const shim of [false, true]) {
+          const script = join(dir, `syntax-${pac}-${shim}.sh`);
+          writeFileSync(script, buildChatgptUnblockWatcherScript(PORT, configDir, pac, 10301, shim));
+          const check = checkChatgptWatcherScriptSyntax(script);
+          expect({ pac, shim, configDir, ok: check.ok, output: check.output }).toEqual({ pac, shim, configDir, ok: true, output: "" });
+        }
+      }
+    }
   });
 });
 

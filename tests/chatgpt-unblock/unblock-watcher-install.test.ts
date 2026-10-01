@@ -50,6 +50,17 @@ describe("chatgpt launch watcher install", () => {
     expect(existsSync(scriptPath)).toBe(true);
   });
 
+  test("a script that is not valid bash is refused before launchd ever loads it", () => {
+    const fake = launchctl({ bootout: 3 });
+    expect(() => installChatgptUnblockWatcher({
+      port: 10300, configDir: dir, plistPath, assumeSupported: true, launchctl: fake.run,
+      scriptText: "#!/bin/bash\n// it's a comment from the template\necho (\n",
+    })).toThrow("the generated watcher script is not valid bash");
+    expect(fake.calls).toEqual(["bootout"]);
+    expect(existsSync(scriptPath)).toBe(false);
+    expect(existsSync(plistPath)).toBe(false);
+  });
+
   test("a failed bootstrap is reported with its diagnostic and leaves nothing behind", () => {
     const fake = launchctl({ bootout: 3, bootstrap: 5 });
     expect(() => install(fake.run)).toThrow("launchctl bootstrap exited 5: bootstrap failed: 5: Input/output error");
