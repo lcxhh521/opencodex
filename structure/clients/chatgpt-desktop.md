@@ -18,24 +18,43 @@ then replaces itself with the bundled app-server using shell exec. Only stdout
 passes through the filter. Stdin, stderr, process identity and the real server's
 exit status retain the direct app/server relationship.
 
-A failed precondition or a failed self-test runs the original binary with untouched stdout.
-A filter that passes the self-test and then dies mid-session closes the pipe.
-Expected (not yet validated against the bundled app-server): the server gets SIGPIPE or a write error and Desktop respawns it through the same launcher.
-The filter's passthrough mode limits this to an exit/crash case.
+When the platform is not macOS, the runtime is missing, or the filter self-test fails,
+the launcher runs the original binary with untouched stdout. A missing bundled binary
+exits 127 instead (see below). A filter that passes the self-test and then exits
+mid-session closes the server's stdout pipe; the filter's passthrough mode limits this
+to an exit/crash case.
 
 The pure gate rewrite changes known plain-quota fields only in eligible JSON-RPC
 rate-limit notifications and top-level rate-limit results. Workspace, credit,
 unknown reached-type and spend-control restrictions preserve closed gate flags.
+Both the rate-limit flags and `ordinaryUsageAllowed` open only where the subtree shows
+plain-quota evidence: a cleared plain reached type or a usage window at 100%.
 Usage percentages, resets and window durations remain accurate. Unrelated messages
 and malformed lines remain byte-identical; changed lines are reserialized.
 A per-line rewrite exception preserves that line. A failure in the framing/rewrite
 machinery preserves buffered bytes and switches the rest of the stream to raw
 passthrough. Output-write failures propagate; they are not rewrite failures.
+A partial line is held as a list of chunks and joined once at its newline, so a long
+line split across many pipe reads costs linear copying.
+A line longer than `MAX_FILTERED_LINE_BYTES` (8 MiB) is never joined or parsed, whether
+it arrives across many chunks or whole in one: its bytes stream through raw, and
+filtering resumes after its newline.
 
-Launch writes a mode-0755 executable, waits for the old ChatGPT instance to quit,
-then invokes open with the launcher in CODEX_CLI_PATH. Restore relaunches without
-that override and removes the launcher only after open succeeds. Status reports
-the experimental flag, launcher presence, and the named bundle process's override
+The app is discovered and confirmed by bundle identifier through
+`darwinDesktopAppAdapter.discover` (`src/codex/desktop-app/darwin.ts`). Launch derives
+the bundled app-server binary from that root (`resolveChatgptCodexBinary`) and refuses
+when none exists or when `untrustedChatgptBundleReason`
+(`src/chatgpt/app-server-shim/bundle-trust.ts`) reports the bundle or binary as owned
+by another user, group/other-writable, unsigned, or signed by a team other than
+OpenAI's. It writes the mode-0755 executable through an exclusive temp file and a
+rename (never through a symbolic link), quits the bundle by id, waits for this user's
+instance to exit, then opens the same bundle path with the launcher in CODEX_CLI_PATH.
+The launcher itself exits 127 with a stderr hint when the recorded binary is gone.
+Restore relaunches without
+that override and removes the launcher only after open succeeds; when no
+`com.openai.codex` bundle is found it removes the launcher, relaunches nothing and
+exits 1. Status reports
+the experimental flag, launcher presence, and the verified bundle process's override
 without printing its environment. Other platforms reject the public operations.
 
 The launcher and its executable paths are local code-execution inputs. The shim alone

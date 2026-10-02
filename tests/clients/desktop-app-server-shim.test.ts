@@ -83,6 +83,18 @@ describe("app-server line rewrite", () => {
     expect(rewriteAppServerLine(rpcResult({ ordinaryUsageAllowed: false, rateLimits: { primary: { usedPercent: 100 }, spendControlReached: { used: 5, limit: 5 } } }))).toBeNull();
   });
 
+  test("rate-limit flags closed without plain-quota evidence stay closed", () => {
+    expect(rewriteAppServerLine(rpcResult({ rateLimits: { rateLimit: { allowed: false }, primary: { usedPercent: 12 } } }))).toBeNull();
+    const notification = JSON.stringify({ method: "account/rateLimits/updated", params: { rateLimits: { rateLimit: { allowed: false, limitReached: true } } } });
+    expect(rewriteAppServerLine(notification)).toBeNull();
+  });
+
+  test("rate-limit flags open when the plain quota is the visible reason", () => {
+    const out = JSON.parse(rewriteAppServerLine(rpcResult({ rateLimits: { rateLimit: { allowed: false, limitReached: true }, primary: { usedPercent: 100 } } }))!);
+    expect(out.result.rateLimits.rateLimit).toEqual({ allowed: true, limitReached: false });
+    expect(out.result.rateLimits.primary.usedPercent).toBe(100);
+  });
+
   test("notifications carrying the same fields are rewritten too", () => {
     const line = JSON.stringify({ method: "account/rateLimits/updated", params: { rateLimits: { rateLimitReachedType: "rate_limit_reached" } } });
     expect(JSON.parse(rewriteAppServerLine(line)!).params.rateLimits.rateLimitReachedType).toBeNull();
@@ -148,6 +160,40 @@ describe("app-server line filter", () => {
     const out = collect([enc(rpcResult(EXHAUSTED_RATE_LIMITS))]);
     expect(out.endsWith("\n")).toBe(false);
     expect(JSON.parse(out).result.ordinaryUsageAllowed).toBe(true);
+  });
+
+  test("a long line spread over many chunks comes back whole, and a gate line after it is still rewritten", () => {
+    const long = JSON.stringify({ method: "item/agentMessage/delta", params: { delta: "x".repeat(200_000) } });
+    const bytes = enc(`${long}\n${rpcResult(EXHAUSTED_RATE_LIMITS)}\n`);
+    const chunks: Uint8Array[] = [];
+    for (let i = 0; i < bytes.length; i += 1024) chunks.push(bytes.slice(i, i + 1024));
+    const out = collect(chunks).split("\n");
+    expect(out[0]).toBe(long);
+    expect(JSON.parse(out[1]!).result.ordinaryUsageAllowed).toBe(true);
+  });
+
+  // The cap sits between the ordinary gate line (~320 bytes) and the padded one (~2.3 KB).
+  test("a line over the cap streams through raw, never parsed, and filtering resumes after its newline", () => {
+    const seen: string[] = [];
+    const rewrite = (line: string) => {
+      seen.push(line);
+      return rewriteAppServerLine(line);
+    };
+    const oversized = rpcResult({ ...EXHAUSTED_RATE_LIMITS, padding: "y".repeat(2000) });
+    const bytes = enc(`${oversized}\n${rpcResult(EXHAUSTED_RATE_LIMITS)}\n`);
+    const chunks: Uint8Array[] = [];
+    for (let i = 0; i < bytes.length; i += 64) chunks.push(bytes.slice(i, i + 64));
+    const out = collect(chunks, createRpcLineFilter(rewrite, 1024)).split("\n");
+    expect(out[0]).toBe(oversized);
+    expect(JSON.parse(out[1]!).result.ordinaryUsageAllowed).toBe(true);
+    expect(seen.some(line => line.includes("padding"))).toBe(false);
+
+    // The same oversized line arriving whole, newline included, in one chunk is not parsed either.
+    seen.length = 0;
+    const single = collect([enc(`${oversized}\n${rpcResult(EXHAUSTED_RATE_LIMITS)}\n`)], createRpcLineFilter(rewrite, 1024)).split("\n");
+    expect(single[0]).toBe(oversized);
+    expect(JSON.parse(single[1]!).result.ordinaryUsageAllowed).toBe(true);
+    expect(seen.some(line => line.includes("padding"))).toBe(false);
   });
 });
 
