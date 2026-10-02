@@ -532,13 +532,13 @@ Each of these writes. Check the flags column before running one unattended.
 
 ### `ocx chatgpt`
 
-Experimental ChatGPT app-server shim: launch, restore or status (macOS only).
+ChatGPT desktop send-unblock intercept and experimental app-server shim (macOS only).
 
 Drives no management route.
 
 JSON mode: `none`.
 
-- Default off; launch requires chatgptDesktop.appServerShim: true. Restore removes the generated launcher.
+- Default off; launch needs chatgptDesktop.unblockSend and/or appServerShim. Restore removes the generated shim launcher.
 
 ### `ocx link issue`
 

@@ -491,7 +491,7 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   {
     name: "chatgpt",
     usage: "ocx chatgpt <status|install-watcher [--yes]|uninstall-watcher|launch|restore>",
-    summary: "Inspect and operate the ChatGPT desktop send-unblock integration (macOS).",
+    summary: "Inspect and operate the ChatGPT desktop send-unblock intercept and the experimental app-server shim (macOS).",
     details: [
       "status              Feature, intercept listener, certificate trust, watcher and app state.",
       "install-watcher     Install the launchd watcher so Dock/Spotlight launches of the ChatGPT",
@@ -499,8 +499,11 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
       "                    (host-resolver rule, or the PAC file when pacFallback is on).",
       "                    Asks for confirmation; --yes confirms non-interactively.",
       "uninstall-watcher   Remove the launch watcher script and agent.",
-      "launch              Launch the ChatGPT app with the configured launch switches.",
-      "restore             Relaunch a switched ChatGPT app with native networking.",
+      "launch              Relaunch the ChatGPT app with the configured launch switches and, with",
+      "                    appServerShim on, through the experimental app-server shim.",
+      "restore             Relaunch with native networking and without the shim; removes its launcher.",
+      "Without chatgptDesktop.unblockSend, launch/restore/status operate the experimental",
+      "app-server shim alone (chatgptDesktop.appServerShim: true).",
       "Requires chatgptDesktop.unblockSend: true in config for install-watcher.",
     ],
   },

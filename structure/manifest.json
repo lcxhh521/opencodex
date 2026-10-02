@@ -597,7 +597,8 @@
       "scope": "Opt-in composer send-unblock (listeners, rewrites, PAC fallback, launch watcher) and the experimental app-server stdout shim.",
       "documents": [
         "src/chatgpt/",
-        "src/cli/"
+        "src/cli/",
+        "src/codex/"
       ]
     }
   ],

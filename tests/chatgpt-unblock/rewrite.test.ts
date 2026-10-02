@@ -4,9 +4,9 @@ import {
   stripSendBlocks,
   stripSendBlocksFromJson,
   stripSendBlocksFromSseLine,
-  unlockRateLimitGate,
   type PreservedSendBlock,
 } from "../../src/chatgpt/desktop-unblock/rewrite";
+import { unlockRateLimitGate } from "../../src/chatgpt/app-server-shim/gate-rewrite";
 
 const blockedPayload = {
   banner_info: {
@@ -119,15 +119,16 @@ describe("stripSendBlocksFromJson", () => {
   });
 
   test("each surface applies only its own rewrite", () => {
+    const window = { used_percent: 100 };
     const mixed = JSON.stringify({
-      rate_limit: { allowed: false, limit_reached: true },
+      rate_limit: { allowed: false, limit_reached: true, primary_window: window },
       blocked_features: [{ name: "send", block_reason: "usage_limit" }],
     });
     const usage = JSON.parse(stripSendBlocksFromJson(mixed, "usage")!);
-    expect(usage.rate_limit).toEqual({ allowed: true, limit_reached: false });
+    expect(usage.rate_limit).toEqual({ allowed: true, limit_reached: false, primary_window: window });
     expect(usage.blocked_features).toHaveLength(1);
     const conversation = JSON.parse(stripSendBlocksFromJson(mixed, "conversation")!);
-    expect(conversation.rate_limit).toEqual({ allowed: false, limit_reached: true });
+    expect(conversation.rate_limit).toEqual({ allowed: false, limit_reached: true, primary_window: window });
     expect(conversation.blocked_features).toEqual([]);
   });
 
@@ -181,10 +182,18 @@ describe("unlockRateLimitGate", () => {
   });
 
   test("handles snapshot endpoints with a top-level rate_limit", () => {
-    const snapshot = { rate_limit: { allowed: false, limit_reached: true, primary_window: { used_percent: 42 } } };
+    const snapshot = { rate_limit: { allowed: false, limit_reached: true, primary_window: { used_percent: 100 } } };
     expect(unlockRateLimitGate(snapshot)).toBe(true);
     expect(snapshot.rate_limit.allowed).toBe(true);
-    expect(snapshot.rate_limit.primary_window.used_percent).toBe(42);
+    expect(snapshot.rate_limit.primary_window.used_percent).toBe(100);
+  });
+
+  test("a gate closed without plain-quota evidence stays closed (no window at 100%, no plain reached type)", () => {
+    // The web snapshot spells the window `used_percent`; below 100% the payload does not show the
+    // subscription quota as the reason, so the flags stay as the server sent them.
+    const snapshot = { rate_limit: { allowed: false, limit_reached: true, primary_window: { used_percent: 42 } } };
+    expect(unlockRateLimitGate(snapshot)).toBe(false);
+    expect(snapshot.rate_limit).toEqual({ allowed: false, limit_reached: true, primary_window: { used_percent: 42 } });
   });
 
   test("drops a plain-quota rate_limit_reached_type, which the bundled app-server reads", () => {

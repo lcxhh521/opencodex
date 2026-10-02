@@ -119,8 +119,9 @@ describe("chatgpt unblock relay responses", () => {
 });
 
 describe("chatgpt unblock SSE rewriting", () => {
-  const locked = JSON.stringify({ usage: { rate_limit: { allowed: false, limit_reached: true } } });
-  const opened = JSON.stringify({ usage: { rate_limit: { allowed: true, limit_reached: false } } });
+  // A window at 100% is the plain-quota evidence the gate rewrite requires before it opens the flags.
+  const locked = JSON.stringify({ usage: { rate_limit: { allowed: false, limit_reached: true, primary_window: { used_percent: 100 } } } });
+  const opened = JSON.stringify({ usage: { rate_limit: { allowed: true, limit_reached: false, primary_window: { used_percent: 100 } } } });
 
   test("a data line split across chunks is rewritten once and every other byte survives", async () => {
     const frame = `event: snapshot\ndata: ${locked}\n\n: keep-alive\n\n`;
@@ -152,7 +153,7 @@ describe("chatgpt unblock SSE rewriting", () => {
 });
 
 describe("chatgpt unblock relay body cap", () => {
-  const closedUsage = (padding: string) => JSON.stringify({ padding, rate_limit: { allowed: false, limit_reached: true } });
+  const closedUsage = (padding: string) => JSON.stringify({ padding, rate_limit: { allowed: false, limit_reached: true, primary_window: { used_percent: 100 } } });
 
   test("a JSON body over the cap streams through unchanged, whatever content-length says", async () => {
     const body = closedUsage("x".repeat(MAX_REWRITE_BODY_BYTES + 1024));

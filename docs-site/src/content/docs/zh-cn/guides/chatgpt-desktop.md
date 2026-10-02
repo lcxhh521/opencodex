@@ -22,12 +22,7 @@ app 自己的凭据转发到真正的 `chatgpt.com`，WebSocket（例如语音�
 （百分比、重置时间、横幅）不会被修改，OpenAI 服务器仍会对其自身的请求执行所有限制。
 
 在某些版本上，发送按钮跟随的是 app 内置 Codex 服务器报告的账户状态，而这个服务器用自己的 HTTP 客户端
-获取这些信息，解析规则和 PAC 文件都管不到它。遇到这种情况，把 `chatgptDesktop.appServerShim` 设为
-`true`（与 `unblockSend` 一起），并用 `ocx chatgpt launch` 启动 app：app 会通过一个小的 stdio 中间层
-启动它的 Codex 服务器，中间层只放开额度回复里属于订阅用量额度的那部分。中间层不碰别的东西：不修改任
-何环境变量、地址或配置项，不影响服务器自己的子进程，也不依赖 opencodex 是否在运行。中间层启动不了时，
-启动脚本会直接运行原来的程序。不是普通额度锁的情况（工作区或点数额度、消费上限）都按服务器发来的原
-样传递。
+获取这些信息，解析规则和 PAC 文件都管不到它。这种情况由下文的实验性 app-server 中间层处理。
 
 ## 设置
 
@@ -107,14 +102,49 @@ PAC 却读取不到，或者大到无法传给 app（PAC 是放在一个启动�
 开启或关闭 `pacFallback` 后，请重启 opencodex、运行 `ocx chatgpt launch`；如果在用 watcher，还要重新运行
 `ocx chatgpt install-watcher`。
 
+## app-server 中间层（实验性）
+
+中间层过滤内置 Codex 服务器的 JSON-RPC 输出，只放开已知的普通额度锁。它不会增加账户额度，也不会让上
+游服务接受它拒绝的请求。它仅支持 macOS，默认关闭，有两种用法：
+
+- **单独使用。** 设置 `{ "chatgptDesktop": { "appServerShim": true } }`，然后运行
+  `ocx chatgpt launch`。opencodex 会在它的目录里写一个可执行的启动脚本，ChatGPT 在运行时先把它退出，
+  再用 `open -a <bundle> --env CODEX_CLI_PATH=<launcher>` 重新打开。app 是按 bundle 标识
+  `com.openai.codex` 找到的，所以装在 `~/Applications` 或其他磁盘上也能用，名字同样叫“ChatGPT”的其他
+  app 绝不会被退出或打开。app 会重启，请先保存手头的工作。不需要 opencodex 代理在运行。从 Dock 或
+  Spotlight 正常打开不会带上中间层。`ocx chatgpt restore` 会删除启动脚本，并不带该变量重新打开 app。
+- **和发送解锁一起用。** `unblockSend` 和 `appServerShim` 都开启时，opencodex 每次启动都会准备好启动
+  脚本，`ocx chatgpt launch` 和 watcher 都会通过它启动 app。如果下文的检查拒绝了这个 bundle，
+  opencodex 会打印警告，拦截照常工作，只是不带中间层。
+
+只处理 `account/rateLimits/updated` 通知，以及顶层结果里含有 `rateLimits`、`rateLimitsByLimitId` 或
+`ordinaryUsageAllowed` 的回复。普通额度的 `rate_limit_reached` 标记会被清除；锁的标志（`allowed`、
+`limit_reached` / `limitReached`、`ordinaryUsageAllowed`）只有在看到普通额度用尽的证据时才会放开：也
+就是这个标记，或者某个用到 100% 的窗口。回复里看不出原因的锁保持关闭，工作区、点数、未知原因和消费上
+限造成的限制也保持关闭。显示的用量保持原样，其他消息逐字节原样通过。标准输入、标准错误和原程序的退出
+码都和 app 直接相连。
+
+写启动脚本之前，opencodex 会检查 bundle 和其中的 app-server 程序：属于你本人或 root，组和其他用户不
+可写，并且能以 OpenAI 的团队 ID（`2DC432GLL2`）通过严格的代码签名校验。任何一项不满足都会被拒绝。启
+动脚本的权限是 `0755`，内嵌当前的 opencodex 程序路径，先写到临时文件再改名替换，所以该位置上的符号链
+接会被替换，而不会被顺着写过去。请把启动脚本、它所在的目录和 opencodex 的安装位置都放在自己的控制之
+下：改动这些路径，就等于改变了 app 运行的代码。
+
+不是 macOS、找不到 opencodex 的运行环境，或者过滤器自检失败时，启动脚本会直接运行原程序，输出不做任
+何改动。如果 app 更新后 app-server 程序本身被移动或删除，启动脚本会打印一条提示 `ocx chatgpt launch`
+和 `ocx chatgpt restore` 的信息后退出，在你运行其中一条之前，app 无法启动它的服务器。过滤器通过自检
+后如果在会话中途退出，服务器的输出管道会被关闭，之后 app 会怎样尚未验证。单行超过 8 MiB 的输出不解析，
+原样通过。中间层依赖 app 遵守 `CODEX_CLI_PATH` 以及当前的消息格式，这些都可能随更新变化。
+
 ## 查看状态
 
 ```bash
 ocx chatgpt status
 ```
 
-它会报告：功能是否开启、端口上的监听器是否属于 opencodex、证书是否受信任、watcher 状态、
-运行中的 app 是否带有路径，以及被有意保留的发送锁。
+它会报告：功能是否开启、端口上的监听器是否属于 opencodex、证书是否受信任、watcher 状态、运行中的 app
+是否带有路径，以及被有意保留的发送锁。开启 app-server 中间层后，它还会显示启动脚本是否存在，以及当前
+运行的 app 是否通过它启动。
 
 ## 关闭
 
@@ -123,9 +153,10 @@ ocx chatgpt uninstall-watcher
 ocx chatgpt restore
 ```
 
-`restore` 会以原生网络重新打开已接管的 app。之后把 `chatgptDesktop.unblockSend` 设为
-`false` 并重启 opencodex。该证书颁发机构与 opencodex 的 Claude 集成共用；只有两者都不使用时
-才移除它的信任。
+`restore` 会以原生网络重新打开已接管的 app。之后把 `chatgptDesktop.unblockSend` 设为 `false` 并重启
+opencodex。该证书颁发机构与 opencodex 的 Claude 集成共用；只有两者都不使用时才移除它的信任。
+`restore` 也会不带 app-server 中间层重新打开 app，并删除它的启动脚本；同时把 `appServerShim` 也设为
+`false`。
 
 ## 故障排查
 
@@ -135,6 +166,7 @@ ocx chatgpt restore
   `ocx chatgpt launch`），或者锁的原因不是用量额度，会列在 “send blocks kept” 下。
 - **路径正常但发送按钮仍是灰色：** 锁可能来自内置的 Codex 服务器，而不是路径覆盖的页面。开启
   `chatgptDesktop.appServerShim`，运行 `ocx chatgpt launch`，再查看 `ocx chatgpt status`
-  （“app-server shim” 这一行会显示当前 app 是否是通过它启动的）。
+  （“app-server shim” 这一行会显示当前 app 是否是通过它启动的）。如果 opencodex 启动时警告中间层没有
+  准备好，或者 `launch` 拒绝了它，提示里会写明 bundle 没通过哪一项检查。
 - **opencodex 停止后 app 什么都加载不出来：** 默认模式下，已接管的 app 依赖监听器。重新启动 opencodex，
   或运行 `ocx chatgpt restore`；开启 PAC 回退后，app 会自行回退。

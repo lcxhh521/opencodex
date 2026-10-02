@@ -29,14 +29,8 @@ requêtes.
 
 Sur certaines versions, le bouton d'envoi suit ce que le serveur Codex intégré à l'application
 rapporte sur votre compte, et ce serveur l'obtient avec son propre client HTTP, que ni la règle de
-résolution ni un fichier PAC n'atteignent. Dans ce cas, mettez `chatgptDesktop.appServerShim` à
-`true` (avec `unblockSend`) et lancez l'application avec `ocx chatgpt launch` : l'application démarre
-alors son serveur Codex à travers un petit shim stdio qui n'ouvre que la partie quota d'abonnement de
-la réponse sur les limites. Le shim ne touche à rien d'autre : aucune variable d'environnement,
-adresse ou clé de configuration n'est modifiée, les processus enfants du serveur restent intacts, et
-il ne dépend pas d'opencodex en cours d'exécution. S'il ne peut pas démarrer, le lanceur exécute
-directement le vrai binaire. Tout ce qui n'est pas un simple verrou de quota (limites d'espace de
-travail ou de crédits, plafonds de dépenses) est transmis tel que le serveur l'a envoyé.
+résolution ni un fichier PAC n'atteignent. Le shim app-server expérimental, décrit plus bas, couvre
+ce cas.
 
 ## Configuration
 
@@ -129,6 +123,53 @@ puis en direct, et opencodex affiche un avertissement.
 Après avoir activé ou désactivé `pacFallback`, redémarrez opencodex, lancez `ocx chatgpt launch`, et
 relancez `ocx chatgpt install-watcher` si vous utilisez le surveillant.
 
+## Shim app-server (expérimental)
+
+Le shim filtre la sortie JSON-RPC du serveur Codex intégré pour ouvrir les verrous connus de simple
+quota. Il n'augmente pas le quota d'un compte et ne fait pas accepter à un service amont une requête
+qu'il refuse. Il est réservé à macOS, désactivé par défaut, et s'utilise de deux façons :
+
+- **Seul.** Définissez `{ "chatgptDesktop": { "appServerShim": true } }` et lancez
+  `ocx chatgpt launch`. opencodex écrit un lanceur exécutable dans son répertoire, quitte ChatGPT
+  s'il tourne et le relance avec `open -a <bundle> --env CODEX_CLI_PATH=<lanceur>`. L'application est
+  trouvée par son identifiant de bundle, `com.openai.codex` : une installation dans `~/Applications`
+  ou sur un autre volume fonctionne, et une autre application portant le nom « ChatGPT » n'est jamais
+  quittée ni ouverte. Enregistrez votre travail d'abord : l'application redémarre. Aucun proxy
+  opencodex en cours d'exécution n'est nécessaire. Les lancements normaux depuis le Dock ou Spotlight
+  n'appliquent pas le shim. `ocx chatgpt restore` supprime le lanceur et relance sans la variable.
+- **Avec le déblocage de l'envoi.** Avec `unblockSend` et `appServerShim` activés, opencodex prépare
+  le lanceur à chaque démarrage, et `ocx chatgpt launch` ainsi que le watcher démarrent l'application
+  à travers lui. Si les vérifications ci-dessous refusent le bundle, opencodex affiche un
+  avertissement et l'interception continue sans le shim.
+
+Seules les notifications `account/rateLimits/updated` et les réponses dont le résultat de premier
+niveau contient `rateLimits`, `rateLimitsByLimitId` ou `ordinaryUsageAllowed` sont concernées. Les
+marqueurs `rate_limit_reached` de simple quota sont effacés ; les indicateurs (`allowed`,
+`limit_reached` / `limitReached`, `ordinaryUsageAllowed`) ne s'ouvrent qu'avec une preuve de simple
+quota : ce marqueur ou une fenêtre à 100 %. Un indicateur fermé pour une raison que la réponse ne
+montre pas reste fermé, et les restrictions d'espace de travail, de crédits, inconnues ou de plafond
+de dépenses gardent le verrou fermé. L'utilisation affichée reste telle que reçue, et tous les autres
+messages passent octet pour octet. L'entrée standard, la sortie d'erreur et le code de sortie du vrai
+binaire restent directement reliés à l'application.
+
+Avant d'écrire le lanceur, opencodex vérifie que le bundle et son binaire app-server appartiennent à
+vous ou à root, ne sont pas modifiables par le groupe ou les autres, et passent une vérification
+stricte de signature de code sous l'identifiant d'équipe d'OpenAI (`2DC432GLL2`). Un bundle qui
+échoue à l'une de ces vérifications est refusé. Le lanceur a le mode `0755`, intègre l'exécutable
+opencodex actuel, et est écrit dans un fichier temporaire puis renommé : un lien symbolique à cet
+emplacement est remplacé, jamais suivi. Gardez le lanceur, son répertoire et l'installation opencodex
+sous votre contrôle : modifier ces chemins change le code exécuté par l'application.
+
+Hors macOS, si l'environnement d'exécution d'opencodex manque ou si l'auto-test du filtre échoue, le
+lanceur exécute le binaire d'origine avec sa sortie intacte. Si une mise à jour de l'application
+déplace ou supprime le binaire app-server lui-même, le lanceur affiche un message citant
+`ocx chatgpt launch` et `ocx chatgpt restore` puis se termine, et l'application ne peut pas démarrer
+son serveur tant que vous n'avez pas lancé l'une de ces commandes. Un filtre qui réussit l'auto-test
+puis s'arrête en cours de session ferme le canal de sortie du serveur ; la suite n'a pas été
+vérifiée. Une ligne de sortie de plus de 8 Mio passe sans être analysée. Le shim dépend du respect de
+`CODEX_CLI_PATH` par l'application et de la forme actuelle des messages, que des mises à jour peuvent
+changer.
+
 ## Vérifier l'état
 
 ```bash
@@ -137,7 +178,8 @@ ocx chatgpt status
 
 La commande indique si la fonctionnalité est active, si l'écouteur du port est celui d'opencodex, si
 le certificat est de confiance, l'état du surveillant, si l'application en cours porte la route, et
-les verrous d'envoi conservés volontairement.
+les verrous d'envoi conservés volontairement. Avec le shim app-server activé, la commande indique
+aussi si son lanceur existe et si l'application en cours a été démarrée à travers lui.
 
 ## Désactiver
 
@@ -148,8 +190,9 @@ ocx chatgpt restore
 
 `restore` rouvre une application routée avec le réseau natif. Réglez ensuite
 `chatgptDesktop.unblockSend` sur `false` et redémarrez opencodex. L'autorité de certification est
-partagée avec les intégrations Claude d'opencodex ; ne retirez sa confiance que si vous n'utilisez
-ni l'une ni l'autre.
+partagée avec les intégrations Claude d'opencodex ; ne retirez sa confiance que si vous n'utilisez ni
+l'une ni l'autre. `restore` relance aussi sans le shim app-server et supprime son lanceur ; mettez
+également `appServerShim` à `false`.
 
 ## Dépannage
 
@@ -161,7 +204,9 @@ ni l'une ni l'autre.
 - **Le bouton d'envoi reste grisé alors que la route fonctionne :** le verrou vient peut-être du
   serveur Codex intégré plutôt que des pages couvertes par la route. Activez
   `chatgptDesktop.appServerShim`, lancez `ocx chatgpt launch` et consultez `ocx chatgpt status` (la
-  ligne « app-server shim » indique si l'application en cours a été démarrée à travers lui).
+  ligne « app-server shim » indique si l'application en cours a été démarrée à travers lui). Si
+  opencodex a averti au démarrage que le shim n'était pas préparé, ou si `launch` le refuse, le
+  message nomme la vérification que le bundle n'a pas passée.
 - **L'application ne charge plus rien après l'arrêt d'opencodex :** en mode par défaut, une
   application routée dépend de l'écouteur. Redémarrez opencodex ou lancez `ocx chatgpt restore`, ou
   activez le repli PAC pour que l'application se replie d'elle-même.

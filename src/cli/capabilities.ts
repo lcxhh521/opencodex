@@ -97,10 +97,10 @@ export const HEAD_CAPABILITIES: readonly HeadCapability[] = [
 export const CAPABILITIES: readonly Capability[] = [
   {
     command: ["chatgpt"],
-    summary: "Experimental ChatGPT app-server shim: launch, restore or status (macOS only).",
+    summary: "ChatGPT desktop send-unblock intercept and experimental app-server shim (macOS only).",
     routes: [], flags: [], mutates: true, json: "none",
-    bannerLines: ["ocx chatgpt <sub>          Experimental app-server shim: launch|restore|status (macOS)"],
-    details: ["Default off; launch requires chatgptDesktop.appServerShim: true. Restore removes the generated launcher."],
+    bannerLines: ["ocx chatgpt <sub>           ChatGPT desktop send-unblock and app-server shim (status|install-watcher|uninstall-watcher|launch|restore)"],
+    details: ["Default off; launch needs chatgptDesktop.unblockSend and/or appServerShim. Restore removes the generated shim launcher."],
   },
   {
     command: ["link", "port"],

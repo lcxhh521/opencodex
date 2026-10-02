@@ -163,6 +163,8 @@ function run(mode: "watch" | "launch" | "native", options: {
   entry?: "up" | "up56" | "down";
   pac?: boolean;
   shim?: boolean;
+  /** With the shim on, whether its launcher exists (opencodex writes it once the bundle checks pass). */
+  launcher?: boolean;
   entryPort?: number;
   /** What `ps -o etime=` reports for the app; unset makes the age unreadable. */
   appEtime?: string;
@@ -173,6 +175,9 @@ function run(mode: "watch" | "launch" | "native", options: {
   const entryPort = options.entryPort ?? 10301;
   const PAC_ARG = PAC_SWITCH;
   if (pacMode) writeFileSync(join(options.configDir ?? dir, "chatgpt-unblock.pac"), PAC_TEXT);
+  if (options.shim === true && options.launcher !== false) {
+    writeFileSync(join(options.configDir ?? dir, "chatgpt-codex-shim.sh"), "#!/bin/bash\n", { mode: 0o755 });
+  }
   const processes = [
     options.app === "plain" ? `400|ChatGPT|${APP_BINARY}` : null,
     options.app === "flagged" ? `400|ChatGPT|${APP_BINARY} ${RESOLVER} --proxy-bypass-list=chatgpt.com` : null,
@@ -539,6 +544,18 @@ describe("chatgpt launch with the app-server shim", () => {
   test("an app that already carries the switch and the shim is left alone", () => {
     const r = run("watch", { app: "flagged-shim", shim: true });
     expect(r.status).toBe(0);
+    expect(r.calls).toEqual([]);
+  });
+
+  test("with the shim on but no launcher (the bundle checks refused it), launch does not point the app at it", () => {
+    const r = run("launch", { app: "none", scutil: SCUTIL_NO_PROXY, shim: true, launcher: false });
+    expect(r.status).toBe(0);
+    expect(r.openArgs).toEqual([RESOLVER]);
+    expect(r.openEnv).toEqual([]);
+  });
+
+  test("with the shim on but no launcher, watch does not restart a switched app for lacking it", () => {
+    const r = run("watch", { app: "flagged", shim: true, launcher: false });
     expect(r.calls).toEqual([]);
   });
 

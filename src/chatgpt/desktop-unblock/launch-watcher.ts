@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { getConfigDir } from "../../config/paths";
 import { CHATGPT_INTERCEPT_HOST, CHATGPT_UNBLOCK_IDENTITY_PATH, CHATGPT_UNBLOCK_SERVICE_ID } from "./listener";
 import type { PreservedSendBlock } from "./rewrite";
-import { CHATGPT_UNBLOCK_PAC_ARG_PREFIX, chatgptUnblockReadyPath, chatgptUnblockShimPath, chatgptUnblockPacArg, chatgptUnblockPacPath, chatgptUnblockResolverArg } from "./runtime";
+import { CHATGPT_UNBLOCK_PAC_ARG_PREFIX, chatgptUnblockReadyPath, chatgptUnblockPacArg, chatgptUnblockPacPath, chatgptUnblockResolverArg } from "./runtime";
+import { chatgptShimLauncherPath } from "../app-server-shim/launcher";
 
 /**
  * Launch integration for the ChatGPT desktop send-unblock intercept.
@@ -130,7 +131,7 @@ PAC_FILE=${shellQuote(pacFile)}
 PAC_PREFIX=${shellQuote(CHATGPT_UNBLOCK_PAC_ARG_PREFIX)}
 PAC_MODE=${pacMode ? "1" : "0"}
 SHIM_MODE=${shimMode ? "1" : "0"}
-SHIM_SCRIPT=${shellQuote(chatgptUnblockShimPath(configDir ?? getConfigDir()))}
+SHIM_SCRIPT=${shellQuote(chatgptShimLauncherPath(configDir ?? getConfigDir()))}
 BYPASS_HOST=${shellQuote(CHATGPT_INTERCEPT_HOST)}
 APP_PATTERN='ChatGPT.app/Contents/MacOS/ChatGPT'
 IDENTITY_URL=${shellQuote(`https://127.0.0.1:${port}${CHATGPT_UNBLOCK_IDENTITY_PATH}`)}
@@ -146,6 +147,12 @@ say() { [ "$MODE" != watch ] && echo "$*"; log "$*"; }
 # shows for the app's own process as soon as it exists (a child process would only appear later).
 app_has_shim() {
   ps eww -o command= -p "$1" 2>/dev/null | grep -qF "CODEX_CLI_PATH=$SHIM_SCRIPT"
+}
+
+# The shim is wanted only while its launcher exists: opencodex writes it after the bundle passes the
+# OpenAI signature check. Pointing the app at a missing launcher would leave it without an app-server.
+shim_wanted() {
+  [ "$SHIM_MODE" = 1 ] && [ -x "$SHIM_SCRIPT" ]
 }
 # The app's main process: found by exact process name, then confirmed by path. Matching the
 # whole command line instead would also match any shell whose command mentions the rule.
@@ -194,7 +201,7 @@ app_flagged() {
   fi
   [ "$switched" = 0 ] || return 1
   # With the shim on, an app started without it is corrected like one started without the switches.
-  if [ "$SHIM_MODE" = 1 ]; then app_has_shim "$pid" || return 1; fi
+  if shim_wanted; then app_has_shim "$pid" || return 1; fi
   return 0
 }
 # Either launch switch, whatever the configured mode: restore must also undo the switch an app
@@ -316,7 +323,7 @@ while IFS= read -r arg; do
   [ -n "$arg" ] && ARGS+=("$arg")
 done < <(proxy_args)
 OPEN_ENV=()
-if [ "$SHIM_MODE" = 1 ]; then OPEN_ENV=(--env "CODEX_CLI_PATH=$SHIM_SCRIPT"); fi
+if shim_wanted; then OPEN_ENV=(--env "CODEX_CLI_PATH=$SHIM_SCRIPT"); fi
 open -a ChatGPT \${OPEN_ENV[@]+"\${OPEN_ENV[@]}"} --args "\${ARGS[@]}"
 say "launched ChatGPT with: \${ARGS[*]}"
 `;
@@ -516,7 +523,7 @@ export function chatgptAppCommandLine(): string | null {
 export function chatgptAppHasShim(configDir: string): boolean {
   const pids = sh("pgrep", ["-a", "-x", "ChatGPT"]);
   if (!pids.ok) return false;
-  const marker = `CODEX_CLI_PATH=${chatgptUnblockShimPath(configDir)}`;
+  const marker = `CODEX_CLI_PATH=${chatgptShimLauncherPath(configDir)}`;
   for (const pid of pids.output.split(/\s+/).filter(Boolean)) {
     const command = sh("ps", ["eww", "-o", "command=", "-p", pid]);
     if (command.ok && command.output.includes("ChatGPT.app/Contents/MacOS/ChatGPT")) return command.output.includes(marker);

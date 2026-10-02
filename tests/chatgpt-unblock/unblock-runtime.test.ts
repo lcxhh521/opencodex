@@ -13,7 +13,6 @@ import {
   chatgptUnblockPacArgFor,
   chooseChatgptUnblockPac,
   chatgptUnblockReadyPath,
-  chatgptUnblockShimPath,
   startChatgptUnblock,
 } from "../../src/chatgpt/desktop-unblock/runtime";
 import { CHATGPT_INTERCEPT_HOST } from "../../src/chatgpt/desktop-unblock/listener";
@@ -182,12 +181,52 @@ describe("chatgpt unblock PAC-mode startup", () => {
     expect(await accepts(origin + 1)).toBe(false);
   });
 
-  test("an app-server launcher write failure releases the listeners", async () => {
+  test("a shim the bundle checks refuse costs only the shim: the listeners stay up and the reason is reported", async () => {
     const origin = freePortPair();
-    // A directory where the launcher goes makes the write fail after the listeners bound.
-    mkdirSync(chatgptUnblockShimPath(dir));
-    await expect(startChatgptUnblock({ config: config({ pacFallback: true, appServerShim: true, port: origin }), publicPort: 0, configDir: dir })).rejects.toThrow();
-    expect(await accepts(origin)).toBe(false);
-    expect(await accepts(origin + 1)).toBe(false);
+    const prepared: string[] = [];
+    const handle = await startChatgptUnblock({
+      config: config({ pacFallback: true, appServerShim: true, port: origin }), publicPort: 0, configDir: dir,
+      prepareShimLauncher: configDir => {
+        prepared.push(configDir);
+        return { ok: false, reason: "the bundle is not signed by OpenAI (team 2DC432GLL2)", install: null };
+      },
+    });
+    try {
+      expect(prepared).toEqual([dir]);
+      expect(handle?.shimProblem).toContain("not signed by OpenAI");
+      expect(await accepts(origin)).toBe(true);
+      expect(await accepts(origin + 1)).toBe(true);
+    } finally {
+      await handle?.stop();
+    }
+  });
+
+  test("a launcher preparation that throws is reported the same way, without failing the intercept", async () => {
+    const origin = freePortPair();
+    const handle = await startChatgptUnblock({
+      config: config({ appServerShim: true, port: origin }), publicPort: 0, configDir: dir,
+      prepareShimLauncher: () => { throw new Error("EACCES: launcher not writable"); },
+    });
+    try {
+      expect(handle?.shimProblem).toContain("EACCES");
+      expect(await accepts(origin)).toBe(true);
+    } finally {
+      await handle?.stop();
+    }
+  });
+
+  test("with the shim off, nothing is prepared", async () => {
+    const origin = freePortPair();
+    let calls = 0;
+    const handle = await startChatgptUnblock({
+      config: config({ port: origin }), publicPort: 0, configDir: dir,
+      prepareShimLauncher: () => { calls += 1; return { ok: false, reason: "unused", install: null }; },
+    });
+    try {
+      expect(calls).toBe(0);
+      expect(handle?.shimProblem).toBeUndefined();
+    } finally {
+      await handle?.stop();
+    }
   });
 });

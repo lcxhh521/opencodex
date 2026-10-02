@@ -37,6 +37,9 @@ export function createChatgptUnblockLifecycle<T>(): ChatgptUnblockLifecycle {
               console.warn("⚠ The system PAC is too large to pass to the app inline; the generated PAC routes other hosts through the system proxy chain, then DIRECT, instead of the system PAC.");
             }
           }
+          if (handle.shimProblem) {
+            console.warn(`⚠ The experimental app-server shim was not prepared (${handle.shimProblem}); the intercept runs without it.`);
+          }
           console.log("   Launch the ChatGPT app with: ocx chatgpt launch   (or `ocx chatgpt install-watcher` for Dock launches)");
         }
         return handle;
