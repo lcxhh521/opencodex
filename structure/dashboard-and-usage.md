@@ -283,7 +283,7 @@ whole rows byte for byte through the shared atomic writer, refuses the rename un
 the exact revision that was copied, and then discards the Logs ring, the retained aggregates and the
 request-history index so no surface serves rows the ledger no longer has.
 `src/usage/summary.ts` turns that file into the `/api/usage` shape — totals, daily zero-filled
-grid, model and provider breakdowns, and `measured / reported / unreported / unsupported / estimated` counts.
+grid, model and provider breakdowns, and `measured / reported / unreported / unsupported / estimated` counts. Each scope also aggregates end-to-end output throughput (#6309): measured output tokens and wall-clock `durationMs` are summed over attempts reporting both, exposing `throughputTokensPerSec` — a token-sum-over-duration-sum, never a mean of per-request rates.
 The management route scans the ledger from its beginning in fixed 1 MiB chunks on a
 cold rebuild, then retains compact numeric aggregate state and resumes at the last verified LF for
 ordinary appends. It does not retain the full input or a normalized object for every request, and

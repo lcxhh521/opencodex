@@ -1807,6 +1807,7 @@
     "usage-shape-extraction.test.ts": "usage",
     "usage-spend-cache-provenance.test.ts": "usage",
     "usage-summary.test.ts": "usage",
+    "usage-throughput.test.ts": "usage",
     "usage-surfaces.test.ts": "usage",
     "usage-time-range.test.ts": "usage",
     "usage-timeline.test.ts": "usage",

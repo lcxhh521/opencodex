@@ -69,6 +69,8 @@ interface UsageModel {
   totalTokens: number;
   inputTokens: number;
   outputTokens: number;
+  throughputTokensPerSec?: number;
+  throughputSamples?: number;
   cachedInputTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
@@ -91,6 +93,8 @@ interface UsageProvider {
   reportedRequests: number;
   estimatedRequests: number;
   totalTokens: number;
+  throughputTokensPerSec?: number;
+  throughputSamples?: number;
   /** API list-price estimate for the priced portion of this row. */
   estimatedCostUsd?: number;
   /** Requests included in the API list-price estimate. */
@@ -203,6 +207,10 @@ function cacheHitRateTitle(model: UsageModel, locale: Locale, t: TFn): string | 
     measured: formatTokens(observed, locale),
     total: formatTokens(model.inputTokens, locale),
   });
+}
+
+function throughputTitle(samples: number | undefined, t: TFn): string {
+  return t("usage.throughput.title", { samples: samples ?? 0 });
 }
 
 // Stable per-model bar color: hash the provider/model id to a hue so the same model keeps its color
@@ -769,6 +777,7 @@ function UsageModelsTable({
             <th className="num">{t("usage.col.measured")}</th>
             <th className="num">{t("usage.col.inputTokens")}</th>
             <th className="num">{t("usage.col.outputTokens")}</th>
+            <th className="num">{t("usage.col.tokPerSec")}</th>
             <th className="num">{t("usage.col.cacheHits")}</th>
             <th className="num">{t("usage.col.cacheWrites")}</th>
             <th className="num">{t("usage.col.cacheHitRate")}</th>
@@ -778,6 +787,7 @@ function UsageModelsTable({
           {models.map(model => {
             const providerName = formatProviderDisplayName(model.provider, t);
             const cacheCoverage = cacheHitRateTitle(model, locale, t);
+            const throughputNote = throughputTitle(model.throughputSamples, t);
             return (
               <tr key={`${model.provider}/${model.model}`}>
                 {/* Both pinned columns are width-capped, so carry the full value in a tooltip. */}
@@ -790,6 +800,12 @@ function UsageModelsTable({
                 <td className="num">{model.measuredRequests}</td>
                 <td className="num mono">{formatTokens(model.inputTokens, locale)}</td>
                 <td className="num mono">{formatTokens(model.outputTokens, locale)}</td>
+                <td className="num mono" title={throughputNote}>
+                  <span className="usage-hit-rate">
+                    {typeof model.throughputTokensPerSec === "number" ? `${model.throughputTokensPerSec.toFixed(1)} tok/s` : unavailable}
+                  </span>
+                  {typeof model.throughputTokensPerSec === "number" && <span className="sr-only">{throughputNote}</span>}
+                </td>
                 <td className="num mono">{formatOptionalTokens(model.cacheReadInputTokens ?? model.cachedInputTokens, locale, unavailable)}</td>
                 <td className="num mono">{formatOptionalTokens(model.cacheCreationInputTokens, locale, unavailable)}</td>
                 {/*
@@ -856,6 +872,7 @@ function UsageProvidersTable({
             <th className="num">{t("usage.col.requests")}</th>
             <th className="num">{t("usage.col.measured")}</th>
             <th className="num">{t("usage.col.tokens")}</th>
+            <th className="num">{t("usage.col.tokPerSec")}</th>
             <th className="num" aria-describedby={listPriceDisclaimerId}>{t("usage.col.apiListPrice")}</th>
             <th>{t("usage.col.share")}</th>
           </tr>
@@ -867,6 +884,12 @@ function UsageProvidersTable({
               <td className="num">{provider.requests}</td>
               <td className="num">{provider.measuredRequests}</td>
               <td className="num mono">{formatTokens(provider.totalTokens, locale)}</td>
+              <td className="num mono" title={throughputTitle(provider.throughputSamples, t)}>
+                <span className="usage-hit-rate">
+                  {typeof provider.throughputTokensPerSec === "number" ? `${provider.throughputTokensPerSec.toFixed(1)} tok/s` : unavailable}
+                </span>
+                {typeof provider.throughputTokensPerSec === "number" && <span className="sr-only">{throughputTitle(provider.throughputSamples, t)}</span>}
+              </td>
               <td className="num"><UsageListPrice row={provider} locale={locale} t={t} /></td>
               <td><div className="usage-bar"><div className="usage-bar-fill" style={{ width: `${Math.round(provider.shareRatio * 100)}%` }} /></div></td>
             </tr>
