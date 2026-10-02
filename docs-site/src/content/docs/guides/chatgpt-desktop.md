@@ -162,8 +162,10 @@ ocx chatgpt restore
 ```
 
 Installation without `--yes` asks in an interactive terminal. The launchd agent
-watches the app's Electron `SingletonLock` and restarts an app launched without
-intercept switches while the listener answers as OpenCodex. This can interrupt
+watches the app's Electron `SingletonLock` and the `chatgpt-unblock.ready` marker. In watch
+mode, it restarts an app launched without intercept switches only while the listener answers as
+OpenCodex and the app is no more than five minutes old; a missing or unparseable process age
+counts as fresh, and explicit `ocx chatgpt launch` is not age-limited. This can interrupt
 startup work; it does nothing while the listener is unavailable. It manages
 **intercept launches only**; use explicit launch for the app-server shim. A loaded
 watcher must be uninstalled before `restore`, so it cannot put the switches back.

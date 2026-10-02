@@ -1,8 +1,9 @@
 # ChatGPT Desktop integrations
 
 The experimental macOS integration is owned by `src/chatgpt/` and exposed through
-`src/cli/chatgpt-command.ts`. It is default off and requires
-`chatgptDesktop.appServerShim === true` for an explicit launch. The strict config leaf accepts optional boolean `appServerShim` and `unblockSend`
+`src/cli/chatgpt-command.ts`. It is default off; an explicit launch requires
+`chatgptDesktop.appServerShim === true` or `chatgptDesktop.unblockSend === true`, and only the
+shim launcher requires `appServerShim`. The strict config leaf accepts optional boolean `appServerShim` and `unblockSend`
 flags and an optional integer `port` in 1..65535; malformed reads disable the leaf, while live
 writes reject malformed values and unknown fields.
 
