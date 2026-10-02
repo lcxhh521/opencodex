@@ -60,7 +60,7 @@ export async function handleChatgptCommand(args: string[], platform: NodeJS.Plat
   if (platform !== "darwin") {
     // lsof/pgrep/launchd do not exist elsewhere; answering "not running" would be a false report.
     console.error("The ChatGPT desktop send-unblock integration is only supported on macOS.");
-    return sub === "status" ? 0 : 1;
+    return 1;
   }
 
   // uninstall-watcher must work even when the port cannot be resolved: the operator may need
