@@ -2,6 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import * as abortModule from "../../src/lib/abort";
 import { parseRequest } from "../../src/responses/parser";
 import { planWebSearch, shouldResolveOpenAiWebSearchSidecar, webSearchStallTimeoutSec } from "../../src/web-search";
+import { buildWebSearchTool } from "../../src/web-search/synthetic-tool";
 import { runWithWebSearch as runWithWebSearchProduction, type WebSearchLoopDeps } from "../../src/web-search/loop";
 import { runWebSearch as runOpenAiWebSearch } from "../../src/web-search/executor";
 import { createOpenAIChatAdapter } from "../../src/adapters/openai-chat";
@@ -159,9 +160,14 @@ describe("issue #1001 — forced-answer passes must produce usable output", () =
       };
     }
 
-    async function drivePasses(passes: AdapterEvent[][], seen: OcxParsedRequest[] = [], ordinaryTool = false, liveOutput = false) {
+    async function drivePasses(passes: AdapterEvent[][], seen: OcxParsedRequest[] = [], ordinaryTool = false, liveOutput = false, syntheticWebSearch = false) {
+      // Production injects the synthetic web_search tool before the loop
+      // (sidecar-execution.ts); the flag reproduces that here for tests that
+      // assert on the loop's own tool handling.
+      const parsed = parseRequest({ model: "routed/model", input: "hi", stream: true, tools: [{ type: "web_search" }, ...(ordinaryTool ? [{ type: "function", name: "fixture", parameters: { type: "object", properties: {} } }] : [])] });
+      if (syntheticWebSearch) parsed.context.tools = [...(parsed.context.tools ?? []), buildWebSearchTool()];
       const response = await runWithWebSearch({
-        parsed: parseRequest({ model: "routed/model", input: "hi", stream: true, tools: [{ type: "web_search" }, ...(ordinaryTool ? [{ type: "function", name: "fixture", parameters: { type: "object", properties: {} } }] : [])] }),
+        parsed,
         adapter: sequenceAdapter(passes, seen),
         forwardProvider,
         hostedTool: { type: "web_search" },
@@ -229,6 +235,16 @@ describe("issue #1001 — forced-answer passes must produce usable output", () =
       expect(seen[1]!.context.tools.length).toBeGreaterThan(0);
       expect(seen[2]!.context.tools).toEqual([]);
       expect(seen[2]!.options.toolChoice).toBe("none");
+    });
+
+    // #6464: keeping web_search declared on the forced pass lets a budget-exhausted model that
+    // calls it once more be served the limit-reached result instead of emitting the raw call as
+    // visible text (some servers reject calls for undeclared tools). The declaration must survive.
+    test("the forced pass keeps the web_search declaration", async () => {
+      const seen: OcxParsedRequest[] = [];
+      await drivePasses([webSearchFirstPass, [{ type: "text_delta", text: "answer" }, { type: "done" }]], seen, false, false, true);
+      expect(seen).toHaveLength(2);
+      expect(seen[1]!.context.tools.some(tool => tool.webSearch)).toBe(true);
     });
 
     for (const liveOutput of [false, true]) {

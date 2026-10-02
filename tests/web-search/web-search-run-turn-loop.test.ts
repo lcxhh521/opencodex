@@ -223,6 +223,25 @@ describe("runTurn search recovery", () => {
     expect(attempts[1].context.messages.some(m => m.role === "toolResult")).toBe(true);
   });
 
+  // #6464: a budget-exhausted model that calls web_search once more is served the limit-reached
+  // result and loops to a real answer, instead of the turn failing after stripping the tool
+  // (which makes some models emit the raw call as visible text).
+  test("a forced pass with one more web_search call gets the limit-reached result and loops", async () => {
+    const attempts: OcxParsedRequest[] = [];
+    const out = await collect(runTurnWebSearchLoop(stream([...search, done]), {
+      parsed, plan: { ...plan, maxSearches: 1 },
+      dispatch: request => {
+        attempts.push(request);
+        return attempts.length === 1
+          ? stream([...search, done])
+          : stream(answer);
+      },
+    }));
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1].context.tools?.some(t => t.webSearch)).toBe(true);
+    expect(out.at(-2)).toEqual(answer[0]);
+  });
+
   test("real tools pass through without model redispatch", async () => {
     const events: AdapterEvent[] = [{ type: "tool_call_start", id: "r", name: "shell" },
       { type: "tool_call_delta", arguments: "{}" }, { type: "tool_call_end" }, done];
