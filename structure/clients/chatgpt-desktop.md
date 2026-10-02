@@ -27,7 +27,8 @@ The pure gate rewrite changes known plain-quota fields only in eligible JSON-RPC
 rate-limit notifications and top-level rate-limit results. Workspace, credit,
 unknown reached-type and spend-control restrictions preserve closed gate flags.
 Both the rate-limit flags and `ordinaryUsageAllowed` open only where the subtree shows
-plain-quota evidence: a cleared plain reached type or a usage window at 100%.
+plain-quota evidence: a cleared plain reached type or a usage window at 100% (`usedPercent` in the
+RPC, `used_percent` in the web usage snapshot; every gate field is read in both spellings).
 Usage percentages, resets and window durations remain accurate. Unrelated messages
 and malformed lines remain byte-identical; changed lines are reserialized.
 A per-line rewrite exception preserves that line. A failure in the framing/rewrite
