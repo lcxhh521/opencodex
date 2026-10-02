@@ -7,6 +7,7 @@ import {
   buildChatgptUnblockWatcherPlist,
   buildChatgptUnblockWatcherScript,
   chatgptCommandLineHasRule,
+  checkChatgptWatcherScriptSyntax,
 } from "../../src/chatgpt/desktop-unblock/launch-watcher";
 
 const PORT = 10300;
@@ -54,7 +55,9 @@ const SCUTIL_PAC = `<dictionary> {
   SOCKSEnable : 0
 }`;
 
-type AppState = "none" | "plain" | "flagged";
+const SHIM_PATH = () => `${dir}/chatgpt-codex-shim.sh`;
+
+type AppState = "none" | "plain" | "flagged" | "flagged-shim" | "shim-only";
 
 const APP_BINARY = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT";
 // A shell whose command line mentions the rule, e.g. someone grepping for it. Matching on
@@ -74,14 +77,22 @@ function stub(name: string, body: string): void {
 beforeAll(() => {
   stubs = mkdtempSync(join(tmpdir(), "ocx-chatgpt-launch-bin-"));
   // A process table of "pid|name|command" lines; pgrep and ps answer from it like the real ones.
-  stub("pgrep", `[ "$1" = -a ] && shift
-[ "$1" = -x ] || { echo "stub pgrep only supports -x" >&2; exit 2; }
+  // Like the real one, it skips the caller's ancestors (STUB_ANCESTORS) unless -a is given.
+  stub("pgrep", `[ "$1" = -a ] && { ancestors=1; shift; } || ancestors=0
+[ "$1" = -x ] && { exact=1; shift; } || exact=0
+[ $# -eq 1 ] || { echo "stub pgrep needs exactly one name" >&2; exit 2; }
 found=1
 while IFS='|' read -r pid name command; do
-  [ "$name" = "$2" ] && { echo "$pid"; found=0; }
+  if [ "$name" = "$1" ]; then
+    if [ $exact = 1 ] || [ "$command" = "$1" ] || [ "\${command##*/ }" = "$1" ]; then
+      if [ $ancestors = 0 ]; then case " $STUB_ANCESTORS " in *" $pid "*) continue ;; esac; fi
+      echo "$pid"; found=0
+    fi
+  fi
 done < "$STUB_DIR/processes"
 exit $found`);
   stub("ps", `pid="\${@: -1}"
+case "$*" in *etime=*) [ -n "$STUB_APP_ETIME" ] && { echo "$STUB_APP_ETIME"; exit 0; }; exit 1 ;; esac
 while IFS='|' read -r p name command; do
   [ "$p" = "$pid" ] && { echo "$command"; exit 0; }
 done < "$STUB_DIR/processes"
@@ -135,19 +146,31 @@ function run(mode: "watch" | "launch" | "native", options: {
   quitIgnored?: boolean;
   decoy?: boolean;
   configDir?: string;
-  openArgs?: string[];
+  /** Start the app through the app-server shim; a launcher file is written when on. */
+  shim?: boolean;
+  /** With the shim on, whether its launcher exists (opencodex writes it once the bundle checks pass). */
+  launcher?: boolean;
+  /** What `ps -o etime=` reports for the app; unset makes the age unreadable. */
+  appEtime?: string;
+  /** The app is an ancestor of the caller, as for `ocx` run in a terminal inside the app. */
+  appIsAncestor?: boolean;
 }) {
   const processes = [
     options.app === "plain" ? `400|ChatGPT|${APP_BINARY}` : null,
     options.app === "flagged" ? `400|ChatGPT|${APP_BINARY} ${RESOLVER} --proxy-bypass-list=chatgpt.com` : null,
+    options.app === "flagged-shim" ? `400|ChatGPT|${APP_BINARY} ${RESOLVER} --proxy-bypass-list=chatgpt.com CODEX_CLI_PATH=${SHIM_PATH()}` : null,
+    options.app === "shim-only" ? `400|ChatGPT|${APP_BINARY} CODEX_CLI_PATH=${SHIM_PATH()}` : null,
     // Helpers share the bundle but not the process name; they must never count as the app.
     options.app !== "none" ? `401|ChatGPT Helper|/Applications/ChatGPT.app/Contents/Frameworks/ChatGPT Helper.app/Contents/MacOS/ChatGPT Helper --type=utility ${RESOLVER}` : null,
     options.decoy ? `300|zsh|${DECOY}` : null,
   ].filter(Boolean);
   writeFileSync(join(dir, "processes"), processes.map(line => `${line}\n`).join(""));
   writeFileSync(join(dir, "scutil.txt"), options.scutil ?? SCUTIL_NO_PROXY);
+  if (options.shim === true && options.launcher !== false) {
+    writeFileSync(join(options.configDir ?? dir, "chatgpt-codex-shim.sh"), "#!/bin/bash\n", { mode: 0o755 });
+  }
   const script = join(dir, "launch.sh");
-  writeFileSync(script, buildChatgptUnblockWatcherScript(PORT, options.configDir ?? dir, options.openArgs));
+  writeFileSync(script, buildChatgptUnblockWatcherScript(PORT, options.configDir ?? dir, options.shim === true));
   const result = spawnSync("/bin/bash", [script, mode], {
     encoding: "utf8",
     env: {
@@ -156,6 +179,8 @@ function run(mode: "watch" | "launch" | "native", options: {
       STUB_DIR: dir,
       STUB_LISTENER: options.listener ?? "ours",
       STUB_QUIT_IGNORED: options.quitIgnored ? "1" : "0",
+      STUB_APP_ETIME: options.appEtime ?? "",
+      STUB_ANCESTORS: options.appIsAncestor ? "400" : "",
     },
   });
   const read = (name: string) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : "");
@@ -315,6 +340,12 @@ describe.skipIf(process.platform === "win32")("chatgpt launch helpers", () => {
     expect(plist).toContain("<string>/x/launch.sh</string>\n    <string>watch</string>");
   });
 
+  test("the agent wakes on every watched path: the app's lock and the readiness marker", () => {
+    const plist = buildChatgptUnblockWatcherPlist("/x/launch.sh", ["/x/SingletonLock", "/x/chatgpt-unblock.ready"], "/x/err");
+    expect(plist).toContain("<string>/x/SingletonLock</string>");
+    expect(plist).toContain("<string>/x/chatgpt-unblock.ready</string>");
+  });
+
   test("plist paths are XML-escaped", () => {
     const plist = buildChatgptUnblockWatcherPlist("/a&b/<launch>.sh", "/x/SingletonLock", "/x/\"err\"");
     expect(plist).toContain("<string>/a&amp;b/&lt;launch&gt;.sh</string>");
@@ -332,11 +363,104 @@ describe.skipIf(process.platform === "win32")("chatgpt launch helpers", () => {
 });
 
 
-test.skipIf(process.platform === "win32")("explicit open arguments force a fresh process and preserve shell quoting", () => {
-  const value = "EXPERIMENTAL_LAUNCH_PATH=/cfg/quoted' & path";
-  const result = run("launch", { app: "flagged", openArgs: ["--env", value] });
+describe.skipIf(process.platform === "win32")("chatgpt launch with the app-server shim", () => {
+  test("launch starts the app with CODEX_CLI_PATH pointing at the launcher, next to the usual switch", () => {
+    const r = run("launch", { app: "none", scutil: SCUTIL_NO_PROXY, shim: true });
+    expect(r.status).toBe(0);
+    expect(r.openArgs).toEqual([RESOLVER]);
+    expect(r.openEnv).toEqual([`CODEX_CLI_PATH=${SHIM_PATH()}`]);
+  });
+
+  test("without the shim the app gets no extra environment", () => {
+    const r = run("launch", { app: "none", scutil: SCUTIL_NO_PROXY });
+    expect(r.openEnv).toEqual([]);
+  });
+
+  test("watch corrects an app that has the switch but was started without the shim", () => {
+    const r = run("watch", { app: "flagged", shim: true });
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.openEnv).toEqual([`CODEX_CLI_PATH=${SHIM_PATH()}`]);
+  });
+
+  test("an app that already carries the switch and the shim is left alone", () => {
+    const r = run("watch", { app: "flagged-shim", shim: true });
+    expect(r.status).toBe(0);
+    expect(r.calls).toEqual([]);
+  });
+
+  test("with the shim off, an app that has the switch is not restarted for lacking it", () => {
+    const r = run("watch", { app: "flagged" });
+    expect(r.calls).toEqual([]);
+  });
+
+  test("restore hands back an app that only carries the shim, even after the shim was switched off", () => {
+    const r = run("native", { app: "shim-only" });
+    expect(r.status).toBe(0);
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.openEnv).toEqual([]);
+  });
+});
+
+describe.skipIf(process.platform === "win32")("the watcher's five-minute guard and readiness wake", () => {
+  test("watch restarts an app that started within the last five minutes", () => {
+    const r = run("watch", { app: "plain", appEtime: "04:59" });
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.openArgs).toEqual([RESOLVER]);
+  });
+
+  test("watch leaves an app the user has been working in, whatever the elapsed-time format", () => {
+    for (const appEtime of ["05:01", "02:03:04", "1-02:03:04"]) {
+      const r = run("watch", { app: "plain", appEtime });
+      expect(r.status).toBe(0);
+      expect(r.calls).toEqual([]);
+      expect(r.log).toContain("without the launch switches; leaving it");
+    }
+  });
+
+  test("a missing age counts as a fresh launch", () => {
+    expect(run("watch", { app: "plain" }).calls).toEqual(["quit", "open"]);
+  });
+
+  test("an unparseable age counts as a fresh launch", () => {
+    expect(run("watch", { app: "plain", appEtime: "garbage" }).calls).toEqual(["quit", "open"]);
+  });
+
+  test("the explicit launch command restarts an old app too", () => {
+    const r = run("launch", { app: "plain", appEtime: "1-00:00:00" });
+    expect(r.calls).toEqual(["quit", "open"]);
+  });
+
+  test("launch sees the app that is its own ancestor and leaves a correctly launched one alone", () => {
+    const r = run("launch", { app: "flagged", appIsAncestor: true });
+    expect(r.status).toBe(0);
+    expect(r.calls).toEqual([]);
+    expect(r.stdout).toContain("already running with the launch switches");
+  });
+
+  test("restore finds the ancestor app and hands it back native", () => {
+    const r = run("native", { app: "flagged", appIsAncestor: true });
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.openArgs).toEqual([]);
+  });
+
+  test("every mode combination parses as bash", () => {
+    const configDirs = [dir, join(dir, "it's \"quoted\" $dir")];
+    for (const configDir of configDirs) {
+      mkdirSync(configDir, { recursive: true });
+      for (const shim of [false, true]) {
+        const script = join(dir, `syntax-${shim}.sh`);
+        writeFileSync(script, buildChatgptUnblockWatcherScript(PORT, configDir, shim));
+        const check = checkChatgptWatcherScriptSyntax(script);
+        expect({ shim, configDir, ok: check.ok, output: check.output }).toEqual({ shim, configDir, ok: true, output: "" });
+      }
+    }
+  });
+});
+
+test.skipIf(process.platform === "win32")("the shim's CODEX_CLI_PATH rides the explicit relaunch after a quit", () => {
+  const result = run("launch", { app: "flagged", shim: true });
   expect(result.status).toBe(0);
   expect(result.calls).toEqual(["quit", "open"]);
-  expect(result.openEnv).toEqual([value]);
+  expect(result.openEnv).toEqual([`CODEX_CLI_PATH=${SHIM_PATH()}`]);
   expect(result.openArgs).toEqual([RESOLVER]);
 });

@@ -1,4 +1,6 @@
 import type { Server } from "bun";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { OcxConfig } from "../../types";
 import { getConfigDir } from "../../config/paths";
 import {
@@ -56,6 +58,17 @@ export function chatgptUnblockResolverArg(port: number): string {
   return `--host-resolver-rules=${chatgptUnblockResolverRule(port)}`;
 }
 
+/**
+ * Rewritten once the listener is up. The launch watcher wakes on it as well as on the app's own
+ * launch, so an app that started before opencodex (both opened at login) is still routed.
+ */
+export const CHATGPT_UNBLOCK_READY_FILENAME = "chatgpt-unblock.ready";
+
+export function chatgptUnblockReadyPath(configDir: string): string {
+  return join(configDir, CHATGPT_UNBLOCK_READY_FILENAME);
+}
+
+
 export interface ChatgptUnblockState {
   port: number;
   caCertPath: string;
@@ -85,6 +98,12 @@ export async function startChatgptUnblock<T = undefined>(options: StartChatgptUn
   const leaf = issueLocalInterceptLeaf(ca, [CHATGPT_INTERCEPT_HOST]);
   // The port must be the configured one, not ephemeral: the launcher's launch arguments name it.
   const listener = startChatgptUnblockListener({ leaf, port });
+  // Best effort: without the marker the watcher still acts on the app's next launch.
+  try {
+    writeFileSync(chatgptUnblockReadyPath(configDir), `${port} ${new Date().toISOString()}\n`, { mode: 0o644 });
+  } catch {
+    // An unwritable config dir already failed the CA write; nothing to add here.
+  }
   return {
     port,
     caCertPath: claudeInterceptCaCertPath(configDir),

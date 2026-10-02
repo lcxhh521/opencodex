@@ -147,7 +147,7 @@ CODEX_CLI_PATH launcher: ${app.shim ? "yes" : "no"}`);
     }
     if (sub === "launch" && intercept) {
       // The intercept script owns the restart under its lock so the watcher cannot race it.
-      const result = launchChatgptWithRule(port!, undefined, shim ? ["--env", `CODEX_CLI_PATH=${launcher}`] : []);
+      const result = launchChatgptWithRule(port!, undefined, shim);
       if (result.output) (result.ok ? console.log : console.error)(result.output);
       return result.ok ? 0 : 1;
     }

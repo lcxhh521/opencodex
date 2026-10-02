@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { getConfigDir } from "../../config/paths";
 import { CHATGPT_INTERCEPT_HOST, CHATGPT_UNBLOCK_IDENTITY_PATH, CHATGPT_UNBLOCK_SERVICE_ID } from "./listener";
 import type { PreservedSendBlock } from "./rewrite";
-import { chatgptUnblockResolverArg } from "./runtime";
+import { chatgptUnblockReadyPath, chatgptUnblockResolverArg } from "./runtime";
+import { chatgptShimLauncherPath } from "../app-server-shim/launcher";
 
 /**
  * Launch integration for the ChatGPT desktop send-unblock intercept.
@@ -16,14 +17,17 @@ import { chatgptUnblockResolverArg } from "./runtime";
  * Dock/Spotlight start reaches the real chatgpt.com and the composer locks again. This module
  * installs a launchd agent that watches the app's Electron `SingletonLock` -- written on every
  * launch -- and, exactly once per launch, restarts the app with the switches if it was
- * started without them. There is no resident polling process: launchd wakes the script on the
- * lock event and the script exits after one check. Corrective restarts may interrupt startup.
+ * started without them. It also watches a readiness marker opencodex writes once its listener is
+ * up, so an app that started before opencodex (both open at login) is corrected as soon as the
+ * listener answers. There is no resident polling process: launchd wakes the script on either
+ * event and the script exits after one check. In watch mode it only restarts an app that started
+ * within the last five minutes, so it never quits an app the user has been working in.
  *
  * The watcher only acts when the opencodex intercept listener answers its identity path, so
  * with the feature off -- or another process holding the port -- the app is left native.
  *
- * The watcher and explicit intercept launch share the same script, so the launch arguments
- * are built in one place. CLI restore independently clears both the intercept and shim:
+ * The watcher, `ocx chatgpt launch` and `ocx chatgpt restore` run the same script, so the launch
+ * arguments are built in exactly one place. The mode decides the switch set:
  *
  *   resolver-rule mode (default):
  *   - always `--host-resolver-rules=MAP chatgpt.com 127.0.0.1:<port>`;
@@ -37,11 +41,19 @@ import { chatgptUnblockResolverArg } from "./runtime";
  *   - with a PAC file, the resolver rule alone: PAC cannot be combined with a bypass, so
  *     chatgpt.com may stay on the proxy and the composer may lock, but nothing else breaks.
  *
+ *   PAC (regenerated at every opencodex start) sends chatgpt.com to the CONNECT entry listener,
+ *   which splices onto the TLS origin listener; when opencodex is down the refused CONNECT makes
+ *   Chromium fall through to the captured system chain and finally DIRECT -- no resolver rule
+ *   may be present, or it would blackhole that fallback to the dead origin port. No app restart
+ *   is needed to recover.
  */
 
 export const CHATGPT_APP_PATH = "/Applications/ChatGPT.app";
 /** The desktop app is `openai-codex-electron` internally: its Electron userData dir is `Codex`. */
 export const CHATGPT_SINGLETON_LOCK_PATH = "Library/Application Support/Codex/SingletonLock";
+
+/** How recently the app must have started for watch mode to restart it. */
+export const CHATGPT_WATCHER_FRESH_APP_SECONDS = 300;
 export const CHATGPT_UNBLOCK_WATCHER_LABEL = "com.opencodex.chatgpt-unblock-watcher";
 
 function expandHome(path: string): string {
@@ -63,6 +75,8 @@ export interface ChatgptUnblockWatcherPaths {
   plistPath: string;
   errPath: string;
   lockPath: string;
+  /** Written by opencodex once its listener is up; the agent wakes on it too. */
+  readyPath: string;
 }
 
 export function chatgptUnblockWatcherPaths(configDir?: string): ChatgptUnblockWatcherPaths {
@@ -72,6 +86,7 @@ export function chatgptUnblockWatcherPaths(configDir?: string): ChatgptUnblockWa
     plistPath: expandHome(`~/Library/LaunchAgents/${CHATGPT_UNBLOCK_WATCHER_LABEL}.plist`),
     errPath: join(dir, "chatgpt-unblock-watcher.err"),
     lockPath: expandHome(`~/${CHATGPT_SINGLETON_LOCK_PATH}`),
+    readyPath: chatgptUnblockReadyPath(dir),
   };
 }
 
@@ -87,31 +102,45 @@ function chatgptUnblockWatcherLogPath(configDir?: string): string {
  *   native (`ocx chatgpt restore`) restarts a switched app WITHOUT them, for when the
  *          listener is gone or the feature is being turned off.
  *
+ * `pacMode` switches the argument set (see the module doc): the PAC switch alone when on, the
+ * resolver rule [+ proxy/bypass] otherwise. The app is "flagged" by whichever switch the mode
+ * uses, so a mode change makes the watcher correct an app launched under the other mode.
  */
-export function buildChatgptUnblockWatcherScript(port: number, configDir?: string, openArgs: readonly string[] = []): string {
+export function buildChatgptUnblockWatcherScript(port: number, configDir?: string, shimMode = false): string {
   return `#!/bin/bash
 # opencodex ChatGPT send-unblock launcher.
-#   watch  (launchd, fired by the app's Electron SingletonLock on every launch): if the app is
-#          running WITHOUT the launch switches (a normal Dock/Spotlight launch), restart it once
-#          with them. A correctly launched app, or an absent intercept, is left alone.
+#   watch  (launchd, fired by the app's Electron SingletonLock on every launch and by the
+#          readiness marker opencodex writes once its listener is up): if the app is running
+#          WITHOUT the launch switches (a normal Dock/Spotlight launch) and started within the
+#          last FRESH_APP_SECONDS, restart it once with them. A correctly launched app, an app
+#          the user has been working in, or an absent intercept, is left alone.
 #   launch (ocx chatgpt launch): same, and start the app if it is not running.
 #   native (ocx chatgpt restore): restart an app that carries the switches without them.
 
 PORT=${port}
 MODE="\${1:-watch}"
-unset CODEX_CLI_PATH
 RESOLVER_ARG=${shellQuote(chatgptUnblockResolverArg(port))}
+SHIM_MODE=${shimMode ? "1" : "0"}
+SHIM_SCRIPT=${shellQuote(chatgptShimLauncherPath(configDir ?? getConfigDir()))}
 BYPASS_HOST=${shellQuote(CHATGPT_INTERCEPT_HOST)}
 APP_PATTERN='ChatGPT.app/Contents/MacOS/ChatGPT'
 IDENTITY_URL=${shellQuote(`https://127.0.0.1:${port}${CHATGPT_UNBLOCK_IDENTITY_PATH}`)}
 SERVICE_ID=${shellQuote(`"service":"${CHATGPT_UNBLOCK_SERVICE_ID}"`)}
 LOG=${shellQuote(chatgptUnblockWatcherLogPath(configDir))}
 LOCK_DIR="\${TMPDIR:-/tmp}/opencodex-chatgpt-launch.lock"
+FRESH_APP_SECONDS=${CHATGPT_WATCHER_FRESH_APP_SECONDS}
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 say() { [ "$MODE" != watch ] && echo "$*"; log "$*"; }
+# The app-server shim is chosen through the app's CODEX_CLI_PATH environment variable, which 'ps eww'
+# shows for the app's own process as soon as it exists (a child process would only appear later).
+app_has_shim() {
+  ps eww -o command= -p "$1" 2>/dev/null | grep -qF "CODEX_CLI_PATH=$SHIM_SCRIPT"
+}
 # The app's main process: found by exact process name, then confirmed by path. Matching the
 # whole command line instead would also match any shell whose command mentions the rule.
+# -a: pgrep skips its own ancestors by default, and a command run from a terminal inside the
+# desktop app has the app as an ancestor.
 app_pid() {
   local pid
   for pid in $(pgrep -a -x ChatGPT 2>/dev/null); do
@@ -122,16 +151,44 @@ app_pid() {
   return 1
 }
 app_running() { app_pid >/dev/null; }
+# Seconds a process has been running, from ps's [[dd-]hh:]mm:ss elapsed time. Fails when it
+# cannot be read, which the caller treats as a fresh launch.
+app_age() {
+  local etime days=0 h=0 m s a b c
+  etime=$(ps -o etime= -p "$1" 2>/dev/null | tr -d ' ')
+  [ -n "$etime" ] || return 1
+  case "$etime" in *-*) days=\${etime%%-*}; etime=\${etime#*-} ;; esac
+  IFS=: read -r a b c <<< "$etime"
+  if [ -n "$c" ]; then h=$a; m=$b; s=$c; else m=$a; s=$b; fi
+  case "$days:$h:$m:$s" in *::*|:*|*:|*[!0-9:]*) return 1 ;; esac
+  echo $(( 10#$days * 86400 + 10#$h * 3600 + 10#$m * 60 + 10#$s ))
+}
 app_flagged() {
-  ${openArgs.length > 0 ? '[ "$MODE" = launch ] && return 1 # Explicit open arguments require a fresh app process.' : ''}
+  local pid cmdline
+  pid=$(app_pid) || return 1
+  cmdline=$(ps -o command= -p "$pid" 2>/dev/null)
+  case "$cmdline" in *" $RESOLVER_ARG"*) return 0 ;; esac
+  return 1
+}
+
+# The shim is wanted only while its launcher exists: opencodex writes it after the bundle passes
+# the OpenAI signature check. Pointing the app at a missing launcher would leave it without an
+# app-server.
+shim_wanted() {
+  [ "$SHIM_MODE" = 1 ] && [ -x "$SHIM_SCRIPT" ]
+}
+
+# Either launch switch: restore must also undo the switch an app was launched with, and an app
+# started through the shim counts too, so restore can hand it back native.
+app_switched() {
   local pid
   pid=$(app_pid) || return 1
   local cmdline
   cmdline=$(ps -o command= -p "$pid" 2>/dev/null)
   case "$cmdline" in *" $RESOLVER_ARG"*) return 0 ;; esac
+  app_has_shim "$pid" && return 0
   return 1
 }
-app_switched() { app_flagged; }
 # The port must be held by opencodex's listener, not just by any process. The listener answers
 # its identity path itself; -k because its certificate names chatgpt.com, --noproxy because a
 # proxy in the environment must not be asked to reach loopback.
@@ -151,7 +208,8 @@ quit_app() {
   ! app_running
 }
 
-# Extra switches for the current system proxy, one per line (none without a proxy).
+# Extra switches for the current system proxy, one per line (none without a proxy). Only in
+# resolver-rule mode: the PAC carries the system chain itself.
 proxy_args() {
   local out
   out=$(scutil --proxy 2>/dev/null) || return 0
@@ -174,10 +232,7 @@ fi
 # One run at a time: quitting the app deletes the SingletonLock, which fires launchd again.
 # A lock left by a killed run expires after two minutes.
 find "$LOCK_DIR" -maxdepth 0 -mmin +2 -exec rmdir {} \\; 2>/dev/null
-mkdir "$LOCK_DIR" 2>/dev/null || {
-  [ "$MODE" = launch ] && { echo "another ChatGPT launch is in progress; retry shortly" >&2; exit 1; }
-  exit 0
-}
+mkdir "$LOCK_DIR" 2>/dev/null || exit 0
 trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 
 if [ "$MODE" = native ]; then
@@ -185,14 +240,25 @@ if [ "$MODE" = native ]; then
   if ! app_switched; then say "ChatGPT is already running without the launch switches"; exit 0; fi
   say "ChatGPT carries the launch switches; restarting it without"
   quit_app || { say "ChatGPT did not quit; quit it manually and reopen it"; exit 1; }
-  open -a ChatGPT || { say "could not relaunch ChatGPT with native networking"; exit 1; }
+  open -a ChatGPT
   say "relaunched ChatGPT with native networking"
   exit 0
 fi
 
 if app_running; then
   if app_flagged; then
-    say "ChatGPT is already running with the launch switches"
+    if shim_wanted && ! app_has_shim "$(app_pid)"; then
+      : # started without the shim; fall through and correct it below
+    else
+      say "ChatGPT is already running with the launch switches"
+      exit 0
+    fi
+  fi
+  # The readiness marker fires this while the app may have been open for hours (opencodex
+  # restarted under it). Only an app that just started is restarted; the explicit launch command
+  # always acts.
+  if [ "$MODE" = watch ] && age=$(app_age "$(app_pid)") && [ "$age" -gt "$FRESH_APP_SECONDS" ]; then
+    log "ChatGPT has been running for \${age}s without the launch switches; leaving it (run 'ocx chatgpt launch' to restart it with them)"
     exit 0
   fi
   say "ChatGPT is running without the launch switches; restarting it"
@@ -205,13 +271,21 @@ ARGS=("$RESOLVER_ARG")
 while IFS= read -r arg; do
   [ -n "$arg" ] && ARGS+=("$arg")
 done < <(proxy_args)
-open -a ChatGPT${openArgs.map(arg => ` ${shellQuote(arg)}`).join("")} --args "\${ARGS[@]}" || { say "could not launch ChatGPT"; exit 1; }
+OPEN_ENV=()
+if [ "$SHIM_MODE" = 1 ]; then OPEN_ENV=(--env "CODEX_CLI_PATH=$SHIM_SCRIPT"); fi
+open -a ChatGPT \${OPEN_ENV[@]+"\${OPEN_ENV[@]}"} --args "\${ARGS[@]}"
 say "launched ChatGPT with: \${ARGS[*]}"
 `;
 }
 
-/** One-shot launchd agent: wake on the app's SingletonLock event, run the script, exit. */
-export function buildChatgptUnblockWatcherPlist(scriptPath: string, watchPath: string, errPath: string): string {
+/** `bash -n` on a script file: parses without running it. */
+export function checkChatgptWatcherScriptSyntax(scriptPath: string): CommandResult {
+  return sh("/bin/bash", ["-n", scriptPath]);
+}
+
+/** One-shot launchd agent: wake on the app's SingletonLock or the readiness marker, run the script, exit. */
+export function buildChatgptUnblockWatcherPlist(scriptPath: string, watchPaths: string | readonly string[], errPath: string): string {
+  const watched = (typeof watchPaths === "string" ? [watchPaths] : watchPaths).map(path => `    <string>${xmlEscape(path)}</string>`).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -226,7 +300,7 @@ export function buildChatgptUnblockWatcherPlist(scriptPath: string, watchPath: s
   </array>
   <key>WatchPaths</key>
   <array>
-    <string>${xmlEscape(watchPath)}</string>
+${watched}
   </array>
   <key>StandardErrorPath</key>
   <string>${xmlEscape(errPath)}</string>
@@ -271,11 +345,17 @@ function watcherDomain(): string {
 
 export interface InstallChatgptUnblockWatcherOptions {
   port: number;
+  /** PAC mode: the CONNECT entry port the generated script checks and the app is pointed at. */
+  entryPort?: number;
+  /** Start the app through the app-server shim (`CODEX_CLI_PATH`). */
+  shimMode?: boolean;
   configDir?: string;
   /** Test seam: skip the macOS / app-presence guards. */
   assumeSupported?: boolean;
   /** Test seam: where the agent plist is written instead of ~/Library/LaunchAgents. */
   plistPath?: string;
+  /** Test seam: the script body written instead of the generated one. */
+  scriptText?: string;
   launchctl?: LaunchctlRunner;
 }
 
@@ -301,10 +381,17 @@ export function installChatgptUnblockWatcher(options: InstallChatgptUnblockWatch
   if (!options.plistPath) mkdirSync(expandHome("~/Library/LaunchAgents"), { recursive: true });
   writeFileSync(
     paths.scriptPath,
-    buildChatgptUnblockWatcherScript(options.port, options.configDir),
+    options.scriptText ?? buildChatgptUnblockWatcherScript(options.port, options.configDir, options.shimMode === true),
     { mode: 0o700 },
   );
-  writeFileSync(paths.plistPath, buildChatgptUnblockWatcherPlist(paths.scriptPath, paths.lockPath, paths.errPath));
+  // The script is generated from a template literal and never parsed as bash before launchd runs
+  // it, so a quoting slip would install a watcher that dies on every app launch. Refuse it here.
+  const syntax = checkChatgptWatcherScriptSyntax(paths.scriptPath);
+  if (!syntax.ok) {
+    rmSync(paths.scriptPath, { force: true });
+    throw new Error(`the generated watcher script is not valid bash: ${syntax.output || `bash -n exited ${syntax.status}`}`);
+  }
+  writeFileSync(paths.plistPath, buildChatgptUnblockWatcherPlist(paths.scriptPath, [paths.lockPath, paths.readyPath], paths.errPath));
   const loaded = launchctl(["bootstrap", watcherDomain(), paths.plistPath]);
   if (!loaded.ok) {
     rmSync(paths.plistPath, { force: true });
@@ -343,21 +430,22 @@ export interface ChatgptUnblockWatcherStatus {
   plistUpToDate: boolean;
 }
 
-export function chatgptUnblockWatcherStatus(port: number, configDir?: string): ChatgptUnblockWatcherStatus {
+export function chatgptUnblockWatcherStatus(port: number, configDir?: string, shimMode = false): ChatgptUnblockWatcherStatus {
   const paths = chatgptUnblockWatcherPaths(configDir);
   const scriptInstalled = existsSync(paths.scriptPath);
   const plistInstalled = existsSync(paths.plistPath);
   const agentLoaded = sh("launchctl", ["print", `${watcherDomain()}/${CHATGPT_UNBLOCK_WATCHER_LABEL}`]).ok;
   const scriptUpToDate = scriptInstalled
-    && readFileSync(paths.scriptPath, "utf8") === buildChatgptUnblockWatcherScript(port, configDir);
+    && readFileSync(paths.scriptPath, "utf8") === buildChatgptUnblockWatcherScript(port, configDir, shimMode);
   const plistUpToDate = plistInstalled
     && readFileSync(paths.plistPath, "utf8") === buildChatgptUnblockWatcherPlist(paths.scriptPath, paths.lockPath, paths.errPath);
   return { scriptInstalled, plistInstalled, agentLoaded, scriptUpToDate, plistUpToDate };
 }
 
 /**
- * The running app's command line, or null. Mirrors the script's `app_pid`: exact process name,
- * then the bundle path, never a match against every command line.
+ * The running app's command line, or null. Mirrors the script's `app_pid`: exact process name
+ * (ancestors included, since `ocx` may run in a terminal inside the app), then the bundle path,
+ * never a match against every command line.
  */
 export function chatgptAppCommandLine(): string | null {
   const pids = sh("pgrep", ["-a", "-x", "ChatGPT"]);
@@ -369,10 +457,26 @@ export function chatgptAppCommandLine(): string | null {
   return null;
 }
 
+/**
+ * Whether the running app was started through the app-server shim. The choice travels in the
+ * app's CODEX_CLI_PATH environment variable, which "ps eww" shows for the app's own process.
+ */
+export function chatgptAppHasShim(configDir: string): boolean {
+  const pids = sh("pgrep", ["-a", "-x", "ChatGPT"]);
+  if (!pids.ok) return false;
+  const marker = `CODEX_CLI_PATH=${chatgptShimLauncherPath(configDir)}`;
+  for (const pid of pids.output.split(/\s+/).filter(Boolean)) {
+    const command = sh("ps", ["eww", "-o", "command=", "-p", pid]);
+    if (command.ok && command.output.includes("ChatGPT.app/Contents/MacOS/ChatGPT")) return command.output.includes(marker);
+  }
+  return false;
+}
+
 /** Whether a command line carries the resolver switch for `port`. */
 export function chatgptCommandLineHasRule(commandLine: string, port: number): boolean {
   return commandLine.includes(` ${chatgptUnblockResolverArg(port)}`);
 }
+
 
 export type ChatgptListenerProbe =
   | { state: "ours"; preservedSendBlocks: (PreservedSendBlock & { lastSeen: string })[] }
@@ -444,28 +548,25 @@ export async function probeChatgptUnblockListener(
   }
 }
 
-function runLaunchScript(mode: "launch" | "native", port: number, configDir?: string, openArgs: readonly string[] = []): { ok: boolean; output: string } {
+function runLaunchScript(mode: "launch" | "native", port: number, configDir?: string, shimMode = false): { ok: boolean; output: string } {
   if (process.platform !== "darwin") {
     throw new Error("launching the ChatGPT desktop app is only supported on macOS");
   }
   // The script goes in on stdin, so no file is needed and the script's own command line never
   // looks like the app's.
-  const env = { ...process.env };
-  delete env.CODEX_CLI_PATH;
   const result = spawnSync("/bin/bash", ["-s", mode], {
-    env,
-    input: buildChatgptUnblockWatcherScript(port, configDir, openArgs),
+    input: buildChatgptUnblockWatcherScript(port, configDir, shimMode),
     encoding: "utf8",
   });
   return { ok: result.status === 0, output: `${result.stdout ?? ""}${result.stderr ?? ""}`.trim() };
 }
 
 /** Start the app with the launch arguments, restarting it if it runs without them (macOS). */
-export function launchChatgptWithRule(port: number, configDir?: string, openArgs: readonly string[] = []): { ok: boolean; output: string } {
-  return runLaunchScript("launch", port, configDir, openArgs);
+export function launchChatgptWithRule(port: number, configDir?: string, shimMode = false): { ok: boolean; output: string } {
+  return runLaunchScript("launch", port, configDir, shimMode);
 }
 
 /** Restart an app that carries the launch switches without them, returning it to native networking. */
-export function restoreChatgptNative(port: number, configDir?: string): { ok: boolean; output: string } {
-  return runLaunchScript("native", port, configDir);
+export function restoreChatgptNative(port: number, configDir?: string, shimMode = false): { ok: boolean; output: string } {
+  return runLaunchScript("native", port, configDir, shimMode);
 }
