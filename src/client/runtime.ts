@@ -250,7 +250,7 @@ export async function bindClientListener(
     try {
       const server = startListener(port, {
         state: request.state,
-        scheduleRecycle: scheduleStandaloneRecycle,
+        machineApi: { scheduleStandaloneRecycle },
         ...(request.linkStatus ? { linkStatus: request.linkStatus } : {}),
         ...(request.linkKeySource ? { linkKeySource: request.linkKeySource } : {}),
         ...(request.linkTunnel ? { linkTunnel: request.linkTunnel } : {}),
