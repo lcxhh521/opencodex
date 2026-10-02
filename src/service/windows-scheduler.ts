@@ -11,6 +11,8 @@ import { buildWindowsSchtasksCreateArgs, windowsTaskRegistrationOwnedByAttempt, 
 import type { ExpectedWindowsTaskUserId } from "./windows-taskxml";
 import { WINSW_SERVICE_ID } from "../lib/winsw";
 
+export { windowsWscript } from "./windows-wscript";
+
 /**
  * Decode schtasks stdout. `/query /xml` emits UTF-16LE (often with BOM) because the
  * registered task document is UTF-16; reading that as UTF-8 makes every health check

@@ -6,6 +6,9 @@ import { serviceLogPath } from "./state";
 import { systemdListenPort } from "./systemd";
 import { windowsListenPort, winswListenPort } from "./windows-ops";
 
+export { resolveServiceListenPort };
+export { shellQuote, buildServiceShellCommand, buildServiceLauncherShellCommand, parseBakedListenPort, resolvedProxyEnv } from "./definition";
+
 /**
  * The listen port of the INSTALLED service artifact, falling back to the configured
  * one. Each reader returns null off its own platform, so the chain needs no platform
