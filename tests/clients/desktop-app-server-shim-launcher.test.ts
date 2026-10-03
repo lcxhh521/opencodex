@@ -253,8 +253,9 @@ describe("restore validates the discovered app before any quit or open", () => {
   test("status shows a plain off for a valid, absent or unreadable block", () => {
     for (const configRaw of [undefined, "{}", JSON.stringify({ chatgptDesktop: { appServerShim: false } }), "{not json"]) {
       const result = run({ sub: "status", ...(configRaw === undefined ? {} : { configRaw }) });
-      expect(result.code).toBe(0);
-      expect(result.stdout).toContain("app-server shim (experimental): off\n");
+      const input = `configRaw=${configRaw === undefined ? "<no file>" : JSON.stringify(configRaw)}`;
+      expect(result.code, input).toBe(0);
+      expect(result.stdout, input).toContain("app-server shim (experimental): off\n");
     }
   });
   test("a launch refused with no dropped block keeps the ordinary opt-in message", () => {
