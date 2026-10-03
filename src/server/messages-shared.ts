@@ -26,6 +26,7 @@ import { estimateTokens } from "../lib/token-estimate";
 import { isTranslatorBudgetExceededError } from "../lib/translator-budget";
 import { AnthropicRequestError, isRec, type Rec } from "../claude/inbound-records";
 import type { RequestLogContext } from "./request-log";
+import { recordGenerationEvent } from "./request-log-generation-window";
 import type { OcxConfig } from "../types";
 
 export function anthropicUsageToOcx(usage: Rec | undefined): { inputTokens: number; outputTokens: number; cachedInputTokens?: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number } | undefined {
@@ -92,6 +93,7 @@ export function tapAnthropicSseForLog(
     let data: unknown;
     try { data = JSON.parse(dataLine); } catch { return; }
     if (!isRec(data)) return;
+    recordGenerationEvent(logCtx, data.type);
     if (data.type === "message_start" && isRec(data.message) && isRec(data.message.usage)) {
       usageAcc = { ...usageAcc, ...data.message.usage };
     } else if (data.type === "message_delta" && isRec(data.usage)) {
