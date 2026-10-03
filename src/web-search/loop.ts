@@ -399,8 +399,10 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
   }
   const signal = internalAbort.signal;
 
-  // Hard iteration bound (termination safety net); forceAnswer normally ends the loop sooner.
-  // One iteration beyond the forced answer is reserved for its empty-answer recovery below.
+  // Hard iteration bound. Past the search budget, a pass that calls web_search again is served the
+  // limit-reached result and loops (#6464), so a model that never answers is stopped here: at most
+  // HARD_CAP model passes, then an explicit error instead of a stream that just ends. The bound also
+  // leaves room for the forced pass's empty-answer recovery below.
   const HARD_CAP = maxSearches + 3;
   let emptyAnswerRetries = 0;
   let accountRefusalOutputStarted = false;
@@ -961,6 +963,9 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
           return;
         }
       }
+      // Every pass up to the cap asked for web_search again; past the budget each call got the
+      // limit-reached result. End with an explicit error, never a stream that silently stops.
+      yield { type: "error", message: "web search stopped at its iteration cap: the model kept calling web_search after the per-turn search limit" };
     } finally {
       if (abortSignal) abortSignal.removeEventListener("abort", linkAbort);
     }

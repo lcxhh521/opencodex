@@ -541,6 +541,9 @@ export async function* runTurnWebSearchLoop(
         yield abortEvent();
         return;
       }
+      // `dispatch` sends the next model request as soon as it is called, so the last pass the cap
+      // allows must not open one it will never read: stop here and report the cap below.
+      if (i + 1 >= HARD_CAP) break;
 
       const nextForceAnswer = searchesExecuted >= plan.maxSearches;
       const iterParsed: OcxParsedRequest = {
@@ -557,9 +560,9 @@ export async function* runTurnWebSearchLoop(
       source = deps.dispatch(iterParsed);
     }
 
-    // Safety net: the hard cap should be unreachable (forceAnswer ends the loop
-    // first), but never hang a client stream if an adapter misbehaves.
-    yield { type: "error", message: "web-search runTurn loop exceeded its iteration cap" };
+    // Reached when every pass up to the cap asked for web_search again: past the budget each call
+    // got the limit-reached result (#6464), and the model still did not answer.
+    yield { type: "error", message: "web search stopped at its iteration cap: the model kept calling web_search after the per-turn search limit" };
   } catch (error) {
     if (!isTranslatorBudgetExceededError(error)) throw error;
     yield budgetErrorEvent();

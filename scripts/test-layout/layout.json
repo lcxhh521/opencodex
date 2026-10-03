@@ -1921,6 +1921,7 @@
     "link-management-routes.test.ts": "server",
     "link-compensation.test.ts": "clients",
     "web-search-run-turn-loop.test.ts": "web-search",
+    "web-search-over-budget.test.ts": "web-search",
     "responses-run-turn-web-search.test.ts": "responses",
     "server-combo-cooldown-recording.test.ts": "server",
     "injection-routing-drift.test.ts": "codex-integration", "injection-routing-healer.test.ts": "codex-integration",
