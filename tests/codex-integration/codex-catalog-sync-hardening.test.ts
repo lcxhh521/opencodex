@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "../../src/codex/catalog/native-models";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { withConfigMutationLockSync } from "../../src/config/mutation-lock";
 import { NEUTRAL_IDENTITY_LINE } from "../../src/adapters/identity";
 
 const repoRoot = dirname(fileURLToPath(new URL("../../package.json", import.meta.url)));
@@ -1226,6 +1227,20 @@ describe("Codex catalog sync hardening", () => {
       // A driving config that is not the file on disk (a stale or foreign one) cannot speak for it.
       writeFileSync(join(opencodexHome, "config.json"), JSON.stringify({ providers: { ark } }));
       const r = syncDriving({ providers: {} });
+      expect(r.status).toBe(0);
+      expect(readFileSync(catalogPath, "utf8")).toBe(seeded());
+      const result = JSON.parse(r.stdout.split("\n").at(-1) ?? "{}") as Record<string, unknown>;
+      expect(result.skippedReason).toBe("unbacked_routed_removal");
+    });
+
+    test("keeps the catalog while another process holds the config lock", () => {
+      const catalogPath = join(codexHome, "catalog.json");
+      writeFileSync(join(codexHome, "config.toml"), 'model_catalog_json = "catalog.json"\n', "utf8");
+      writeFileSync(catalogPath, seeded());
+      writeFileSync(join(opencodexHome, "config.json"), JSON.stringify({ providers: {} }));
+      // config.json backs the removal, but a save may be landing: the check and the write share C,
+      // so a held C refuses rather than writing past a provider that is being enabled.
+      const r = withConfigMutationLockSync(() => syncDriving({ providers: {} }), opencodexHome);
       expect(r.status).toBe(0);
       expect(readFileSync(catalogPath, "utf8")).toBe(seeded());
       const result = JSON.parse(r.stdout.split("\n").at(-1) ?? "{}") as Record<string, unknown>;
