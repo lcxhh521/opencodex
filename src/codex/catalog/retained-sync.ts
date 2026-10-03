@@ -39,6 +39,7 @@ import {
   nativeMultiAgentDefaults,
 } from "./parsing";
 import type { CatalogModel, MultiAgentMode, RawCatalog, RawEntry } from "./parsing";
+import { routedRemovalBackedByConfigFile, unconfiguredRoutedRemoval } from "./routed-removal";
 import {
   accountBoundNativeOpenAiSlugsBySelector,
   desktopAllowlistSuppressedNativeSlugs,
@@ -104,8 +105,14 @@ interface RetainedCatalogSyncResult {
   comboOmissions: ComboCatalogOmission[];
   /** Validated catalog commit (including identical bytes), or a refused refresh. */
   refreshOutcome?: "committed" | "refused";
-  /** `desired_disabled` observed under K after the provider await; nothing was written. */
-  skippedReason?: "desired_disabled";
+  /**
+   * `desired_disabled`: observed under K after the provider await. `unbacked_routed_removal`: the
+   * catalog would lose routed namespaces config.json still enables, or config.json is missing or
+   * unreadable (#6529). Nothing was written in either case.
+   */
+  skippedReason?: "desired_disabled" | "unbacked_routed_removal";
+  /** With `unbacked_routed_removal`: how many routed namespaces the refused write would have emptied. */
+  protectedRoutedNamespaces?: number;
 }
 
 /**
@@ -552,6 +559,20 @@ function writeRetainedCatalogSync({
   const preparedCatalog: PreparedCatalogFileWrite = { path: catalogPath, content };
   if (!preparedBytesDifferFromDisk(preparedCatalog)) {
     return { added, path: catalogPath, catalogWritten: false, comboOmissions };
+  }
+  // A refresh may drop a provider's rows only when config.json on disk agrees the provider is gone.
+  // Without that, a config that is not the user's (missing or unreadable file read as defaults,
+  // another OPENCODEX_HOME) would publish a native-only catalog and exit cleanly (#6529).
+  const removal = unconfiguredRoutedRemoval(onDiskCatalog, catalog, config);
+  if (removal !== null && !routedRemovalBackedByConfigFile(removal)) {
+    return {
+      added: 0,
+      path: catalogPath,
+      catalogWritten: false,
+      comboOmissions,
+      skippedReason: "unbacked_routed_removal",
+      protectedRoutedNamespaces: removal.namespaces.length,
+    };
   }
 
   replaceActiveCodexCatalog(permit, owningCodexHome, preparedCatalog);
