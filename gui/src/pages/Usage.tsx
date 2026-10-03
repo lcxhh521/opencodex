@@ -209,7 +209,9 @@ function cacheHitRateTitle(model: UsageModel, locale: Locale, t: TFn): string | 
   });
 }
 
-function throughputTitle(samples: number | undefined, t: TFn): string {
+/** How a row's throughput was averaged, or why it has none: the em-dash cell explains itself. */
+function throughputTitle(rate: number | undefined, samples: number | undefined, t: TFn): string {
+  if (typeof rate !== "number" || !Number.isFinite(rate)) return t("usage.throughput.unmeasured");
   return t("usage.throughput.title", { samples: samples ?? 0 });
 }
 
@@ -787,7 +789,7 @@ function UsageModelsTable({
           {models.map(model => {
             const providerName = formatProviderDisplayName(model.provider, t);
             const cacheCoverage = cacheHitRateTitle(model, locale, t);
-            const throughputNote = throughputTitle(model.throughputSamples, t);
+            const throughputNote = throughputTitle(model.throughputTokensPerSec, model.throughputSamples, t);
             return (
               <tr key={`${model.provider}/${model.model}`}>
                 {/* Both pinned columns are width-capped, so carry the full value in a tooltip. */}
@@ -804,7 +806,7 @@ function UsageModelsTable({
                   <span className="usage-hit-rate">
                     {typeof model.throughputTokensPerSec === "number" ? `${model.throughputTokensPerSec.toFixed(1)} tok/s` : unavailable}
                   </span>
-                  {typeof model.throughputTokensPerSec === "number" && <span className="sr-only">{throughputNote}</span>}
+                  <span className="sr-only">{throughputNote}</span>
                 </td>
                 <td className="num mono">{formatOptionalTokens(model.cacheReadInputTokens ?? model.cachedInputTokens, locale, unavailable)}</td>
                 <td className="num mono">{formatOptionalTokens(model.cacheCreationInputTokens, locale, unavailable)}</td>
@@ -861,6 +863,7 @@ function UsageProvidersTable({
   workspace?: boolean;
 }) {
   const sectionLabel = t("usage.section.providers");
+  const unavailable = t("usage.unavailable");
   const titleId = "usage-providers-title";
   const listPriceDisclaimerId = "usage-providers-list-price-disclaimer";
   const table = (
@@ -884,11 +887,11 @@ function UsageProvidersTable({
               <td className="num">{provider.requests}</td>
               <td className="num">{provider.measuredRequests}</td>
               <td className="num mono">{formatTokens(provider.totalTokens, locale)}</td>
-              <td className="num mono" title={throughputTitle(provider.throughputSamples, t)}>
+              <td className="num mono" title={throughputTitle(provider.throughputTokensPerSec, provider.throughputSamples, t)}>
                 <span className="usage-hit-rate">
                   {typeof provider.throughputTokensPerSec === "number" ? `${provider.throughputTokensPerSec.toFixed(1)} tok/s` : unavailable}
                 </span>
-                {typeof provider.throughputTokensPerSec === "number" && <span className="sr-only">{throughputTitle(provider.throughputSamples, t)}</span>}
+                <span className="sr-only">{throughputTitle(provider.throughputTokensPerSec, provider.throughputSamples, t)}</span>
               </td>
               <td className="num"><UsageListPrice row={provider} locale={locale} t={t} /></td>
               <td><div className="usage-bar"><div className="usage-bar-fill" style={{ width: `${Math.round(provider.shareRatio * 100)}%` }} /></div></td>

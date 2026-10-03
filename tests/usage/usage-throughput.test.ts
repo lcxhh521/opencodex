@@ -98,6 +98,30 @@ describe("usage throughput aggregation (#6309)", () => {
     expect(sum.summary.throughputSamples).toBe(1);
   });
 
+  test("a row whose duration is missing or not a number adds no sample and cannot poison the rate", () => {
+    // The ledger reader does not type-check a row's own durationMs; a legacy or hand-edited row
+    // can carry undefined or a string. Both must be skipped, not summed as NaN or concatenated.
+    const malformed = (ts: number, durationMs: unknown) => ({
+      ...entry({ ts, usageStatus: "reported", usage: { inputTokens: 10, outputTokens: 999 } }),
+      durationMs: durationMs as number,
+    });
+    const sum = summarizeUsage(
+      [
+        malformed(FIXED_NOW - 3, undefined),
+        malformed(FIXED_NOW - 2, "5000"),
+        entry({ ts: FIXED_NOW - 1, usageStatus: "reported", usage: { inputTokens: 10, outputTokens: 250 }, durationMs: 5_000 }),
+      ],
+      "all",
+      FIXED_NOW,
+    );
+    expect(sum.summary.throughputSamples).toBe(1);
+    expect(sum.summary.throughputTokensPerSec).toBeCloseTo(50, 9);
+    expect(sum.models[0]?.throughputSamples).toBe(1);
+    expect(sum.models[0]?.throughputTokensPerSec).toBeCloseTo(50, 9);
+    expect(sum.providers[0]?.throughputSamples).toBe(1);
+    expect(sum.providers[0]?.throughputTokensPerSec).toBeCloseTo(50, 9);
+  });
+
   test("providers aggregate across models and the summary aggregates across rows", () => {
     const sum = summarizeUsage(
       [

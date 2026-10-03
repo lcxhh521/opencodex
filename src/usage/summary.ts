@@ -638,6 +638,16 @@ function finalizeCoverage(totals: UsageSummaryTotals): void {
 }
 
 /**
+ * True when an attempt can feed the throughput aggregate: both values are positive finite numbers.
+ * The ledger reader does not type-check a row's own `durationMs`, so a legacy or hand-edited row
+ * can carry `undefined` or a string, and a plain `<= 0` test lets either through.
+ */
+function isThroughputSample(outputTokens: unknown, durationMs: unknown): boolean {
+  return typeof outputTokens === "number" && Number.isFinite(outputTokens) && outputTokens > 0
+    && typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs > 0;
+}
+
+/**
  * Aggregate output throughput inputs (#6309) into the window totals. A measured attempt
  * contributes its output tokens and duration only when both are positive, so a zero-token
  * or zero-duration row cannot deflate or inflate the rate. Without attempts, the row-level
@@ -648,7 +658,7 @@ function addThroughputTotals(totals: UsageSummaryTotals, entry: PersistedUsageEn
     ? entry.attempts
     : [{ usage: entry.usage, durationMs: entry.durationMs }];
   for (const sample of samples) {
-    if (!sample.usage || sample.usage.outputTokens <= 0 || sample.durationMs <= 0) continue;
+    if (!sample.usage || !isThroughputSample(sample.usage.outputTokens, sample.durationMs)) continue;
     totals.throughputOutputTokens = (totals.throughputOutputTokens ?? 0) + sample.usage.outputTokens;
     totals.throughputDurationMs = (totals.throughputDurationMs ?? 0) + sample.durationMs;
     totals.throughputSamples = (totals.throughputSamples ?? 0) + 1;
@@ -1372,7 +1382,7 @@ class StreamingUsageSummaryAccumulator implements UsageSummaryAccumulator {
     if (attribution.usage) {
       breakdown.inputTokens += attribution.usage.inputTokens;
       breakdown.outputTokens += attribution.usage.outputTokens;
-      if (attribution.usage.outputTokens > 0 && (attribution.durationMs ?? 0) > 0) {
+      if (isThroughputSample(attribution.usage.outputTokens, attribution.durationMs)) {
         breakdown.throughputOutputTokens += attribution.usage.outputTokens;
         breakdown.throughputDurationMs += attribution.durationMs!;
         breakdown.throughputSamples += 1;

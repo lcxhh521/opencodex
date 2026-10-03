@@ -1333,7 +1333,7 @@ export const en = {
   "usage.col.cacheHits": "Cache hits",
   "usage.col.cacheWrites": "Cache writes",
   "usage.col.cacheHitRate": "Hit rate",
-  "usage.throughput.title": "End-to-end output throughput: summed output tokens over summed wall-clock duration across {samples} measured request(s). It includes pre-decode wait time, so it runs below steady-state decode speed; requests without measured tokens and duration are excluded.",
+  "usage.throughput.title": "End-to-end output throughput: summed output tokens over summed wall-clock duration across {samples} measured request(s). It includes pre-decode wait time, so it runs below steady-state decode speed; a request is left out if either its output tokens or its duration was not measured.",
   "usage.throughput.unmeasured": "No request for this row reported both output tokens and duration, so there is no throughput to average.",
   "usage.cacheHitRate.partial": "Averaged over {measured} of {total} input tokens; the remaining requests reported no cache detail.",
   "usage.cacheHitRate.unmeasured": "No request for this row reported cache detail, so there is no hit rate to average.",

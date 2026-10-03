@@ -1309,7 +1309,7 @@ export const vi: Record<TKey, string> = {
   "usage.col.cacheHits": "Lượt truy cập cache",
   "usage.col.cacheWrites": "Lần ghi cache",
   "usage.col.cacheHitRate": "Tỷ lệ truy cập cache",
-  "usage.throughput.title": "Thông lượng đầu ra end-to-end: tổng token đầu ra chia cho tổng thời gian đồng hồ qua {samples} yêu cầu được đo. Bao gồm thời gian chờ trước khi giải mã nên thấp hơn tốc độ giải mã ổn định; các yêu cầu không đo được token và thời lượng bị loại.",
+  "usage.throughput.title": "Thông lượng đầu ra end-to-end: tổng token đầu ra chia cho tổng thời gian đồng hồ qua {samples} yêu cầu được đo. Bao gồm thời gian chờ trước khi giải mã nên thấp hơn tốc độ giải mã ổn định; yêu cầu nào thiếu số token đầu ra hoặc thời lượng đo được đều bị loại.",
   "usage.throughput.unmeasured": "Không có yêu cầu nào trong dòng này báo cả token đầu ra lẫn thời lượng, nên không có thông lượng để trung bình.",
   "usage.cacheHitRate.partial": "Giá trị trung bình được tính dựa trên {measured} trong tổng số {total} token đầu vào; các yêu cầu còn lại không cung cấp thông tin chi tiết về cache.",
   "usage.cacheHitRate.unmeasured": "Không có yêu cầu nào trong hàng này cung cấp thông tin chi tiết về cache, nên không thể tính tỷ lệ truy cập cache trung bình.",

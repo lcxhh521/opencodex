@@ -1319,7 +1319,7 @@ export const tr: Record<TKey, string> = {
   "usage.col.cacheHits": "Önbellek isabetleri",
   "usage.col.cacheWrites": "Önbellek yazma",
   "usage.col.cacheHitRate": "İsabet oranı",
-  "usage.throughput.title": "Uçtan uca çıktı verimi: {samples} ölçülen istek için çıktı jetonları toplamı ÷ geçen süre toplamı. Kod çözme öncesi bekleme süresini içerir, bu yüzden kararlı kod çözme hızının altındadır; ölçülen jetonu ve süresi olmayan istekler hariç tutulur.",
+  "usage.throughput.title": "Uçtan uca çıktı verimi: {samples} ölçülen istek için çıktı jetonları toplamı ÷ geçen süre toplamı. Kod çözme öncesi bekleme süresini içerir, bu yüzden kararlı kod çözme hızının altındadır; çıktı jetonları veya süresi ölçülmeyen her istek hariç tutulur.",
   "usage.throughput.unmeasured": "Bu satırdaki hiçbir istek hem çıktı jetonlarını hem de süreyi bildirmedi; ortalanacak verim yok.",
   "usage.cacheHitRate.partial": "Toplam {total} girdi jetonunun {measured} kadarı üzerinden ortalama hesaplandı; kalan isteklerde önbellek ayrıntısı bildirilmedi.",
   "usage.cacheHitRate.unmeasured": "Bu satırdaki hiçbir istek önbellek ayrıntısı bildirmediği için hesaplanabilecek bir ortalama isabet oranı yok.",
