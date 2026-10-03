@@ -3,7 +3,7 @@ import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "../config";
 import { readConfigFileSnapshot } from "../config/diagnostics";
-import { chatgptDesktopConfigIssue } from "../config/schema/leaf-validators";
+import { chatgptDesktopConfigIssue } from "../config/schema/chatgpt-desktop";
 import {
   chatgptShimLauncherPath,
   resolveChatgptCodexBinary,
@@ -104,9 +104,9 @@ export async function handleChatgptCommand(args: string[], platform: NodeJS.Plat
     const config = loadConfig();
     const launcher = chatgptShimLauncherPath();
     const install = discoverApp();
-    const configIssue = config.chatgptDesktop?.appServerShim === true ? null : chatgptDesktopIssueInFile();
     if (sub === "status") {
       const app = install ? appState(install, launcher) : { running: false, shim: false };
+      const configIssue = config.chatgptDesktop?.appServerShim === true ? null : chatgptDesktopIssueInFile();
       const flag = config.chatgptDesktop?.appServerShim === true ? "on"
         : configIssue ? `off (config.json ${configIssue}; the whole chatgptDesktop block is ignored)` : "off";
       console.log(`app-server shim (experimental): ${flag}
@@ -123,6 +123,8 @@ CODEX_CLI_PATH launcher: ${app.shim ? "yes" : "no"}`);
     let binary: string | undefined;
     if (sub === "launch") {
       if (config.chatgptDesktop?.appServerShim !== true) {
+        // Read the file only to explain a refusal; restore and a valid launch never touch it.
+        const configIssue = chatgptDesktopIssueInFile();
         console.error(configIssue
           ? `Experimental shim disabled: config.json ${configIssue}. The whole chatgptDesktop block is ignored until that is fixed.`
           : "Experimental shim disabled; set chatgptDesktop.appServerShim: true before launching.");

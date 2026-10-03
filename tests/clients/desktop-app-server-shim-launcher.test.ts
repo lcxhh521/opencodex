@@ -237,6 +237,13 @@ describe("restore validates the discovered app before any quit or open", () => {
     expect(result.launcherExists).toBe(true);
     expect(result.calls.map(call => call.command)).toEqual(["pgrep", "ps"]);
   });
+  test("a launch refused over a dropped chatgptDesktop block names the failing field", () => {
+    const result = run({ sub: "launch", flag: false, configRaw: JSON.stringify({ chatgptDesktop: { appServerShim: "yes" } }) });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("chatgptDesktop.appServerShim");
+    expect(result.stderr).toContain("whole chatgptDesktop block is ignored");
+    expect(result.calls).toEqual([]);
+  });
   test("launch still requires opt-in and an app-server binary", () => {
     for (const scenario of [{ flag: false }, { flag: true, missingBinary: true }]) {
       const result = run({ sub: "launch", ...scenario });
