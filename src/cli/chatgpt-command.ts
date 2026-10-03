@@ -2,6 +2,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "../config";
+import { readConfigFileSnapshot } from "../config/diagnostics";
+import { chatgptDesktopConfigIssue } from "../config/schema/leaf-validators";
 import {
   chatgptShimLauncherPath,
   resolveChatgptCodexBinary,
@@ -19,6 +21,20 @@ const USAGE = `Usage (experimental, macOS only):
 function run(command: string, args: string[]) {
   const result = spawnSync(command, args, { encoding: "utf8", timeout: 5000 });
   return { ok: result.status === 0, output: `${result.stdout ?? ""}${result.stderr ?? ""}`.trim() };
+}
+
+/**
+ * Why the config file's `chatgptDesktop` block reads as absent, or null when it is valid, absent
+ * or the file cannot be parsed (the config loader reports that case itself).
+ */
+function chatgptDesktopIssueInFile(): string | null {
+  const { raw } = readConfigFileSnapshot();
+  if (raw === undefined) return null;
+  try {
+    return chatgptDesktopConfigIssue(JSON.parse(raw.replace(/^\uFEFF/, "")));
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -88,9 +104,12 @@ export async function handleChatgptCommand(args: string[], platform: NodeJS.Plat
     const config = loadConfig();
     const launcher = chatgptShimLauncherPath();
     const install = discoverApp();
+    const configIssue = config.chatgptDesktop?.appServerShim === true ? null : chatgptDesktopIssueInFile();
     if (sub === "status") {
       const app = install ? appState(install, launcher) : { running: false, shim: false };
-      console.log(`app-server shim (experimental): ${config.chatgptDesktop?.appServerShim === true ? "on" : "off"}
+      const flag = config.chatgptDesktop?.appServerShim === true ? "on"
+        : configIssue ? `off (config.json ${configIssue}; the whole chatgptDesktop block is ignored)` : "off";
+      console.log(`app-server shim (experimental): ${flag}
 launcher: ${existsSync(launcher) ? "present" : "absent"}
 app: ${install ? (app.running ? "running" : "not running") : "not installed"}
 CODEX_CLI_PATH launcher: ${app.shim ? "yes" : "no"}`);
@@ -103,7 +122,9 @@ CODEX_CLI_PATH launcher: ${app.shim ? "yes" : "no"}`);
     }
     if (sub === "launch") {
       if (config.chatgptDesktop?.appServerShim !== true) {
-        console.error('Experimental shim disabled; set chatgptDesktop.appServerShim: true before launching.');
+        console.error(configIssue
+          ? `Experimental shim disabled: config.json ${configIssue}. The whole chatgptDesktop block is ignored until that is fixed.`
+          : "Experimental shim disabled; set chatgptDesktop.appServerShim: true before launching.");
         return 1;
       }
       const binary = resolveChatgptCodexBinary(install.root);
