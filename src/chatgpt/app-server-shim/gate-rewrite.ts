@@ -38,8 +38,8 @@ export function unlockRateLimitGate(value: unknown): boolean {
       return { cleared, exhausted, blocked };
     }
     if (!isRecord(node)) return { cleared, exhausted, blocked };
-    // A usage window at 100%: `usedPercent` in the app-server's RPC, `used_percent` in the web
-    // usage snapshot the send-unblock intercept rewrites.
+    // A usage window at 100%, in either spelling the gate fields come in: `usedPercent` in the
+    // app-server's JSON-RPC, `used_percent` in the web usage snapshot.
     if (typeof node.usedPercent === "number" && node.usedPercent >= 100) exhausted = true;
     if (typeof node.used_percent === "number" && node.used_percent >= 100) exhausted = true;
     if (node.spendControlReached !== undefined && node.spendControlReached !== null && node.spendControlReached !== false) blocked = true;

@@ -155,6 +155,7 @@ CODEX_CLI_PATH launcher: ${app.shim ? "yes" : "no"}`);
       console.error("ChatGPT (com.openai.codex) was not found; install or open it once, then retry.");
       return 1;
     }
+    let binary: string | undefined;
     if (sub === "launch") {
       if (!shim && !intercept) {
         console.error("Enable chatgptDesktop.appServerShim or chatgptDesktop.unblockSend before launching.");
@@ -167,26 +168,26 @@ CODEX_CLI_PATH launcher: ${app.shim ? "yes" : "no"}`);
         }
       }
       if (shim) {
-        const binary = resolveChatgptCodexBinary(install!.root);
+        binary = resolveChatgptCodexBinary(install!.root) ?? undefined;
         if (!binary) {
           console.error(`No bundled app-server binary was found in ${install!.root}; the shim cannot launch this build.`);
           return 1;
         }
-        const untrusted = untrustedChatgptBundleReason(install!.root, binary);
-        if (untrusted) {
-          console.error(`Refusing to launch the shim: ${untrusted}.`);
-          return 1;
-        }
-        writeChatgptShimLauncher(undefined, binary);
       }
+    }
+    // Every relaunch path executes the discovered bundle, the intercept one included. Restore
+    // validates the app shell without requiring an app-server binary or an experimental opt-in.
+    const untrusted = untrustedChatgptBundleReason(install!.root, binary);
+    if (untrusted) {
+      console.error(`Refusing to ${sub === "launch" ? (shim ? "launch the shim" : "launch ChatGPT") : "restore ChatGPT"}: ${untrusted}.`);
+      return 1;
     }
     // A loaded watcher would immediately put the intercept switches back on restore.
-    if (sub === "restore") {
-      if (chatgptUnblockWatcherStatus(0).agentLoaded) {
-        console.error("Uninstall the launch watcher before restoring native networking.");
-        return 1;
-      }
+    if (sub === "restore" && chatgptUnblockWatcherStatus(0).agentLoaded) {
+      console.error("Uninstall the launch watcher before restoring native networking.");
+      return 1;
     }
+    if (binary) writeChatgptShimLauncher(undefined, binary);
     if (sub === "launch" && intercept) {
       // The intercept script owns the restart under its lock so the watcher cannot race it.
       const result = launchChatgptWithRule(port!, undefined, shim);

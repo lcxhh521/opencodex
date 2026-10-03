@@ -154,7 +154,6 @@ export function buildWindowsServiceScript(
     '    if exist "%OCX_PKG_DIR%" rmdir /s /q "%OCX_PKG_DIR%" 2>nul',
     '    move "%OCX_PKG_DIR%\\..\\%%B\\opencodex" "%OCX_PKG_DIR%" >nul 2>&1',
     '    if exist "%OCX_PKG_DIR%\\package.json" (',
-    '      set "OCX_RESTORED_BACKUP=%%B"',
     "      goto backup_restored",
     "    )",
     "  )",
@@ -162,7 +161,7 @@ export function buildWindowsServiceScript(
     '>>"%OCX_SERVICE_LOG%" echo [%DATE% %TIME%] no restorable backup found',
     "goto :eof",
     ":backup_restored",
-    '>>"%OCX_SERVICE_LOG%" echo [%DATE% %TIME%] restored previous install from %OCX_RESTORED_BACKUP%',
+    '>>"%OCX_SERVICE_LOG%" echo [%DATE% %TIME%] restored previous install from transactional-update backup',
     "goto :eof",
   ].filter((line): line is string => Boolean(line));
   return `${lines.join("\r\n")}\r\n`;
