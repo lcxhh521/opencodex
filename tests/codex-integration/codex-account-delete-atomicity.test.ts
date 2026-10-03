@@ -423,9 +423,10 @@ describe("Codex account delete persistence ordering", () => {
     expect(manualPreferenceBlocks(POOL_KEY_CODEX, "other-account")).toBe(true);
     try {
       expect(deleteCodexAccount(config, ACCOUNT_ID)).toBe(true);
+      // Checked before the cleanup below, which would clear the preference on its own.
+      expect(manualPreferenceBlocks(POOL_KEY_CODEX, "other-account")).toBe(false);
     } finally {
       clearAllManualPreferences();
     }
-    expect(manualPreferenceBlocks(POOL_KEY_CODEX, "other-account")).toBe(false);
   });
 });
