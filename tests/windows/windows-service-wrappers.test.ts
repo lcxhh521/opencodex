@@ -244,7 +244,7 @@ for (const date of ["Wed 09/30/2026", "2026-09-30(수)", "2026/09/30 (水)"]) {
         expect(output.includes("FAKE-CHILD-STARTED")).toBe(started);
         if (!started) expect(output).toContain(`installation is incomplete: ${scenario === "missing cli" ? "CLI entry" : "bundled Bun"} is missing`);
         if (scenario.startsWith("restore")) {
-          expect(output).toContain("restored previous install from .ocx-backup-20260930 (test)!");
+          expect(output).toContain("restored previous install from transactional-update backup");
           expect(existsSync(join(pkg, "package.json"))).toBe(true);
         }
         if (scenario === "empty backup") expect(output).toContain("no restorable backup found");
@@ -329,3 +329,86 @@ test.skipIf(process.platform !== "win32")("cmd waits when Bun disappears between
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("Bun readiness guard precedes launch and preserves its retry block", async () => {
+  const { buildWindowsServiceScript } = await import("../../src/service/windows-taskxml");
+  const { REAL_BUN_MIN_BYTES } = await import("../../src/lib/bun-binary-validator.mjs");
+  const guard = [
+    'set "OCX_BUN_BYTES="',
+    'for %%F in ("%OCX_BUN%") do set "OCX_BUN_BYTES=%%~zF"',
+    'if not defined OCX_BUN_BYTES goto bun_not_ready',
+    `if %OCX_BUN_BYTES% LSS ${REAL_BUN_MIN_BYTES} goto bun_not_ready`,
+  ];
+  // Render and inspect strings only: no generated command or service is executed.
+  for (const cli of ["C:\\ocx\\src\\cli\\index.ts", null]) {
+    const lines = buildWindowsServiceScript({ bun: "C:\\ocx\\bun.exe", bunRuntimeSource: "bundled", cli }, 10100, []).split("\r\n");
+    const launch = cli
+      ? '"%OCX_BUN%" "%OCX_CLI%" start --port 10100 >>"%OCX_SERVICE_LOG%" 2>&1'
+      : '"%OCX_BUN%" start --port 10100 >>"%OCX_SERVICE_LOG%" 2>&1';
+    const guardAt = lines.indexOf(guard[0]!);
+    const launchAt = lines.indexOf(launch);
+    expect(guardAt).toBeGreaterThan(0);
+    expect(lines.filter(line => line === guard[0])).toHaveLength(1);
+    expect(lines.slice(guardAt, guardAt + guard.length)).toEqual(guard);
+    expect(launchAt).toBeGreaterThan(guardAt + guard.length - 1);
+    const retryAt = lines.indexOf(":bun_not_ready");
+    expect(retryAt).toBeGreaterThan(launchAt);
+    expect(lines.slice(retryAt, retryAt + 4)).toEqual([
+      ':bun_not_ready',
+      '>>"%OCX_SERVICE_LOG%" echo [%DATE% %TIME%] bundled Bun is not ready (%OCX_BUN_BYTES% bytes, npm placeholder or mid-install); waiting for its postinstall, retrying in 5s - if this persists, reinstall opencodex with bun scripts allowed',
+      'ping -n 6 127.0.0.1 >nul',
+      'goto loop',
+    ]);
+  }
+});
+
+test("backup success logging never expands a filesystem-derived backup name", async () => {
+  const { buildWindowsServiceScript } = await import("../../src/service/windows-taskxml");
+  const batch = buildWindowsServiceScript({ bun: "C:\\ocx\\bun.exe", bunRuntimeSource: "bundled", cli: "C:\\ocx\\src\\cli\\index.ts" }, 10100, []);
+  expect(batch).toContain('setlocal EnableExtensions DisableDelayedExpansion');
+  expect(batch).not.toContain("OCX_RESTORED_BACKUP");
+  expect(batch.split(":backup_restored\r\n")[1]).toBe(
+    '>>"%OCX_SERVICE_LOG%" echo [%DATE% %TIME%] restored previous install from transactional-update backup\r\ngoto :eof\r\n',
+  );
+});
+
+for (const name of [
+  ".ocx-backup-999999 & echo OCX_CMD_INJECTION_CONFIRMED & rem",
+  ".ocx-backup-999999 (test)! & echo OCX_CMD_INJECTION_CONFIRMED & rem",
+]) {
+  test.skipIf(process.platform !== "win32")(`cmd restores a backup with metacharacters without executing its name: ${name}`, async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { spawnSync } = await import("node:child_process");
+    const { buildWindowsServiceScript } = await import("../../src/service/windows-taskxml");
+    const dir = mkdtempSync(join(tmpdir(), "ocx-wrapper-backup-name-"));
+    try {
+      const pkg = join(dir, "opencodex");
+      const backup = join(dir, name, "opencodex");
+      const log = join(dir, "service.log");
+      mkdirSync(backup, { recursive: true });
+      writeFileSync(join(backup, "package.json"), '{"fixture":"preserved"}');
+      const batch = buildWindowsServiceScript({ bun: join(pkg, "bun.exe"), bunRuntimeSource: "bundled", cli: join(pkg, "src", "cli", "index.ts") }, 10100, []);
+      const file = join(dir, "restore.cmd");
+      // Run the complete generated recovery subroutine against disposable paths.
+      // No restored executable is launched by this harness.
+      writeFileSync(file, ["@echo off", "setlocal EnableExtensions DisableDelayedExpansion",
+        `set "OCX_PKG_DIR=${pkg}"`, `set "OCX_SERVICE_LOG=${log}"`,
+        "call :restore_backup", "exit /b 0", batch.slice(batch.indexOf("\r\n:restore_backup\r\n") + 2),
+      ].join("\r\n"));
+      const result = spawnSync("cmd.exe", ["/d", "/c", file], {
+        timeout: 5000, encoding: "utf8", env: { ...process.env, DATE: "2026-09-30(test)", TIME: "12:16:55.17" },
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(`${result.stdout}${result.stderr}`).not.toContain("OCX_CMD_INJECTION_CONFIRMED");
+      expect(readFileSync(join(pkg, "package.json"), "utf8")).toBe('{"fixture":"preserved"}');
+      expect(existsSync(backup)).toBe(false);
+      const output = readFileSync(log, "utf8");
+      expect(output).toContain("restored previous install from transactional-update backup");
+      expect(output).not.toContain("OCX_CMD_INJECTION_CONFIRMED");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}

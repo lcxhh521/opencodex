@@ -602,9 +602,9 @@ OpenAI-compatible API gateway at [tokenlab.sh](https://tokenlab.sh/r/OPENCODEX),
 operated by TOKENLAB AI INC.
 Create a workspace [API key](https://tokenlab.sh/dashboard/api?tab=keys), then run
 `ocx provider add tokenlab` or select **TokenLab** in the dashboard's **Add provider** picker.
-TokenLab maintains a step-by-step [OpenCodex integration guide](https://docs.tokenlab.sh/integrations/opencodex)
-([한국어](https://docs.tokenlab.sh/ko/integrations/opencodex)) covering setup and per-model routing.
-The preset uses [Chat Completions](https://docs.tokenlab.sh/quickstart) and discovers models at
+TokenLab maintains a step-by-step [OpenCodex integration guide](https://tokenlab.sh/docs/en/integrations/opencodex)
+([한국어](https://tokenlab.sh/docs/ko/integrations/opencodex)) covering setup and per-model routing.
+The preset uses [Chat Completions](https://tokenlab.sh/docs/en/quickstart) and discovers models at
 `GET /v1/models?category=chat`, keeping only entries that declare `tool-use` capability.
 Image, video, audio, embedding and decision models are excluded from this chat preset.
 
@@ -613,8 +613,8 @@ Each model then uses the request format TokenLab declares for it
 
 | Models | Codex (Responses clients) | Chat clients | Claude Code (Anthropic clients) |
 | --- | --- | --- | --- |
-| `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `grok-4.7`, `deepseek-v4.1-flash`, `deepseek-v4-pro`, `kimi-k3`, `glm-5.3` | [Responses](https://docs.tokenlab.sh/api-reference/responses/create-response) | Chat Completions | Chat Completions |
-| `claude-*` | [Messages](https://docs.tokenlab.sh/api-reference/messages/create-message) | Messages | Messages |
+| `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `grok-4.7`, `deepseek-v4.1-flash`, `deepseek-v4-pro`, `kimi-k3`, `glm-5.3` | [Responses](https://tokenlab.sh/docs/en/api-reference/responses/create-response) | Chat Completions | Chat Completions |
+| `claude-*` | [Messages](https://tokenlab.sh/docs/en/api-reference/messages/create-message) | Messages | Messages |
 | Every other model, including `gemini-3.8-flash` | Chat Completions | Chat Completions | Chat Completions |
 
 To keep a model on Chat Completions, add it to the provider's `modelAdapters`, for example
@@ -622,7 +622,7 @@ To keep a model on Chat Completions, add it to the provider's `modelAdapters`, f
 provider points at `https://api.tokenlab.sh/v1`. OpenCodex sends no delivery-policy header, so
 your API key's own delivery policy decides how TokenLab serves each request.
 
-The [model catalog](https://docs.tokenlab.sh/api-reference/models/list-models) is public without
+The [model catalog](https://tokenlab.sh/docs/en/api-reference/models/list-models) is public without
 a key, but a supplied key is validated and scopes results to its model permissions and delivery
 policy. Use a valid key with a funded workspace for inference. `gpt-5.6-terra` is the seeded
 default; choose another discovered model if your key does not allow it. The provider and model
