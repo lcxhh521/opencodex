@@ -114,6 +114,8 @@ fi`);
   // pairs are appended to the process line: `ps eww` shows a process's environment after its command.
   stub("open", `echo open >> "$STUB_DIR/calls"
 [ "$STUB_OPEN_FAILS" = 1 ] && { echo "stub open: cannot launch" >&2; exit 1; }
+# What open inherits, separate from the --env pairs it is asked to pass on.
+echo "\${CODEX_CLI_PATH-<unset>}" > "$STUB_DIR/open-inherited"
 args=(); envs=(); after=0; prev=""
 for a in "$@"; do
   if [ $after = 1 ]; then args+=("$a")
@@ -157,6 +159,8 @@ function run(mode: "watch" | "launch" | "native", options: {
   appEtime?: string;
   /** The app is an ancestor of the caller, as for `ocx` run in a terminal inside the app. */
   appIsAncestor?: boolean;
+  /** A `CODEX_CLI_PATH` the script inherits, as from a terminal inside a shimmed app. */
+  inheritedCliPath?: string;
 }) {
   const processes = [
     options.app === "plain" ? `400|ChatGPT|${APP_BINARY}` : null,
@@ -185,6 +189,7 @@ function run(mode: "watch" | "launch" | "native", options: {
       STUB_OPEN_FAILS: options.openFails ? "1" : "0",
       STUB_APP_ETIME: options.appEtime ?? "",
       STUB_ANCESTORS: options.appIsAncestor ? "400" : "",
+      ...(options.inheritedCliPath === undefined ? {} : { CODEX_CLI_PATH: options.inheritedCliPath }),
     },
   });
   const read = (name: string) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : "");
@@ -195,6 +200,7 @@ function run(mode: "watch" | "launch" | "native", options: {
     calls: read("calls").split("\n").filter(Boolean),
     openArgs: read("open-args").split("\n").filter(Boolean),
     openEnv: read("open-env").split("\n").filter(Boolean),
+    openInherited: read("open-inherited").trim(),
     log: read("chatgpt-unblock-watcher.log"),
   };
 }
@@ -491,4 +497,26 @@ test.skipIf(process.platform === "win32")("the shim's CODEX_CLI_PATH rides the e
   expect(result.calls).toEqual(["quit", "open"]);
   expect(result.openEnv).toEqual([`CODEX_CLI_PATH=${SHIM_PATH()}`]);
   expect(result.openArgs).toEqual([RESOLVER]);
+});
+
+describe("an inherited CODEX_CLI_PATH never reaches a relaunch", () => {
+  const INHERITED = "/tmp/inherited-codex-cli";
+  test("native restore drops it and passes no override", () => {
+    const r = run("native", { app: "flagged", inheritedCliPath: INHERITED });
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.openInherited).toBe("<unset>");
+    expect(r.openEnv).toEqual([]);
+  });
+  test("a launch without the shim drops it and passes no override", () => {
+    const r = run("launch", { app: "plain", inheritedCliPath: INHERITED });
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.openInherited).toBe("<unset>");
+    expect(r.openEnv).toEqual([]);
+  });
+  test("a shim launch drops it and passes only the shim launcher", () => {
+    const r = run("launch", { app: "plain", shim: true, inheritedCliPath: INHERITED });
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.openInherited).toBe("<unset>");
+    expect(r.openEnv).toEqual([`CODEX_CLI_PATH=${SHIM_PATH()}`]);
+  });
 });
