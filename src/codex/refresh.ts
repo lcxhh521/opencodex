@@ -18,7 +18,7 @@ export interface CodexCatalogRefreshResult {
    * Desired OFF observed under K during the catalog commit, or a write refused because it would
    * empty routed namespaces config.json does not back (#6529); no cache write either way.
    */
-  skippedReason?: "desired_disabled" | "unbacked_routed_removal";
+  skippedReason?: "desired_disabled" | "unbacked_routed_removal" | "foreign_owner";
   protectedRoutedNamespaces?: number;
 }
 
