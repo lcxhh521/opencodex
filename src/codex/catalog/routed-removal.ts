@@ -29,6 +29,24 @@ function routedNamespace(entry: RawEntry): string | null {
   return entry.slug.slice(0, entry.slug.indexOf("/"));
 }
 
+/** OpenCodex-authored routed rows per namespace; foreign and account-bound rows never count. */
+export function ocxRoutedNamespaceCounts(catalog: RawCatalog | null): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const entry of catalog?.models ?? []) {
+    const namespace = routedNamespace(entry);
+    if (namespace !== null) counts.set(namespace, (counts.get(namespace) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** Total OpenCodex-authored routed rows, or null for a value that is not a catalog. */
+export function ocxRoutedRowCount(catalog: unknown): number | null {
+  if (catalog === null || typeof catalog !== "object" || !Array.isArray((catalog as RawCatalog).models)) return null;
+  let total = 0;
+  for (const count of ocxRoutedNamespaceCounts(catalog as RawCatalog).values()) total += count;
+  return total;
+}
+
 /** Whether a config still produces routed rows for a namespace: an enabled provider, or any combo. */
 export function configEnablesRoutedNamespace(config: RoutedNamespaceConfig, namespace: string): boolean {
   if (namespace === COMBO_NAMESPACE && Object.keys(config.combos ?? {}).length > 0) return true;
@@ -74,6 +92,11 @@ export function routedRemovalBackedByConfigFile(
   if (snapshot.kind !== "read" || snapshot.diagnostics.source !== "file") return false;
   return removal.namespaces.every(namespace => !configEnablesRoutedNamespace(snapshot.diagnostics.config, namespace));
 }
+
+/** One line for logs when K refused a writer from another OPENCODEX_HOME; names no path. */
+export const FOREIGN_CODEX_HOME_OWNER_MESSAGE = "Codex catalog left unchanged: this Codex home was set up by "
+  + "another OpenCodex home (OPENCODEX_HOME), recorded in its opencodex-journal.json. Run opencodex "
+  + "from that home, or run `ocx restore` there first.";
 
 /** One line for logs: counts only, never provider names, model ids or paths. */
 export function unbackedRoutedRemovalMessage(count: number): string {
