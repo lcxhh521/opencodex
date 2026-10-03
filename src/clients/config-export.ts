@@ -48,6 +48,7 @@ export {
   zcodeStoreSchemaEstablished,
 } from "./config-export/zcode-store";
 export type { DshReasoningEffort, DshWireReasoningEffort, DshModelEntry, DshProviderBlock, DshGeneratedConfig } from "./config-export/dsh";
+export { DSH_PROFILE_PROVIDER_PATH, dshProfilePatchEstablished, buildDshProfilePatchContribution } from "./config-export/dsh";
 export type { McodeProviderBlock, McodeModelEntry, McodeGeneratedConfig } from "./config-export/mcode";
 export type { RaycastAbility, RaycastAbilityName, RaycastModelEntry, RaycastProviderEntry, RaycastGeneratedConfig } from "./config-export/raycast";
 export { buildRaycastClientConfig, summarizeRaycast, buildRaycastContribution } from "./config-export/raycast";
@@ -58,7 +59,7 @@ import type { OpencodeLaunchEnv, OpencodeCatalogModel, ExportContext, PiModelEnt
 import { OPENCODE_API_KEY_ENV_REF, OPENCODE_PROVIDER_BLOCK_DEFAULT_CONFIG, OPENCODE_CONFIG_SCHEMA, OPENCODE_PROVIDER_ID, PI_API_DIALECT, LOOPBACK_API_KEY_PLACEHOLDER, HERMES_API_KEY_ENV_REF, OPENCLAW_API_KEY_ENV_REF, OPENCODE_API_KEY_ENV, HERMES_API_KEY_ENV, OPENCLAW_API_KEY_ENV, KILO_API_KEY_ENV } from "./config-export/constants";
 import { exportModelLabel, authoritativeContextWindow, outputBudgetFor, normalizeExportModels, inputModalitiesForClient, opencodeModelCapabilities, proxyAdmissionHeaders, singleFragment } from "./config-export/model-metadata";
 import { buildOmpClientConfig, summarizeOmp, buildOmpContribution } from "./config-export/omp";
-import { buildDshClientConfig, summarizeDsh, buildDshContribution } from "./config-export/dsh";
+import { buildDshClientConfig, summarizeDsh, buildDshContribution, DSH_DESKTOP_PROFILE } from "./config-export/dsh";
 import { buildMcodeClientConfig, summarizeMcode, buildMcodeContribution } from "./config-export/mcode";
 import { buildZcodeClientConfig, summarizeZcode, buildZcodeContribution } from "./config-export/zcode";
 import { buildClineClientConfig, summarizeCline, buildClineContribution } from "./config-export/cline";
@@ -430,6 +431,11 @@ export function dshHomeDir(env: OpencodeLaunchEnv = process.env, home: string = 
 
 export function dshConfigPath(env: OpencodeLaunchEnv = process.env, home: string = homedir()): string {
   return join(dshHomeDir(env, home), "settings.yaml");
+}
+
+/** The Desktop profile's patch, where DSH 0.1.7+ reads provider routes (see `DSH_PROFILE_PROVIDER_PATH`). */
+export function dshProfilePatchPath(env: OpencodeLaunchEnv = process.env, home: string = homedir()): string {
+  return join(dshHomeDir(env, home), "profiles", DSH_DESKTOP_PROFILE, "cordis.patch.yml");
 }
 
 /**
