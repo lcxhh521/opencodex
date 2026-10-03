@@ -1,5 +1,7 @@
-import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { repoPath } from "../helpers/repo-root";
 
@@ -57,6 +59,87 @@ describe("prepush GUI typecheck", () => {
       },
     });
     expect(skipping.exitCode).toBe(0);
+  });
+
+  describe("base selection against a real repository", () => {
+    // The script finds its repository from its own location, so each fixture is a fresh git repo
+    // holding a copy of the checked-in script. Only the run/skip decision is observed.
+    const fixtures: string[] = [];
+    afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+
+    const gitEnv = (): Record<string, string> => {
+      const env: Record<string, string> = {};
+      for (const [key, value] of Object.entries(process.env)) {
+        if (value !== undefined && !key.startsWith("GIT_")) env[key] = value;
+      }
+      return { ...env, GIT_AUTHOR_NAME: "fixture", GIT_AUTHOR_EMAIL: "fixture@example.test",
+        GIT_COMMITTER_NAME: "fixture", GIT_COMMITTER_EMAIL: "fixture@example.test", GIT_CONFIG_NOSYSTEM: "1" };
+    };
+    const repo = (): { dir: string; git: (...args: string[]) => void; commit: (path: string) => void; decide: () => string } => {
+      const dir = mkdtempSync(join(tmpdir(), "ocx-gui-typecheck-"));
+      fixtures.push(dir);
+      const git = (...args: string[]): void => {
+        const run = Bun.spawnSync(["git", ...args], { cwd: dir, env: gitEnv() });
+        if (run.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${run.stderr.toString()}`);
+      };
+      const commit = (path: string): void => {
+        mkdirSync(join(dir, dirname(path)), { recursive: true });
+        writeFileSync(join(dir, path), `${path}\n`);
+        git("add", "--", path);
+        git("commit", "-q", "-m", path);
+      };
+      git("init", "-q", "-b", "dev");
+      // git's default; pinned so a global core.quotePath=false cannot hide the quoting case.
+      git("config", "core.quotePath", "true");
+      mkdirSync(join(dir, "scripts"));
+      copyFileSync(typecheckGuiIfChangedScript, join(dir, "scripts", "typecheck-gui-if-changed.ts"));
+      commit("README.md");
+      const decide = (): string => {
+        const env = { ...gitEnv(), TYPECHECK_DRY_RUN: "1" };
+        delete env.TYPECHECK_FILES;
+        const probe = Bun.spawnSync([process.execPath, join(dir, "scripts", "typecheck-gui-if-changed.ts")], { cwd: dir, env });
+        return probe.stdout.toString().trim();
+      };
+      return { dir, git, commit, decide };
+    };
+
+    test("a branch that touches only non-gui files skips, and one gui commit runs", () => {
+      const fixture = repo();
+      fixture.git("checkout", "-q", "-b", "feature");
+      fixture.commit("scripts/other.ts");
+      expect(fixture.decide()).toBe("typecheck:skip");
+      fixture.commit("gui/src/App.tsx");
+      expect(fixture.decide()).toBe("typecheck:run");
+    });
+
+    test("a non-ASCII gui path still counts as a gui change", () => {
+      // Without -z, git quotes this name ("gui/src/\303\274ber.tsx") and the gui/ prefix check misses it.
+      const fixture = repo();
+      fixture.git("checkout", "-q", "-b", "feature");
+      fixture.git("branch", "-q", "--set-upstream-to=dev");
+      fixture.commit("gui/src/über.tsx");
+      expect(fixture.decide()).toBe("typecheck:run");
+    });
+
+    test("a gui change already on the tracking branch still runs", () => {
+      // The tracking branch holds the gui commit; comparing against @{u} would see nothing to check.
+      const fixture = repo();
+      fixture.git("checkout", "-q", "-b", "feature");
+      fixture.commit("gui/src/App.tsx");
+      fixture.git("branch", "-q", "tracked");
+      fixture.git("branch", "-q", "--set-upstream-to=tracked");
+      expect(fixture.decide()).toBe("typecheck:run");
+    });
+
+    test("a diff that git cannot compute runs the check instead of skipping", () => {
+      // dev and HEAD share no history, so "dev...HEAD" has no merge base and git diff fails.
+      const fixture = repo();
+      fixture.git("checkout", "-q", "--orphan", "unrelated");
+      fixture.git("rm", "-rq", "--cached", "README.md");
+      fixture.commit("scripts/other.ts");
+      fixture.git("branch", "-q", "--set-upstream-to=dev");
+      expect(fixture.decide()).toBe("typecheck:run");
+    });
   });
 
   test("ci gates keeps the GUI build step under the gui path filter", () => {

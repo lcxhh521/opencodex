@@ -9,6 +9,14 @@
  * "tsc -b" is local and deterministic, so a failure always fails the push —
  * there is no soft-skip path.
  *
+ * The base is the merge base with the integration branch (upstream/dev, then origin/dev, then
+ * dev, the order "test:changed" uses), not "@{u}": "prepush" is a package script, not a git hook,
+ * so it never sees the push destination, and a tracking branch can already hold a GUI change
+ * the destination lacks. Everything the branch adds over dev is a superset of any push range.
+ * Paths are read NUL-delimited so a quoted non-ASCII name still matches "gui/". When no base
+ * resolves or the diff itself fails, the check runs rather than reading the failure as "no
+ * gui/ changes".
+ *
  * Test hooks: TYPECHECK_DRY_RUN=1 prints the run/skip decision without
  * spawning; TYPECHECK_FILES (newline-separated) overrides git-derived changed
  * files; TYPECHECK_CMD overrides the spawned command. The default command runs
@@ -39,37 +47,30 @@ if (import.meta.main) {
     }
   };
 
-  const diffNames = (range: string): string[] => {
+  /** Changed paths for the range, or null when git could not produce them. */
+  const diffNames = (range: string): string[] | null => {
     try {
-      const diff = spawnSync("git", ["diff", "--name-only", range], {
+      const diff = spawnSync("git", ["diff", "--name-only", "-z", range], {
         cwd: repoRoot,
         encoding: "utf8",
       });
-      if (diff.status !== 0) return [];
-      return (diff.stdout ?? "")
-        .split(/\r?\n/)
-        .map(line => line.trim())
-        .filter(Boolean);
+      if (diff.status !== 0) return null;
+      return (diff.stdout ?? "").split("\0").filter(Boolean);
     } catch {
-      return [];
+      return null;
     }
   };
 
-  let files: string[];
-  let hadBase = true;
+  // null: no usable base, or the diff failed. Either way the check runs.
+  let files: string[] | null;
   if (process.env.TYPECHECK_FILES !== undefined) {
     files = process.env.TYPECHECK_FILES.split(/\r?\n/).map(f => f.trim()).filter(Boolean);
   } else {
-    let range: string | null = null;
-    if (hasRef("@{u}")) range = "@{u}...HEAD";
-    else if (hasRef("origin/main")) range = "origin/main...HEAD";
-    else if (hasRef("main")) range = "main...HEAD";
-    hadBase = range !== null;
-    files = range ? diffNames(range) : [];
+    const base = ["upstream/dev", "origin/dev", "dev"].find(hasRef);
+    files = base ? diffNames(`${base}...HEAD`) : null;
   }
 
-  // No usable base — run the check so GUI pushes still get one.
-  const shouldRun = hadBase ? guiPathsChanged(files) : true;
+  const shouldRun = files === null || guiPathsChanged(files);
 
   if (process.env.TYPECHECK_DRY_RUN === "1") {
     console.log(shouldRun ? "typecheck:run" : "typecheck:skip");
