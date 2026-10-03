@@ -2,7 +2,7 @@ import { projectAntigravitySelectedModels } from "../../providers/antigravity-ef
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { initializeConfigOwnership } from "../../lib/config-ownership";
-import { getConfigDir, loadConfig, websocketsEnabled } from "../../config";
+import { getConfigDir, loadConfig, websocketsEnabled, withConfigMutationLockSync } from "../../config";
 import { shouldSyncCodexOnStart } from "../desired-state";
 import { legacyCustomModelCatalogSlugs } from "../custom-model-catalog-migration";
 import { getCodexHome } from "../paths";
@@ -41,6 +41,7 @@ import {
 } from "./parsing";
 import type { CatalogModel, MultiAgentMode, RawCatalog, RawEntry } from "./parsing";
 import { routedRemovalBackedByConfigFile, unconfiguredRoutedRemoval } from "./routed-removal";
+import { ConfigMutationLockError } from "../../config/mutation-lock";
 import {
   accountBoundNativeOpenAiSlugsBySelector,
   desktopAllowlistSuppressedNativeSlugs,
@@ -565,18 +566,32 @@ function writeRetainedCatalogSync({
   // Without that, a config that is not the user's (missing or unreadable file read as defaults,
   // another OPENCODEX_HOME) would publish a native-only catalog and exit cleanly (#6529).
   const removal = unconfiguredRoutedRemoval(onDiskCatalog, catalog, config);
-  if (removal !== null && !routedRemovalBackedByConfigFile(removal)) {
-    return {
-      added: 0,
-      path: catalogPath,
-      catalogWritten: false,
-      comboOmissions,
-      skippedReason: "unbacked_routed_removal",
-      protectedRoutedNamespaces: removal.namespaces.length,
-    };
+  if (removal !== null) {
+    // Hold C (K -> C) from the config read through the replacement, so a save that enables one of
+    // these providers cannot land between the check and the write. A held C is a refusal too.
+    let backed = false;
+    try {
+      backed = withConfigMutationLockSync(() => {
+        if (!routedRemovalBackedByConfigFile(removal)) return false;
+        replaceActiveCodexCatalog(permit, owningCodexHome, preparedCatalog);
+        return true;
+      });
+    } catch (error) {
+      if (!(error instanceof ConfigMutationLockError)) throw error;
+    }
+    if (!backed) {
+      return {
+        added: 0,
+        path: catalogPath,
+        catalogWritten: false,
+        comboOmissions,
+        skippedReason: "unbacked_routed_removal",
+        protectedRoutedNamespaces: removal.namespaces.length,
+      };
+    }
+  } else {
+    replaceActiveCodexCatalog(permit, owningCodexHome, preparedCatalog);
   }
-
-  replaceActiveCodexCatalog(permit, owningCodexHome, preparedCatalog);
   return {
     added,
     path: catalogPath,
