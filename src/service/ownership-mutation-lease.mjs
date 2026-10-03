@@ -134,6 +134,9 @@ function leaseHolder(path, now, alive, image) {
   if (!existsSync(path)) return null;
   const observed = readOwner(path);
   const incomplete = observed ? null : readIncompleteOwner(path);
+  // Neither reader matched: the holder may have released between these reads. Report a free
+  // lease then, not an unreadable one.
+  if (!observed && !incomplete && !existsSync(path)) return null;
   const pid = observed?.record.pid ?? incomplete?.pid ?? null;
   const since = observed ? Math.max(observed.record.createdAt, observed.mtimeMs) : incomplete?.mtimeMs ?? null;
   const live = pid === null ? null : alive(pid);
