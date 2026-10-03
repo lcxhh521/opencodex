@@ -119,6 +119,7 @@ export function buildChatgptUnblockWatcherScript(port: number, configDir?: strin
 
 PORT=${port}
 MODE="\${1:-watch}"
+unset CODEX_CLI_PATH
 RESOLVER_ARG=${shellQuote(chatgptUnblockResolverArg(port))}
 SHIM_MODE=${shimMode ? "1" : "0"}
 SHIM_SCRIPT=${shellQuote(chatgptShimLauncherPath(configDir ?? getConfigDir()))}
@@ -232,7 +233,10 @@ fi
 # One run at a time: quitting the app deletes the SingletonLock, which fires launchd again.
 # A lock left by a killed run expires after two minutes.
 find "$LOCK_DIR" -maxdepth 0 -mmin +2 -exec rmdir {} \\; 2>/dev/null
-mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+mkdir "$LOCK_DIR" 2>/dev/null || {
+  [ "$MODE" = launch ] && { echo "another ChatGPT launch is in progress; retry shortly" >&2; exit 1; }
+  exit 0
+}
 trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 
 if [ "$MODE" = native ]; then
@@ -240,7 +244,7 @@ if [ "$MODE" = native ]; then
   if ! app_switched; then say "ChatGPT is already running without the launch switches"; exit 0; fi
   say "ChatGPT carries the launch switches; restarting it without"
   quit_app || { say "ChatGPT did not quit; quit it manually and reopen it"; exit 1; }
-  open -a ChatGPT
+  open -a ChatGPT || { say "could not relaunch ChatGPT with native networking"; exit 1; }
   say "relaunched ChatGPT with native networking"
   exit 0
 fi
@@ -273,7 +277,7 @@ while IFS= read -r arg; do
 done < <(proxy_args)
 OPEN_ENV=()
 if [ "$SHIM_MODE" = 1 ]; then OPEN_ENV=(--env "CODEX_CLI_PATH=$SHIM_SCRIPT"); fi
-open -a ChatGPT \${OPEN_ENV[@]+"\${OPEN_ENV[@]}"} --args "\${ARGS[@]}"
+open -a ChatGPT \${OPEN_ENV[@]+"\${OPEN_ENV[@]}"} --args "\${ARGS[@]}" || { say "could not launch ChatGPT"; exit 1; }
 say "launched ChatGPT with: \${ARGS[*]}"
 `;
 }
@@ -554,7 +558,11 @@ function runLaunchScript(mode: "launch" | "native", port: number, configDir?: st
   }
   // The script goes in on stdin, so no file is needed and the script's own command line never
   // looks like the app's.
+  // An inherited CODEX_CLI_PATH (ocx run inside the app) must not leak into the relaunch.
+  const env = { ...process.env };
+  delete env.CODEX_CLI_PATH;
   const result = spawnSync("/bin/bash", ["-s", mode], {
+    env,
     input: buildChatgptUnblockWatcherScript(port, configDir, shimMode),
     encoding: "utf8",
   });

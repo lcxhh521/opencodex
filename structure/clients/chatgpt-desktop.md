@@ -105,8 +105,14 @@ Each transport still owns its socket, timeout, buffering and post-CONNECT work.
 
 `src/chatgpt/desktop-unblock/launch-watcher.ts` owns resolver/system-proxy launch
 arguments and the optional launchd script. The watcher has no shim mode or PAC
-fallback. Its SingletonLock event checks listener identity, leaves native
-launches alone while the intercept is down, and serializes corrective restarts.
+fallback. Its launchd agent wakes on the app's `SingletonLock` and on the
+`chatgpt-unblock.ready` marker that `startChatgptUnblock` rewrites once the listener is up, so an
+app that opened before opencodex is still routed. Each run checks listener identity, leaves native
+launches alone while the intercept is down, and serializes corrective restarts; an explicit launch
+that meets another run's lock fails with a message instead of reporting success. In watch mode it
+restarts only an app no more than five minutes old (`ps -o etime=`); a missing or unparseable age
+counts as fresh, and explicit launch is not age-limited. A failed `open` exits non-zero rather
+than printing success.
 Explicit CLI launch can supply the existing shim's launcher environment along
 with intercept arguments. A loaded watcher must be uninstalled before CLI
 restore. The CLI preserves shim-only launch without a running proxy and reports

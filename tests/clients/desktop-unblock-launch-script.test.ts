@@ -113,6 +113,7 @@ fi`);
   // Records what follows --args (what the app itself receives) and, apart, the --env pairs. The
   // pairs are appended to the process line: `ps eww` shows a process's environment after its command.
   stub("open", `echo open >> "$STUB_DIR/calls"
+[ "$STUB_OPEN_FAILS" = 1 ] && { echo "stub open: cannot launch" >&2; exit 1; }
 args=(); envs=(); after=0; prev=""
 for a in "$@"; do
   if [ $after = 1 ]; then args+=("$a")
@@ -144,6 +145,8 @@ function run(mode: "watch" | "launch" | "native", options: {
   scutil?: string;
   listener?: "ours" | "foreign" | "down";
   quitIgnored?: boolean;
+  /** `open` fails, as it does when the bundle is gone or LaunchServices refuses it. */
+  openFails?: boolean;
   decoy?: boolean;
   configDir?: string;
   /** Start the app through the app-server shim; a launcher file is written when on. */
@@ -179,6 +182,7 @@ function run(mode: "watch" | "launch" | "native", options: {
       STUB_DIR: dir,
       STUB_LISTENER: options.listener ?? "ours",
       STUB_QUIT_IGNORED: options.quitIgnored ? "1" : "0",
+      STUB_OPEN_FAILS: options.openFails ? "1" : "0",
       STUB_APP_ETIME: options.appEtime ?? "",
       STUB_ANCESTORS: options.appIsAncestor ? "400" : "",
     },
@@ -293,6 +297,30 @@ describe.skipIf(process.platform === "win32")("chatgpt launch watcher", () => {
     const r = run("watch", { app: "plain" });
     expect(r.status).toBe(0);
     expect(r.calls).toEqual([]);
+  });
+
+  test("an explicit launch that finds another run holding the lock says so and fails", () => {
+    mkdirSync(join(dir, "tmp", "opencodex-chatgpt-launch.lock"));
+    const r = run("launch", { app: "plain" });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("another ChatGPT launch is in progress");
+    expect(r.calls).toEqual([]);
+  });
+
+  test("a launch whose open fails after the quit reports the failure instead of success", () => {
+    const r = run("launch", { app: "plain", openFails: true });
+    expect(r.status).toBe(1);
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.stdout).toContain("could not launch ChatGPT");
+    expect(r.stdout).not.toContain("launched ChatGPT with");
+  });
+
+  test("a restore whose open fails reports the failure instead of success", () => {
+    const r = run("native", { app: "flagged", openFails: true });
+    expect(r.status).toBe(1);
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.stdout).toContain("could not relaunch ChatGPT with native networking");
+    expect(r.stdout).not.toContain("relaunched ChatGPT with native networking");
   });
 
   test("the lock is released after a run", () => {
