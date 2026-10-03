@@ -285,6 +285,8 @@ liveness contract.
 
 ## Entry shape
 
+Client exports consume effective model metadata without rewriting custom-model editor overrides. `src/server/management/model-row-export-metadata.ts` resolves inheritance from the gathered catalog and registry-enriched configuration; the [export contract](clients/integrations.md#owned-catalog-convergence) separates declared defaults from picker preferences and preserves cleared effort ladders.
+
 Routed entries keep Codex-required metadata such as reasoning levels, shell type, API support flags,
 base instructions, modalities, auto-compact fields, and strict parser booleans. The public slug uses
 the canonical `provider/model`. Its display name uses the provider's exact `modelDisplayNames` override first,
@@ -595,4 +597,4 @@ Startup and explicit catalog synchronization in `src/codex/sync.ts` refresh the 
 `src/providers/reasoning-metadata.ts` effort snapshot for supported destinations before catalog
 gathering. Each sync waits at most two seconds for a fresh or shared fetch, then continues with the existing snapshot; the fetch retains its own abort deadline. Routed effort reads in
 `src/reasoning-effort.ts` use a snapshot immediately and request a best-effort background refresh
-only when an existing snapshot answers with an expired ladder. Missing or corrupt snapshots do not fetch on the request path; catalog sync owns their bootstrap.
+only when an existing snapshot answers with an expired ladder. Missing or corrupt snapshots do not fetch on the request path; catalog sync owns their bootstrap. Automatic account exhaustion and recovery use the [spendable Codex credit evidence contract](providers/openai-tiers.md#spendable-codex-credits), including independent freshness, upstream refusal, and reset-ticket separation.

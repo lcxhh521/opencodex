@@ -38,6 +38,10 @@ tokio = { version = "=1.45.1", features = ["sync", "time"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus = "=0.9.12"
 
+# Already present in the lock graph; only Windows writes its quoted Run command.
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = "=0.55.0"
+
 [profile.release]
 codegen-units = 1
 lto = "thin"
