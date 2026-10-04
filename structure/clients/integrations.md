@@ -429,18 +429,14 @@ Deleting the client's store to re-trigger its own import is not implemented and 
 discards every provider the client keeps there.
 
 DSH is the second instance: from 0.1.7 it imports `$DSH_HOME/settings.yaml` once into the first
-profile that boots, renames it, and hot reloads provider routes from the `llm-pi-ai` row of a profile
-patch. The store is the Desktop profile's `profiles/desktop/cordis.patch.yml`; the home patch is no
-alternative, because a home row replaces the profile row's whole `config` and the user's routes
-with it. That document is a top-level list of loader rows, so the managed path starts with the
-selector `[id=llm-pi-ai]`: `merge.ts` keeps a sequence root, the source patcher edits that one entry
-as the block map it holds and puts its `- ` and two-space indent back byte for byte, and DSH's empty
-`[]` is the only flow form adopted (and what a disable that empties the list writes back). A row we
-created and pruned down to its selector field is our residue and is removed with it.
-`IntegrationTarget` carries its own `sourcePreservingYaml`, so the legacy file and the store are each
-patched along their own path. A coordinated write holds DSH's `settings.yaml.lock`, then the profile's
-`package.json.lock`, probing for the profile again after each revalidation await; refresh keeps the
-selected row in place, and restore refuses rather than recreate a missing profile directory unlocked.
+booted profile and hot reloads routes from the `llm-pi-ai` row of the store, the Desktop profile's
+`profiles/desktop/cordis.patch.yml` (a home patch row would replace that row's whole `config`). The
+file is a top-level list of loader rows, so the managed path starts with `[id=llm-pi-ai]`: `merge.ts`
+keeps a sequence root, the source patcher rewrites that entry with its `- ` and indent restored byte
+for byte, `[]` is the only flow form adopted or written back, and a created row pruned to its selector
+is removed. `IntegrationTarget` carries its own `sourcePreservingYaml`. Writes hold `settings.yaml.lock`,
+then the profile's `package.json.lock`, re-probing the profile after each revalidation await; refresh
+keeps the selected row in place, and restore refuses to recreate a missing profile directory unlocked.
 
 ## Verification
 
