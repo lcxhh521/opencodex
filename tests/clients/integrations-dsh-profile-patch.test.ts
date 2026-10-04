@@ -1,19 +1,24 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DSH_PROFILE_PROVIDER_PATH, type ExportModel } from "../../src/clients/config-export";
 import { INTEGRATION_CLIENTS } from "../../src/integrations/registry";
+import { defaultIntegrationIO } from "../../src/integrations/config-io";
 import { readIntegrationState, readPath } from "../../src/integrations/state";
 import { createIntegrationStateStore, type IntegrationStateStore } from "../../src/integrations/store";
 import {
   applyIntegration,
   applyIntegrationCoordinated,
   disableIntegration,
+  disableIntegrationCoordinated,
   refreshIntegration,
+  restoreIntegrationCoordinated,
+  overwriteIntegration,
   type IntegrationWriteInput,
 } from "../../src/integrations/writer";
-import type { IntegrationWriterLockSeams } from "../../src/integrations/writer-lock";
+import { IntegrationWriterLockBusyError, IntegrationWriterLockIOError, type IntegrationWriterLockSeams } from "../../src/integrations/writer-lock";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
@@ -86,6 +91,27 @@ function input(overrides: Partial<IntegrationWriteInput> = {}): IntegrationWrite
   return { clientId: "dsh", models: MODELS, config: CONFIG, port: 10100, env: TEST_ENV, home, store, ...overrides };
 }
 
+// Observe actual filesystem locks at the mutation boundary, including undo.
+function lockedInput(): IntegrationWriteInput {
+  const io = defaultIntegrationIO(store);
+  return input({ io: { ...io, writeText: (path, text) => {
+    expect(existsSync(`${settingsPath()}.lock`)).toBe(true);
+    if (path === storePath()) expect(existsSync(join(dirname(path), "package.json.lock"))).toBe(true);
+    io.writeText(path, text);
+  } } });
+}
+
+function realLocks(onAcquire?: (path: string) => void): IntegrationWriterLockSeams {
+  return {
+    writeFile: async (path, payload, options) => {
+      onAcquire?.(path);
+      await writeFile(path, payload, options);
+    },
+    removeFile: async path => { await rm(path); },
+    now: () => 0, delay: async () => {}, pid: 4242,
+  };
+}
+
 beforeEach(() => {
   const base = mkdtempSync(join(tmpdir(), "ocx-dsh-profile-"));
   home = join(base, "home");
@@ -142,6 +168,43 @@ describe("DSH Desktop profile patch", () => {
     expect(readStore().endsWith("    welcomeNoticeVersion: 2026-08-13.1\n")).toBe(true);
   });
 
+  for (const initial of [TEMPLATE, "[]\n"]) {
+    for (const position of ["before", "after"] as const) {
+      test(`refresh keeps a created row's position with a user row ${position} (${initial === TEMPLATE ? "template" : "empty"})`, () => {
+        installDesktop(initial);
+        expect(applyIntegration(input()).ok).toBe(true);
+        const created = store.readRecords().dsh!.createdContainers;
+        const userRow = "# user's loader row\n- id: ui-settings-general\n  config:\n    welcomeNoticeVersion: 2026-08-13.1 # keep this comment\n";
+        const managed = readStore();
+        const header = initial.slice(0, initial.indexOf("[]"));
+        writeFileSync(storePath(), position === "after"
+          ? managed + userRow : header + userRow + managed.slice(header.length));
+
+        expect(refreshIntegration(input({ models: MORE_MODELS }))).toMatchObject({ ok: true, changed: true });
+        expect((parsedStore() as Array<{ id: string }>).map(row => row.id)).toEqual(position === "after"
+          ? ["llm-pi-ai", "ui-settings-general"] : ["ui-settings-general", "llm-pi-ai"]);
+        expect(readPath(parsedStore(), [...DSH_PROFILE_PROVIDER_PATH, "models"])).toHaveLength(MORE_MODELS.length);
+        expect(readStore()).toContain(userRow);
+        expect(store.readRecords().dsh!.createdContainers).toEqual(created);
+        // A second refresh must not forget who originally created the row.
+        expect(refreshIntegration(input({ port: 10101 }))).toMatchObject({ ok: true, changed: true });
+        expect(disableIntegration(input()).ok).toBe(true);
+        expect(readStore()).toBe(header + userRow);
+      });
+    }
+  }
+
+  test("explicit overwrite also keeps a created row before a later user row", () => {
+    installDesktop(TEMPLATE);
+    expect(applyIntegration(input()).ok).toBe(true);
+    const later = "- id: ui-chat\n  config:\n    transcriptView: detailed # keep\n";
+    writeFileSync(storePath(), readStore().replace("openai-responses", "openai-completions") + later);
+    expect(overwriteIntegration(input({ models: MORE_MODELS }))).toMatchObject({ ok: true, changed: true });
+    expect((parsedStore() as Array<{ id: string }>).map(row => row.id)).toEqual(["llm-pi-ai", "ui-chat"]);
+    expect(disableIntegration(input()).ok).toBe(true);
+    expect(readStore()).toBe(TEMPLATE.slice(0, TEMPLATE.indexOf("[]")) + later);
+  });
+
   test("disable gives back the exact file it was enabled on", () => {
     installDesktop(TEMPLATE);
     expect(applyIntegration(input()).ok).toBe(true);
@@ -153,6 +216,15 @@ describe("DSH Desktop profile patch", () => {
     expect(disableIntegration(input()).ok).toBe(true);
     expect(readStore()).toBe(LIVED_IN);
   });
+
+  for (const original of ["[]", "[]\r\n", "# header\r\n[]", TEMPLATE.replaceAll("\n", "\r\n"), LIVED_IN.trimEnd(), LIVED_IN.replaceAll("\n", "\r\n")]) {
+    test(`disable preserves final newline and line endings (${JSON.stringify(original.slice(-12))})`, () => {
+      installDesktop(original);
+      expect(applyIntegration(input()).ok).toBe(true);
+      expect(disableIntegration(input()).ok).toBe(true);
+      expect(readStore()).toBe(original);
+    });
+  }
 
   test("disable keeps a row we created once the user put something of theirs in it", () => {
     installDesktop(TEMPLATE);
@@ -201,5 +273,96 @@ describe("DSH Desktop profile patch", () => {
     expect((await applyIntegrationCoordinated(input(), { lockSeams: seams })).ok).toBe(true);
 
     expect(locks).toEqual([`${settingsPath()}.lock`, join(dirname(storePath()), "package.json.lock")]);
+  });
+
+  test("a profile appearing during settings-lock acquisition is locked before mutation", async () => {
+    const acquired: string[] = [];
+    const seams = realLocks(path => {
+      acquired.push(path);
+      if (path === `${settingsPath()}.lock`) installDesktop(TEMPLATE);
+      else {
+        expect(existsSync(`${settingsPath()}.lock`)).toBe(true);
+        expect(readStore()).toBe(TEMPLATE);
+      }
+    });
+    expect((await applyIntegrationCoordinated(lockedInput(), { lockSeams: seams })).ok).toBe(true);
+    expect(acquired).toEqual([`${settingsPath()}.lock`, join(dirname(storePath()), "package.json.lock")]);
+    expect(store.readRecords().dsh!.configPath).toBe(storePath());
+    expect(existsSync(settingsPath())).toBe(false);
+  });
+
+  test("a profile appearing during revalidation is locked and revalidated again", async () => {
+    let validations = 0;
+    const options = {
+      lockSeams: realLocks(),
+      revalidate: async () => {
+        validations += 1;
+        expect(existsSync(`${settingsPath()}.lock`)).toBe(true);
+        if (validations === 1) installDesktop(TEMPLATE);
+        else expect(existsSync(join(dirname(storePath()), "package.json.lock"))).toBe(true);
+        expect(readStore()).toBe(TEMPLATE);
+        return null;
+      },
+    };
+    expect((await applyIntegrationCoordinated(lockedInput(), options)).ok).toBe(true);
+    expect(validations).toBe(2);
+    expect(store.readRecords().dsh!.configPath).toBe(storePath());
+  });
+
+  test("revalidation can refuse the newly locked profile without writing it", async () => {
+    let validations = 0;
+    const result = await applyIntegrationCoordinated(lockedInput(), {
+      lockSeams: realLocks(),
+      revalidate: async () => {
+        if (++validations === 1) { installDesktop(TEMPLATE); return null; }
+        expect(existsSync(join(dirname(storePath()), "package.json.lock"))).toBe(true);
+        return { ok: false, clientId: "dsh", reason: "conflict", state: "conflict", message: "plan changed" };
+      },
+    });
+    expect(result).toMatchObject({ ok: false, message: "plan changed" });
+    expect(readStore()).toBe(TEMPLATE);
+    expect(store.readRecords().dsh).toBeUndefined();
+    expect(existsSync(`${settingsPath()}.lock`)).toBe(false);
+    expect(existsSync(join(dirname(storePath()), "package.json.lock"))).toBe(false);
+  });
+
+  for (const code of ["EACCES", "EEXIST"]) {
+    test(`nested profile-lock acquisition failure (${code}) releases the settings lock`, async () => {
+      installDesktop(TEMPLATE);
+      const profileLock = join(dirname(storePath()), "package.json.lock");
+      if (code === "EEXIST") writeFileSync(profileLock, "another writer\n");
+      let now = 0;
+      const seams = realLocks(path => {
+        if (path === profileLock) {
+          expect(existsSync(`${settingsPath()}.lock`)).toBe(true);
+          expect(readStore()).toBe(TEMPLATE);
+          throw Object.assign(new Error("lock denied"), { code });
+        }
+      });
+      seams.now = () => now;
+      seams.delay = async milliseconds => { now += milliseconds; };
+      await expect(applyIntegrationCoordinated(lockedInput(), { lockSeams: seams })).rejects.toBeInstanceOf(
+        code === "EEXIST" ? IntegrationWriterLockBusyError : IntegrationWriterLockIOError,
+      );
+      expect(existsSync(`${settingsPath()}.lock`)).toBe(false);
+      expect(readStore()).toBe(TEMPLATE);
+      expect(store.readRecords().dsh).toBeUndefined();
+      if (code === "EEXIST") expect(readFileSync(profileLock, "utf8")).toBe("another writer\n");
+    });
+  }
+
+  test("disable and restore both hold the profile lock through their writes", async () => {
+    installDesktop(TEMPLATE);
+    const options = { lockSeams: realLocks() };
+    expect((await applyIntegrationCoordinated(lockedInput(), options)).ok).toBe(true);
+    const managed = readStore();
+    const disabled = await disableIntegrationCoordinated(lockedInput(), options);
+    expect(disabled).toMatchObject({ ok: true, changed: true });
+    if (!disabled.ok || !disabled.opId) throw new Error("missing disable operation");
+    expect(readStore()).toBe(TEMPLATE);
+    expect((await restoreIntegrationCoordinated({ ...lockedInput(), opId: disabled.opId }, options)).ok).toBe(true);
+    expect(readStore()).toBe(managed);
+    expect(existsSync(`${settingsPath()}.lock`)).toBe(false);
+    expect(existsSync(join(dirname(storePath()), "package.json.lock"))).toBe(false);
   });
 });

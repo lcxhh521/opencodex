@@ -637,7 +637,8 @@ function removeSequenceEntryPath(
     }
   }
   // A list left with no entries goes back to the `[]` DSH writes for an empty one.
-  return spliceEntry(text, entry, entry.siblings === 0 ? `[]${lineEnding(text)}` : "");
+  const eol = lineEnding(text);
+  return preserveFinalNewline(spliceEntry(text, entry, entry.siblings === 0 ? `[]${eol}` : ""), text, eol);
 }
 
 function removeExactPath(text: string, path: readonly string[], requireEmpty: boolean): string | null {
@@ -680,7 +681,7 @@ function planSourceRemoval(
     next = pruned;
     prunedContainers.push(encoded);
   }
-  return { text: next, prunedContainers };
+  return { text: preserveFinalNewline(next, text, lineEnding(text)), prunedContainers };
 }
 
 /** Containers whose source ranges are still empty and safe to prune. */

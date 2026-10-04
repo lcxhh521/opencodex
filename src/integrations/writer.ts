@@ -33,7 +33,7 @@ import {
   refreshablePathsOf,
   semanticProtectedContributionFingerprint,
 } from "./ownership-policy";
-import { AmbiguousSelectorError, createdContainerPaths, mergeContribution, removeFragments } from "./merge";
+import { AmbiguousSelectorError, createdContainerPaths, mergeContribution, parseSegment, removeFragments } from "./merge";
 import {
   INTEGRATION_CLIENTS,
   assertDroidPathsUnambiguous,
@@ -383,8 +383,15 @@ function applyOrRefreshIntegration(
   let created: string[];
   let text: string;
   try {
+    // The source patcher updates this selected row in place. Keep it in the
+    // semantic merge too, even when we originally created it, and retain that
+    // provenance so disable can still remove the row when it becomes empty.
+    const sourceRoot = target.sourcePreservingYaml?.path[0];
+    const retainedRow = sourceRoot && parseSegment(sourceRoot).kind === "select" ? sourceRoot : null;
+    const priorCreated = record?.createdContainers ?? [];
+    const prunable = new Set(priorCreated.filter(path => path !== retainedRow));
     const base = classified.state === "stale" && record
-      ? removeFragments(parsed, record.fragmentPaths, new Set(record.createdContainers ?? [])).doc
+      ? removeFragments(parsed, record.fragmentPaths, prunable).doc
       : classified.state === "conflict" && record
         /*
          * A forced overwrite of a `foreign-edit` conflict drops what the previous
@@ -399,11 +406,12 @@ function applyOrRefreshIntegration(
          * them, so a later disable removes our leaves and leaves their structure
          * standing.
          */
-        ? removeFragments(parsed, record.fragmentPaths, new Set(record.createdContainers ?? [])).doc
+        ? removeFragments(parsed, record.fragmentPaths, prunable).doc
         : parsed;
     // Computed against the document as it stands BEFORE the merge: afterwards
     // every container exists and "did we create this?" is unanswerable.
     created = createdContainerPaths(base, contribution);
+    if (retainedRow && priorCreated.includes(retainedRow)) created = [...new Set([retainedRow, ...created])];
     const nextDocument = mergeContribution(base, contribution);
     if (clientId === "cline") preserveClineSelection(parsed, nextDocument);
     if (target.sourcePreservingYaml && before !== null) {
@@ -887,15 +895,30 @@ function storeLockFile(frozen: FrozenIntegrationInput): string | null {
  * them in that order, so two of ours cannot deadlock, and the client's own
  * writer only ever holds one of them.
  */
-function withClientLocks<T>(
+function withClientLocks(
   frozen: FrozenIntegrationInput,
   suffix: ".lock",
-  run: () => Promise<T>,
-  seams?: IntegrationWriterLockSeams,
-): Promise<T> {
-  const storeLock = storeLockFile(frozen);
-  const locked = storeLock === null ? run : () => withIntegrationWriterLock(storeLock, run, seams, ".lock");
-  return withIntegrationWriterLock(frozen.resolvedPaths.configPath, locked, seams, suffix);
+  operation: () => WriteOutcome,
+  options?: CoordinatedIntegrationOptions,
+): Promise<WriteOutcome> {
+  const run = async (heldStoreLock: string | null): Promise<WriteOutcome> => {
+    const refused = await options?.revalidate?.(frozen);
+    if (refused) return refused;
+    // A profile can appear while revalidation awaits. Acquire its lock and
+    // repeat the validation before observing or mutating its document.
+    const required = storeLockFile(frozen);
+    if (required !== null && required !== heldStoreLock) {
+      return withIntegrationWriterLock(required, () => run(required), options?.lockSeams, ".lock");
+    }
+    // No await between the last store probe and the synchronous transaction.
+    return operation();
+  };
+  return withIntegrationWriterLock(frozen.resolvedPaths.configPath, () => {
+    // Decide only after the outer lock has actually been acquired.
+    const storeLock = storeLockFile(frozen);
+    return storeLock === null ? run(null)
+      : withIntegrationWriterLock(storeLock, () => run(storeLock), options?.lockSeams, ".lock");
+  }, options?.lockSeams, suffix);
 }
 
 async function coordinatedWrite(
@@ -915,16 +938,14 @@ async function coordinatedWrite(
   // An absent client home is not created merely to acquire a sibling lock.
   if (frozen.io.statKind(frozen.resolvedPaths.detectDir) !== "dir") {
     const refused = await options?.revalidate?.(frozen);
-    return refused ?? operation(frozen);
+    if (refused) return refused;
+    if (frozen.io.statKind(frozen.resolvedPaths.detectDir) !== "dir") return operation(frozen);
   }
   return withClientLocks(
     frozen,
     spec.writerLock.suffix,
-    async () => {
-      const refused = await options?.revalidate?.(frozen);
-      return refused ?? operation(frozen);
-    },
-    options?.lockSeams,
+    () => operation(frozen),
+    options,
   );
 }
 
@@ -980,12 +1001,7 @@ export async function restoreIntegrationCoordinated(
   return withClientLocks(
     frozen,
     spec.writerLock.suffix,
-    async () => {
-      // An undo is bound like any other confirmation, and this is the only place where that check
-      // happens with the lock held and before the snapshot, the write and the journal row.
-      const refused = await options?.revalidate?.(frozen);
-      return refused ?? run();
-    },
-    options?.lockSeams,
+    run,
+    options,
   );
 }
