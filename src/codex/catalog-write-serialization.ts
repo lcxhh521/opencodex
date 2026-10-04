@@ -30,6 +30,7 @@ import { Database } from "bun:sqlite";
 
 import { appendCatalogWriteAudit } from "./catalog/write-audit";
 import { inspectCodexHomeOwner } from "./codex-home-owner";
+import { assertNotRealCodexHomeUnderTest } from "../lib/test-home-guard";
 import {
   CodexUserIdentityRefusal,
   resolveCodexCatalogSerializationDatabasePath,
@@ -170,6 +171,9 @@ export function withCatalogWriteSerialization<T>(
   write: (permit: CatalogWritePermit) => T,
   options: CatalogWriteOptions,
 ): CatalogSerializationOutcome<T> {
+  // First, ahead of the owner check and its audit append: a test process never gets a permit for
+  // the real Codex home, whatever its CODEX_HOME resolved to (#6529).
+  assertNotRealCodexHomeUnderTest(canonicalCodexHome);
   // Checked before K is even opened: a writer from another OPENCODEX_HOME gets no permit, so no
   // catalog, backup or cache mutator below can run for it (#6529). It still leaves a trace, but
   // only in an audit file the owner already created.
