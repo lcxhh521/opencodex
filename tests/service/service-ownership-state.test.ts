@@ -633,55 +633,55 @@ describe("a busy runtime mutation lease names its holder (#6492)", () => {
     throw new Error("the lease was granted");
   };
 
-  test("the timeout error carries the holder's pid, liveness, image, age and the reclaim rule", () => {
+  test("the timeout error labels the recorded PID, unverified identity, liveness, image, age and reclaim rule", () => {
     hold(6236);
     const error = busyError({ now: () => 213_000, processAlive: () => true, processImage: () => "python.exe" });
     expect(error.message).toContain("another process owns the runtime mutation lease at ");
-    expect(error.message).toContain("(holder pid 6236 [alive, python.exe], held 212s; "
-      + "stale leases are reclaimed after 30s once the holder exits)");
+    expect(error.message).toContain("(recorded PID 6236 [alive, python.exe, identity unverified], lease age 212s; "
+      + "stale leases are reclaimed after 30s once the recorded PID is no longer alive)");
     expect(error.code).toBe("OWNERSHIP_MUTATION_LEASE_BUSY");
     expect(error.holder).toMatchObject({ pid: 6236, alive: true, image: "python.exe", ageMs: 212_000, record: "complete" });
   });
 
-  test("an exited holder inside the stale grace is named as exited, without an image lookup", () => {
+  test("a recorded PID that is not alive inside the stale grace skips the image lookup", () => {
     hold(6236);
     const error = busyError({
       now: () => 6_000,
       processAlive: () => false,
       processImage: () => { throw new Error("a dead pid must not be looked up"); },
     });
-    expect(error.message).toContain("(holder pid 6236 [exited], held 5s; ");
+    expect(error.message).toContain("(recorded PID 6236 [not alive, identity unverified], lease age 5s; ");
   });
 
-  test("a failed image lookup still names a live holder", () => {
+  test("a failed image lookup still names a live recorded PID with unverified identity", () => {
     hold(6236);
     expect(busyError({ now: () => 2_000, processAlive: () => true, processImage: () => null }).message)
-      .toContain("(holder pid 6236 [alive], held 1s; ");
+      .toContain("(recorded PID 6236 [alive, identity unverified], lease age 1s; ");
   });
 
   test("an incomplete owner file is named by the pid in its file name", () => {
     hold(6236, "{}");
     expect(busyError({ now: () => 2_000, processAlive: () => true, processImage: () => "helper.exe" }).message)
-      .toContain("(holder pid 6236 [alive, helper.exe, owner record incomplete], held 1s; ");
+      .toContain("(recorded PID 6236 [alive, helper.exe, identity unverified, owner record incomplete], lease age 1s; ");
   });
 
   test("an empty lock directory and an ambiguous one say so instead of naming a pid", () => {
     mkdirSync(lockDir(), { recursive: true });
-    expect(busyError({ now: () => Date.now(), processAlive: () => true }).message).toContain("(no owner file written yet, held ");
+    expect(busyError({ now: () => Date.now(), processAlive: () => true }).message).toContain("(no owner file written yet, lease age ");
     writeFileSync(`${lockDir()}/one.json`, "{}");
     writeFileSync(`${lockDir()}/two.json`, "{}");
     expect(busyError({ now: () => Date.now(), processAlive: () => true }).message)
       .toContain("(holder unknown: the lock directory does not hold exactly one owner file; ");
   });
 
-  test("the status line is absent while the lease is free and names the holder while it is held", () => {
+  test("the status line is absent while free and reports the recorded PID with unverified identity while busy", () => {
     const options = { now: () => 213_000, processAlive: () => true, processImage: () => "python.exe" };
     expect(ownershipMutationLeaseStatusLine([serviceStatePath()], options)).toBeNull();
     hold(6236);
     const line = ownershipMutationLeaseStatusLine([serviceStatePath()], options);
     expect(line).toContain("Runtime mutation lease busy at ");
-    expect(line).toContain("(holder pid 6236 [alive, python.exe], held 212s); ");
-    expect(line).toContain("stale leases are reclaimed after 30s once the holder exits.");
+    expect(line).toContain("(recorded PID 6236 [alive, python.exe, identity unverified], lease age 212s); ");
+    expect(line).toContain("stale leases are reclaimed after 30s once the recorded PID is no longer alive.");
   });
 
   test("inspection only reads: a dead, stale holder is reported, not reclaimed", () => {

@@ -5,17 +5,18 @@ export interface OwnershipMutationLeaseOptions {
   readonly processAlive?: (pid: number) => boolean;
   readonly beforeRelease?: (lockPath: string) => void;
   readonly joinToken?: string;
-  /** Names a live holder's executable for diagnostics; the default asks `tasklist` or `ps`. */
+  /** Names the current executable at the recorded PID, identity unverified; defaults to `tasklist` or `ps`. */
   readonly processImage?: (pid: number) => string | null;
 }
 
-/** Who holds the lease directory, as read for diagnostics; never used to reclaim it. */
+/** The recorded lease owner, identity unverified, read for diagnostics; never used to reclaim it. */
 export interface OwnershipMutationLeaseHolder {
   readonly path: string;
-  /** Null when the directory holds no parseable owner. */
+  /** The recorded PID; null when the directory holds no parseable owner. */
   readonly pid: number | null;
+  /** Liveness of the current process at the recorded PID; identity is not verified. */
   readonly alive: boolean | null;
-  /** The holder's executable name when it is alive and the lookup answered. */
+  /** The current executable at the recorded PID when alive and readable; identity is not verified. */
   readonly image: string | null;
   /** Milliseconds since the owner was written, on the clock stale recovery uses. */
   readonly ageMs: number | null;

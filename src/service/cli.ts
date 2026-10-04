@@ -421,7 +421,7 @@ export async function serviceCommand(...args: (string | undefined)[]): Promise<v
         console.log(await serviceStatusReport());
       }
       // A busy lease is why a supervised start can keep failing while the line above only
-      // says "not running"; name its holder here instead of leaving it to the lock directory.
+      // says "not running"; report its recorded PID with unverified identity and lease age here.
       const lease = ownershipMutationLeaseStatusLine(serviceStatePaths());
       if (lease) console.log(lease);
       console.log(`Diagnostics: ${serviceDiagnosticsSummary()}`);

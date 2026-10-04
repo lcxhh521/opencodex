@@ -109,7 +109,7 @@ function readIncompleteOwner(path) {
   } catch { return null; }
 }
 
-/** The executable name of a live PID, best effort: null when it cannot be read within a second. */
+/** The current executable at the recorded PID, identity unverified; null if unreadable within a second. */
 function processImage(pid) {
   try {
     if (process.platform === "win32") {
@@ -126,9 +126,10 @@ function processImage(pid) {
 }
 
 /**
- * Who holds the lease directory at `path`, read the same way stale recovery reads it, or null
+ * The recorded owner of the lease directory at `path`, read as stale recovery reads it, or null
  * when no lock directory exists. `pid` is null when the directory has no parseable owner; `age`
  * uses the same clock as reclamation (the later of the record's creation and its file mtime).
+ * Liveness and image describe the current process at the recorded PID; its identity is not verified.
  */
 function leaseHolder(path, now, alive, image) {
   if (!existsSync(path)) return null;
@@ -151,23 +152,23 @@ function leaseHolder(path, now, alive, image) {
 }
 
 function describeHolder(holder) {
-  const age = holder.ageMs === null ? "" : `, held ${Math.round(holder.ageMs / 1_000)}s`;
+  const age = holder.ageMs === null ? "" : `, lease age ${Math.round(holder.ageMs / 1_000)}s`;
   if (holder.record === "unreadable") return "holder unknown: the lock directory does not hold exactly one owner file";
   if (holder.record === "empty") return `no owner file written yet${age}`;
-  const state = holder.alive ? ["alive", ...(holder.image ? [holder.image] : [])].join(", ") : "exited";
+  const state = holder.alive ? ["alive", ...(holder.image ? [holder.image] : [])].join(", ") : "not alive";
   const partial = holder.record === "incomplete" ? ", owner record incomplete" : "";
-  return `holder pid ${holder.pid} [${state}${partial}]${age}`;
+  return `recorded PID ${holder.pid} [${state}, identity unverified${partial}]${age}`;
 }
 
-const RECLAIM_HINT = `stale leases are reclaimed after ${STALE_MS / 1_000}s once the holder exits`;
+const RECLAIM_HINT = `stale leases are reclaimed after ${STALE_MS / 1_000}s once the recorded PID is no longer alive`;
 
-/** The lease holder for `statePaths`, or null when the lease is free. Reads only; never reclaims. */
+/** The recorded lease owner for `statePaths`, identity unverified, or null if free. Reads only; never reclaims. */
 export function inspectOwnershipMutationLease(statePaths, options = {}) {
   return leaseHolder(leasePath(statePaths), options.now ?? Date.now, options.processAlive ?? processAlive,
     options.processImage ?? processImage);
 }
 
-/** One status line naming the lease holder, or null when the lease is free. */
+/** One status line naming the recorded PID, identity unverified, or null when the lease is free. */
 export function ownershipMutationLeaseStatusLine(statePaths, options = {}) {
   const holder = inspectOwnershipMutationLease(statePaths, options);
   if (!holder) return null;
