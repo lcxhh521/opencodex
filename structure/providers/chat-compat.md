@@ -122,13 +122,12 @@ and synthesizing explicit "no tool result was recorded" answers only when no rea
 (Kimi/Moonshot 400 `ocx-mrqaiw05-269`; unit `devlog/_fin/260718_dangling_toolcall_hardening`).
 
 The native Ollama wire carries the same contract. `src/adapters/ollama-native.ts`
-`buildNativeMessages` defers `user`/`developer` messages that arrive while a batch is open and
-releases them after the tool messages, and answers a call with no result anywhere in the replayed
-history with the same `[ocx] no tool result was recorded for "<name>"` marker. The shape it
-absorbs is ordinary Codex history, not a malformed one: Codex records mid-turn items (a
-`PostToolUse` hook verdict, a context notice) between an assistant `tool_calls` message and that
-call's own result. The strict pair checks (orphan result, duplicate result, result naming another
-tool) still throw on both wires (#4842).
+`buildNativeMessages` defers `user`/`developer` messages while a batch is open; assistant text/thinking
+with no new tool calls is also deferred while results remain outstanding. Deferred messages retain arrival order after recorded results; an unresolved counter avoids rescanning calls per message.
+A new tool-call batch settles its predecessor. Additional results in an open batch join in arrival
+order, preserving images and error markers; known late output uses an attributed user-text carrier
+after any pending batch. Unknown IDs and mismatched names/namespaces still throw; missing results
+retain the unknown-status marker; the replay and tool-continuation tests under `tests/providers/ollama/` cover both paths. See the decision record below.
 
 Forward-mode OpenAI passthrough also repairs replayed `call_id` values longer than the Responses
 API's 64-character limit. Sidechat/fork replay can namespace routed-provider ids beyond that limit,
@@ -224,6 +223,7 @@ serving-identity record. That omission is intentional: binding those routes woul
 conversation's last-serving identity and cause a later main-model turn to strip valid blobs.
 
 > Decision record: [ADR-0051](../decisions/ADR-0051-reasoning-and-tool-result-compatibility.md)
+> Decision record: [ADR-6574](../decisions/ADR-6574-ollama-tool-continuations.md)
 
 DeepSeek's stateless Responses compatibility pass normalizes only unambiguous tool-call batches.
 Calls emitted before the first matched output stay together as one assistant batch, followed by

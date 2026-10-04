@@ -71,12 +71,13 @@ interface PendingToolCall {
   namespace?: string;
   wireName: string;
   order: number;
-  result?: OcxMessage & { role: "toolResult" };
+  results: Array<OcxMessage & { role: "toolResult" }>;
 }
 
 interface PendingToolBatch {
   calls: PendingToolCall[];
   byId: Map<string, PendingToolCall>;
+  unresolvedCount: number;
 }
 
 interface NativeStreamToolCall {
@@ -302,6 +303,12 @@ function assistantTextThinkingAndCalls(message: OcxAssistantMessage): {
   };
 }
 
+/**
+ * Build native replay messages without mutating the parsed history. Keep tool results
+ * beside their originating batch, deferring intervening conversation until settlement.
+ * Reserve replayed call IDs for response translation and mark missing results explicitly.
+ * @throws When call IDs are invalid or results are orphaned or mismatched.
+ */
 function buildNativeMessages(
   parsed: OcxParsedRequest,
   reservedToolCallIds: Set<string>,
@@ -317,25 +324,27 @@ function buildNativeMessages(
   // owned by this adapter/request lifecycle rather than process-global state.
   reservedToolCallIds.clear();
   let pending: PendingToolBatch | undefined;
+  const issuedCalls = new Map<string, PendingToolCall>();
   // Codex records mid-turn injections (a PostToolUse hook verdict, a context notice) between an
   // assistant tool call and that call's own tool result. Native Ollama needs the call and its
   // results adjacent, so those conversational messages wait here instead of closing the batch
   // early. The openai-chat adapter defers them the same way; refusing the replay killed the turn.
   let deferred: OllamaNativeMessage[] = [];
 
+  /** Emit held conversation messages in their recorded arrival order after settlement. */
   const releaseDeferred = (): void => {
     if (deferred.length === 0) return;
     messages.push(...deferred);
     deferred = [];
   };
 
+  /** Settle the open batch with genuine results or unknown markers, then release deferred messages. */
   const flushPending = (): void => {
     if (!pending) return;
     for (const call of pending.calls) {
-      if (!call.result) {
-        // No result exists anywhere in the replayed history: the turn was interrupted, or the
-        // result never reached it. State exactly that instead of inventing an outcome, and keep
-        // the conversation replayable.
+      if (call.results.length === 0) {
+        // No result was available when this batch settled. A later notification is carried
+        // separately, not used to invent an outcome at this earlier conversation boundary.
         messages.push({
           role: "tool",
           tool_call_id: call.id,
@@ -347,13 +356,18 @@ function buildNativeMessages(
         });
         continue;
       }
-      const translated = contentToNative(call.result.content, "tool result");
+      // A code-mode cell can yield, then notify repeatedly. Join once at settlement rather
+      // than repeatedly copying an ever-growing result, and never mutate the source history.
+      const fragments = call.results.map(result => ({
+        ...contentToNative(result.content, "tool result"), isError: result.isError,
+      }));
+      const images = fragments.flatMap(fragment => fragment.images ?? []);
       messages.push({
         role: "tool",
         tool_call_id: call.id,
         tool_name: call.wireName,
-        content: translated.content,
-        ...(translated.images ? { images: translated.images } : {}),
+        content: fragments.map(fragment => `${fragment.isError ? "ERROR: " : ""}${fragment.content}`).join("\n"),
+        ...(images.length ? { images } : {}),
       });
     }
     pending = undefined;
@@ -362,27 +376,37 @@ function buildNativeMessages(
 
   for (const message of parsed.context.messages) {
     if (message.role === "toolResult") {
-      if (!pending) {
-        throw new Error(`ollama-native orphan tool result ${message.toolCallId || "<missing-id>"}`);
-      }
-      const call = pending.byId.get(message.toolCallId);
+      const call = issuedCalls.get(message.toolCallId);
       if (!call) {
-        throw new Error(`ollama-native tool result ${message.toolCallId || "<missing-id>"} has no originating call`);
-      }
-      if (call.result) {
-        throw new Error(`ollama-native duplicate tool result for ${message.toolCallId}`);
+        throw new Error(pending
+          ? `ollama-native tool result ${message.toolCallId || "<missing-id>"} has no originating call`
+          : `ollama-native orphan tool result ${message.toolCallId || "<missing-id>"}`);
       }
       if (call.name !== message.toolName || call.namespace !== message.toolNamespace) {
         throw new Error(`ollama-native tool result ${message.toolCallId} names the wrong originating tool`);
       }
-      call.result = message;
+      if (pending?.byId.has(call.id)) {
+        if (call.results.length === 0) pending.unresolvedCount--;
+        call.results.push(message);
+      } else {
+        // Reopening a settled batch would split a later call/result pair. Keep known late
+        // output explicitly attributed as conversation text instead of dropping it or
+        // fabricating another executable call. Unknown/mismatched identities still fail above.
+        const translated = contentToNative(message.content, "late tool result");
+        const late: OllamaNativeMessage = { role: "user",
+          content: `[ocx] additional output for previously issued tool "${call.wireName}" (${call.id}):\n${message.isError ? "ERROR: " : ""}${translated.content}`,
+          ...(translated.images ? { images: translated.images } : {}),
+        };
+        if (pending) deferred.push(late);
+        else messages.push(late);
+      }
       continue;
     }
 
     // Native Ollama requires the whole assistant tool-call turn followed by its tool results. A
     // conversational message that arrives while the batch is still open is held aside instead of
     // closing it, so the call keeps its results adjacent; it is released right after the batch
-    // flushes. Anything else (a new assistant turn) settles the batch first.
+    // flushes. A new assistant tool-call batch settles the preceding batch first.
     if (pending) {
       if (message.role === "user" || message.role === "developer") {
         const translated = message.role === "user"
@@ -392,6 +416,19 @@ function buildNativeMessages(
           ? { role: "user", content: translated.content, ...(translated.images ? { images: translated.images } : {}) }
           : { role: "system", content: translated.content });
         continue;
+      }
+      if (message.role === "assistant" && pending.unresolvedCount > 0) {
+        const extracted = assistantTextThinkingAndCalls(message);
+        if (extracted.calls.length === 0) {
+          // Commentary can follow the call items but precede their recorded results.
+          // Keep the batch open and release its text/thinking after the actual results.
+          deferred.push({
+            role: "assistant",
+            content: extracted.content,
+            ...(extracted.thinking ? { thinking: extracted.thinking } : {}),
+          });
+          continue;
+        }
       }
       flushPending();
     }
@@ -427,8 +464,10 @@ function buildNativeMessages(
             namespace: call.namespace,
             wireName,
             order: index,
+            results: [],
           };
           wireCalls.push(pendingCall);
+          issuedCalls.set(call.id, pendingCall);
           return {
             type: "function" as const,
             id: call.id,
@@ -443,7 +482,11 @@ function buildNativeMessages(
         };
         messages.push(native);
         if (wireCalls.length > 0) {
-          pending = { calls: wireCalls, byId: new Map(wireCalls.map(call => [call.id, call])) };
+          pending = {
+            calls: wireCalls,
+            byId: new Map(wireCalls.map(call => [call.id, call])),
+            unresolvedCount: wireCalls.length,
+          };
         }
         break;
       }
