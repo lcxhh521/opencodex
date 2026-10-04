@@ -383,7 +383,7 @@ observed. Naming the store without the last three would be naming a file we cann
 file this operation reads, writes, journals and records, and whether a write there reaches the
 client. It decides from three facts, in order:
 
-1. No declared store, or no store on disk — the config file, unchanged. A client that has never run
+1. No declared store, or no store on disk — the config file, unchanged, unless the declaration's `missingStore` says the client still reads the absent store; that is an ineffective write carrying its remedy. A client that has never run
    still imports what we write there, which is why the rule keys on the store's presence rather
    than on a client version.
 2. This project's own block already in one of the two files — that file. Disable removes what we
@@ -436,7 +436,7 @@ keeps a sequence root, the source patcher rewrites that entry with its `- ` and 
 for byte, `[]` is the only flow form adopted or written back, and a created row pruned to its selector
 is removed. `IntegrationTarget` carries its own `sourcePreservingYaml`. Writes hold `settings.yaml.lock`,
 then the profile's `package.json.lock`, re-probing the profile after each revalidation await; refresh
-keeps the selected row in place, and restore refuses to recreate a missing profile directory unlocked.
+keeps the selected row in place, and restore refuses to recreate a missing profile directory unlocked. A booted profile (its `package.json` present) with no patch is reported, never written through `settings.yaml`, which DSH no longer reads.
 
 ## Verification
 

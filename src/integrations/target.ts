@@ -66,8 +66,13 @@ export interface IneffectiveWrite {
    * with the store itself as the target: a client that bumps its schema after
    * we wrote the store leaves our block there, removable, and the file no
    * longer one we may merge into.
+   *
+   * `missing-store` — the store does not exist, yet the client no longer reads the
+   * config file (DSH after its one-time `settings.yaml` import), so a write there
+   * would be lost. `remedy` says how to bring the store back.
    */
-  readonly why: "owned-config-file" | "unestablished-schema";
+  readonly why: "owned-config-file" | "unestablished-schema" | "missing-store";
+  readonly remedy?: string;
 }
 
 function configFileTarget(
@@ -149,7 +154,12 @@ export function resolveIntegrationTarget(args: {
   if (!declared) return configFileTarget(clientId, configPath, null);
   const storePath = declared.path(args.env, args.home);
   const kind = io.statKind(storePath);
-  if (kind === "missing") return configFileTarget(clientId, configPath, null);
+  if (kind === "missing") {
+    const missing = declared.missingStore;
+    return missing?.readsStore(storePath, path => io.statKind(path)) === true
+      ? configFileTarget(clientId, configPath, { store: storePath, why: "missing-store", remedy: missing.remedy })
+      : configFileTarget(clientId, configPath, null);
+  }
   // Only proven absence permits a legacy write. Unreadable or non-file stores
   // cannot establish what the client reads; preserve the recorded removal target.
   if (kind !== "file") {

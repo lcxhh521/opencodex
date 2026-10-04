@@ -237,6 +237,30 @@ describe("DSH Desktop profile patch", () => {
     expect(parsedStore()).toEqual([{ id: "llm-pi-ai", name: "@deepseek-ai/dsh-llm-pi-ai" }]);
   });
 
+  test("a Desktop profile whose patch is missing is reported, never written to the settings file", () => {
+    // DSH has booted the profile (its manifest exists), so it imported settings.yaml already
+    // and will not read it again: a write there would be lost without a word.
+    mkdirSync(dirname(storePath()), { recursive: true });
+    writeFileSync(join(dirname(storePath()), "package.json"), "{}\n");
+
+    expect(readIntegrationState(input()).supersededBy).toBe(storePath());
+    const applied = applyIntegration(input());
+    expect(applied.ok).toBe(false);
+    if (!applied.ok) {
+      expect(applied.reason).toBe("superseded_store");
+      expect(applied.message).toContain("does not exist");
+      expect(applied.message).toContain("`[]`");
+    }
+    expect(existsSync(settingsPath())).toBe(false);
+    expect(existsSync(storePath())).toBe(false);
+    expect(store.readRecords().dsh).toBeUndefined();
+
+    // Once the patch is back, enable writes the row DSH reads.
+    installDesktop("[]\n");
+    expect(applyIntegration(input()).ok).toBe(true);
+    expect(readPath(parsedStore(), [...DSH_PROFILE_PROVIDER_PATH, "api"])).toBe("openai-responses");
+  });
+
   test("without a Desktop profile the legacy settings file is still the target", () => {
     expect(applyIntegration(input()).ok).toBe(true);
     expect(existsSync(settingsPath())).toBe(true);
