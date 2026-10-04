@@ -10,7 +10,6 @@ const MAX_RESPONSE_HEADER_BYTES = 64 * 1024;
 const MAX_BODY_SLICE_BYTES = 64 * 1024;
 const MAX_DECODED_BODY_BYTES = 32 * 1024 * 1024;
 const MAX_STREAM_DECODE_EXPANSION_RATIO = 128;
-const SOCKS5_VERSION = 0x05;
 const CRLF = Buffer.from("\r\n");
 const HEADER_END = Buffer.from("\r\n\r\n");
 

@@ -369,12 +369,17 @@ manquant, une erreur réseau ou une décision invalide retombent sur la premièr
 l'annulation par l'appelant annule toujours la requête. Les tests automatisés utilisent un point de
 terminaison TypeSafe simulé et ne valident pas un compte JEV réel.
 
+Un Combo JEV peut aussi interroger un modèle de décision auto-hébergé, comme `tev1` d'Ollama, sans
+clé : ajoutez un fournisseur `jev-decision` dont la `baseUrl` est le point de terminaison complet
+`/v1/systemone`, puis indiquez-le dans le `decisionProvider` du Combo. Les identifiants TypeSafe n'y
+sont jamais envoyés. Détails : [modèle de décision auto-hébergé](https://opencodex.me/fr/guides/combos/).
+
 ## Fournisseurs et adaptateurs
 
 <!-- sponsors:main-first-mention -->
 OpenAI (connexion ChatGPT ou clé API), Anthropic, Google Gemini, xAI, Kimi, Azure OpenAI, Ollama
 (local + Cloud), Cursor (expérimental) et tous les points de terminaison compatibles OpenAI — ainsi que DeepSeek,
-Groq, OpenRouter, Together, Fireworks, Cerebras, Mistral, Hugging Face, NVIDIA NIM, MiniMax,
+Groq, OpenRouter, OpenGateway, Together, Fireworks, Cerebras, Mistral, Hugging Face, NVIDIA NIM, MiniMax,
 Qwen Cloud, Qoder Global et CN (PAT officiel + CLI), SiliconFlow, et d'autres. Liste complète : `ocx init` ou la
 [documentation des fournisseurs](https://opencodex.me/fr/guides/providers/).
 

@@ -1,4 +1,6 @@
 import type { Server } from "bun";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { OcxConfig } from "../../types";
 import { getConfigDir } from "../../config/paths";
 import {
@@ -12,10 +14,6 @@ import type { EntryProxyHandle } from "./entry-proxy";
 import { CHATGPT_UNBLOCK_PAC_FILENAME, buildChatgptUnblockPac, loadSystemPac, systemProxyChain } from "./pac";
 import type { SystemProxyChain } from "./pac";
 import type { WsRelaySocketData } from "./ws-relay";
-import { join } from "node:path";
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { CHATGPT_APP_CODEX_BINARY } from "./app-server-shim";
 
 /**
  * Lifecycle for the ChatGPT desktop send-unblock listener.
@@ -33,17 +31,8 @@ export const CHATGPT_UNBLOCK_PORT_OFFSET = 200;
 export const CHATGPT_UNBLOCK_ENTRY_PORT_OFFSET = 1;
 
 export function chatgptUnblockEnabled(config: Pick<OcxConfig, "chatgptDesktop" | "runtimeRole">): boolean {
-  if (config.runtimeRole === "client") return false;
+  if (process.platform !== "darwin" || config.runtimeRole === "client") return false;
   return config.chatgptDesktop?.unblockSend === true;
-}
-
-/**
- * Whether the app-server shim is on. It covers builds where the composer's send gate comes from
- * the bundled app-server rather than the Chromium network stack, so it is opt-in and additive to
- * whichever launch mode is configured.
- */
-export function chatgptAppServerShimEnabled(config: Pick<OcxConfig, "chatgptDesktop" | "runtimeRole">): boolean {
-  return chatgptUnblockEnabled(config) && config.chatgptDesktop?.appServerShim === true;
 }
 
 /** Whether the PAC-fallback launch mode is on (it implies `unblockSend`). */
@@ -121,45 +110,16 @@ export function chatgptUnblockPacArg(configDir: string): string {
   }
 }
 
-export const CHATGPT_UNBLOCK_SHIM_FILENAME = "chatgpt-codex-shim.sh";
-
-/** The launcher script the app is pointed at through `CODEX_CLI_PATH`. */
-export function chatgptUnblockShimPath(configDir: string): string {
-  return join(configDir, CHATGPT_UNBLOCK_SHIM_FILENAME);
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
 /**
- * The launcher the desktop app runs in place of the bundled `codex`. It `exec`s the real binary,
- * so the app-server keeps the pid, parent and code-signing identity the app expects (the app
- * rejects its app-tools pipe for any other peer), and only redirects the server's stdout into the
- * filter. It fails open at startup: the filter is first run once on empty input, and when that
- * fails (its runtime or source is gone, or the source no longer loads) the launcher executes the
- * real binary with its stdout untouched. Once the probe has passed there is no fallback.
+ * Rewritten once the listener is up. The launch watcher wakes on it as well as on the app's own
+ * launch, so an app that started before opencodex (both opened at login) is still routed.
  */
-export function buildChatgptShimLauncher(bun: string, shimEntry: string, real: string = CHATGPT_APP_CODEX_BINARY): string {
-  return `#!/bin/bash
-# opencodex: runs the ChatGPT app-server with its stdout passed through the send-unblock filter.
-REAL=${shellQuote(real)}
-BUN=${shellQuote(bun)}
-SHIM=${shellQuote(shimEntry)}
-if [ -x "$BUN" ] && [ -f "$SHIM" ] && "$BUN" "$SHIM" </dev/null >/dev/null 2>&1; then
-  exec "$REAL" "$@" > >(exec "$BUN" "$SHIM")
-fi
-exec "$REAL" "$@"
-`;
+export const CHATGPT_UNBLOCK_READY_FILENAME = "chatgpt-unblock.ready";
+
+export function chatgptUnblockReadyPath(configDir: string): string {
+  return join(configDir, CHATGPT_UNBLOCK_READY_FILENAME);
 }
 
-/** Write the launcher next to the PAC file. Returns its path. */
-export function writeChatgptShimLauncher(configDir: string): string {
-  const path = chatgptUnblockShimPath(configDir);
-  writeFileSync(path, buildChatgptShimLauncher(process.execPath, fileURLToPath(new URL("./app-server-shim.ts", import.meta.url))), { mode: 0o755 });
-  chmodSync(path, 0o755);
-  return path;
-}
 
 export interface ChatgptUnblockState {
   port: number;
@@ -222,11 +182,11 @@ export interface StartChatgptUnblockOptions {
  */
 export async function startChatgptUnblock<T = undefined>(options: StartChatgptUnblockOptions): Promise<ChatgptUnblockHandle<T> | null> {
   if (!chatgptUnblockEnabled(options.config)) return null;
+  const port = chatgptUnblockPort(options.config, options.publicPort);
   const configDir = options.configDir ?? getConfigDir();
   const ca = await ensureLocalInterceptCaForStartup(configDir);
   const leaf = issueLocalInterceptLeaf(ca, [CHATGPT_INTERCEPT_HOST]);
   // The port must be the configured one, not ephemeral: the launcher's launch arguments name it.
-  const port = chatgptUnblockPort(options.config, options.publicPort);
   const listener = startChatgptUnblockListener({ leaf, port });
   let entryProxy: EntryProxyHandle | undefined;
   let pacRoute: ChatgptUnblockPacRoute | undefined;
@@ -249,14 +209,12 @@ export async function startChatgptUnblock<T = undefined>(options: StartChatgptUn
       throw error;
     }
   }
-  if (chatgptAppServerShimEnabled(options.config)) {
-    try {
-      writeChatgptShimLauncher(configDir);
-    } catch (error) {
-      await entryProxy?.stop();
-      await listener.stop(true);
-      throw error;
-    }
+  // After the PAC file: the watcher wakes on this marker and relaunches with the switch it reads
+  // from that file. Best effort: without the marker the watcher still acts on the app's next launch.
+  try {
+    writeFileSync(chatgptUnblockReadyPath(configDir), `${port} ${new Date().toISOString()}\n`, { mode: 0o644 });
+  } catch {
+    // An unwritable config dir already failed the CA write; nothing to add here.
   }
   return {
     port,

@@ -297,7 +297,21 @@ Des handles natifs maintiennent les répertoires parents et les fichiers pendant
 
 L’identité ou le condensat décrit les fichiers au moment de l’observation, sans autorisation durable de mise à jour. Cela ne prouve ni le runtime sélectionné, ni l’installateur passé, ni la configuration npm effective, ni l’authenticité des outils. Le Node fourni est seulement observé, pas identifié comme celui que choisirait le lanceur. Aucune cible n’est exécutée ; aucune requête au registre, installation, écriture de configuration ou commande de processus n’a lieu. Le `check` Windows existant ne réalise toujours aucune E/S de fichiers candidats ou de configuration.
 
-### `ocx config <show|get|set|unset|validate|export|import> ...`
+### `ocx config [show|get|set|unset|validate|export|import] ...`
+
+`ocx config [show] [--json] [--source]` affiche la configuration locale sans proxy en cours d’exécution. Vous pouvez omettre `show` avec l’un ou les deux indicateurs, dans n’importe quel ordre. `--source` inclut la source, les erreurs et les avertissements de diagnostic et n’est accepté que pour l’affichage. `--json` peut précéder une action explicite sans changer l’action exécutée. Les indicateurs `--json` ou `--source` répétés et les arguments inconnus sont refusés.
 
 Inspectez et modifiez en toute sécurité la configuration OpenCodex validée. `show` et `get` masquent les secrets. Importer
 valide avant d'écrire et nécessite `--yes`.
+
+### Forced Claude Code subagent model
+
+The Subagents page offers **Force all subagents onto one model**, off by default. Select an exposed roster-style id, such as `combo/tev-auto`, then enable the switch. The roster is offered first; unavailable saved roster entries cannot be force targets.
+
+`ocx agent subagents force combo/tev-auto` sets `claudeCode.subagentModelForce`; `ocx agent subagents force -` clears it. `ocx agent status` reports the setting. `GET /api/subagent-models` returns `force`, `forceAvailable`, and `forceStatus`; `PUT` accepts `{ "force": "combo/tev-auto" }` or `{ "force": null }` without changing the roster. Omitting `force` leaves it unchanged. Invalid or unexposed targets are rejected on write; stale targets are reported and skipped at launch.
+
+This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` only for an authoritative million-token window; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
+
+Claude Code **2.1.257 or newer** is required for FORCE. Plugin and built-in agents (including Explore/Plan) and per-call model arguments are overridden. Forks and subagent skills with `model: inherit` keep the main conversation model. The main loop and Haiku/small-fast sidecars are unaffected. Existing roster files remain available.
+
+The dashboard warns about old or unknown CLI versions, unavailable targets, and either variable already present in `settings.json` → `env` (which overrides launch env). Detection is read-only and server-local: it cannot inspect another launch shell, another machine, or project-local settings. An unknown result is not proof of force support.

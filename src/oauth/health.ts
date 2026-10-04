@@ -1,3 +1,5 @@
+import type { MainAccountHardLockStatus } from "../codex/main-account-hard-lock";
+import type { MainAccountExternalUsageWarning } from "../codex/main-account-external-usage";
 import { getCodexAccountHealthSnapshot, type CodexCooldownSource } from "../codex/routing";
 import { getAnthropicAccountHealthSnapshot } from "./anthropic-routing";
 import { isAccountNeedsReauth } from "../codex/account-runtime-state";
@@ -14,6 +16,22 @@ import type { ProviderAccount } from "./types";
 export type OAuthAccountHealth =
   | { status: "healthy" }
   | { status: "cooldown"; until: string; reason: "rate_limit" | "quota" }
+  | { status: "reauth_required"; reason: OAuthReauthReason }
+  | { status: "warning"; reason: "refresh_conflict" | "metadata_mismatch" | "stale_credentials" | "validation_pending" };
+
+/** Why an OAuth account needs reauthentication. `verify_account` is distinct from a dead
+ * credential: the grant is alive but the provider blocks the account until a human
+ * verifies it, so a plain re-login without that verification will not help. */
+export type OAuthReauthReason = "unauthorized" | "forbidden" | "refresh_failed" | "verify_account";
+
+/**
+ * Codex-pool health: the same shape minus the provider-verification cause, which only
+ * the generic OAuth quarantine produces. Narrowing the return keeps Codex DTOs on
+ * `CodexAccountReauthReason` without a lossy re-narrow at every consumer.
+ */
+export type CodexPoolAccountHealth =
+  | { status: "healthy" }
+  | { status: "cooldown"; until: string; reason: "rate_limit" | "quota" }
   | { status: "reauth_required"; reason: "unauthorized" | "forbidden" | "refresh_failed" }
   | { status: "warning"; reason: "refresh_conflict" | "metadata_mismatch" | "stale_credentials" | "validation_pending" };
 
@@ -22,6 +40,7 @@ export type OAuthHealthLabel =
   | "Rate limited"
   | "Quota limited"
   | "Reauthentication required"
+  | "Verification required"
   | "Refresh failed"
   | "Metadata mismatch"
   | "Credential conflict"
@@ -58,7 +77,7 @@ type OAuthWarningReason = "refresh_conflict" | "metadata_mismatch" | "stale_cred
 
 export function projectOAuthAccountHealth(input: {
   needsReauth?: boolean;
-  reauthReason?: "unauthorized" | "forbidden" | "refresh_failed";
+  reauthReason?: OAuthReauthReason;
   cooldownUntilMs?: number;
   cooldownReason?: "rate_limit" | "quota";
   warningReason?: OAuthWarningReason;
@@ -94,6 +113,9 @@ function actionFor(provider: string, health: OAuthAccountHealth): string | undef
   }
   if (health.status === "reauth_required") {
     if (provider === "codex") return CODEX_REAUTH_ACTION;
+    if (health.reason === "verify_account") {
+      return `verify the account with the provider in a browser, then run \`ocx login ${provider}\``;
+    }
     return `run \`ocx login ${provider}\``;
   }
   if (health.status === "cooldown") {
@@ -113,7 +135,9 @@ export function oauthHealthLabel(health: OAuthAccountHealth): OAuthHealthLabel {
     case "cooldown":
       return health.reason === "rate_limit" ? "Rate limited" : "Quota limited";
     case "reauth_required":
-      return health.reason === "refresh_failed" ? "Refresh failed" : "Reauthentication required";
+      if (health.reason === "refresh_failed") return "Refresh failed";
+      if (health.reason === "verify_account") return "Verification required";
+      return "Reauthentication required";
     case "warning":
       switch (health.reason) {
         case "validation_pending":
@@ -188,7 +212,9 @@ export function projectStoredOAuthAccountHealth(
     : null;
   return projectOAuthAccountHealth({
     needsReauth: account.needsReauth === true,
-    reauthReason: account.needsReauth === true ? "refresh_failed" : undefined,
+    reauthReason: account.needsReauth === true
+      ? (account.needsReauthReason ?? "refresh_failed")
+      : undefined,
     cooldownUntilMs: anthropicSnap?.cooldownUntil,
     // Same mapping as the Codex pool's `cooldownReasonFromSource`: only a Retry-After is
     // request-rate throttling. A reset-derived cooldown means a usage window is spent, which
@@ -204,7 +230,7 @@ export function projectCodexAccountHealth(input: {
   needsReauth: boolean;
   reauthReason?: "unauthorized" | "forbidden" | "refresh_failed";
   now?: number;
-}): OAuthAccountHealth {
+}): CodexPoolAccountHealth {
   // One read serves every verdict below. Each lookup re-reads and re-hardens the whole store
   // file, and the main account lives in the native Codex auth file rather than the pool store,
   // so a lookup for it could only ever miss.
@@ -248,13 +274,16 @@ export function projectCodexAccountHealth(input: {
   }
   const now = input.now ?? Date.now();
   const snap = getCodexAccountHealthSnapshot(input.accountId, now);
+  // Safe narrowing: every reason above is Codex-scoped (`verify_account` only enters
+  // through the generic OAuth quarantine path), so the shared projector cannot
+  // produce it here despite the wider return type.
   return projectOAuthAccountHealth({
     needsReauth,
     reauthReason: needsReauth ? (input.reauthReason ?? storedFailureReason ?? "refresh_failed") : undefined,
     cooldownUntilMs: snap?.cooldownUntil,
     cooldownReason: cooldownReasonFromSource(snap?.cooldownSource),
     now,
-  });
+  }) as CodexPoolAccountHealth;
 }
 
 /**
@@ -353,7 +382,10 @@ export function collectOAuthHealthEntries(
   return entries;
 }
 
+export type CodexMainAccountPolicyHealth = MainAccountHardLockStatus & { externalUsage?: MainAccountExternalUsageWarning };
+
 type ProxyCodexAccountHealth = {
+  mainAccountHardLock?: unknown;
   id: string;
   health?: OAuthAccountHealth;
   needsReauth?: boolean;
@@ -372,11 +404,37 @@ function coerceRemoteAccountHealth(
 }
 
 type LiveProxyCodexHealthResult = {
+  mainAccountHardLock?: CodexMainAccountPolicyHealth;
   source: CodexHealthSource;
   entries: OAuthHealthEntry[] | null;
 };
 
-async function fetchCodexHealthFromLiveProxy(
+/** Whitelisted projection: never forward account metadata or arbitrary management fields. */
+export function projectMainAccountPolicyHealth(value: unknown): CodexMainAccountPolicyHealth | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const thresholds = raw.thresholds as { short?: unknown; long?: unknown } | undefined;
+  const percent = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 100;
+  if (typeof raw.enabled !== "boolean" || typeof raw.state !== "string"
+    || !(raw.enabled ? ["unknown", "ready", "blocked"] : ["off"]).includes(raw.state)
+    || !thresholds || !percent(thresholds.short) || !percent(thresholds.long)
+    || !Number.isInteger(thresholds.short) || !Number.isInteger(thresholds.long)
+    || thresholds.short < 80 || thresholds.short > thresholds.long) return undefined;
+  const result: CodexMainAccountPolicyHealth = { enabled: raw.enabled,
+    state: raw.state as MainAccountHardLockStatus["state"], thresholds: { short: thresholds.short, long: thresholds.long } };
+  if (raw.window === "short" || raw.window === "long") result.window = raw.window;
+  if (typeof raw.resetAt === "number" && Number.isFinite(raw.resetAt)) result.resetAt = raw.resetAt;
+  const warning = raw.externalUsage as Partial<MainAccountExternalUsageWarning> | undefined;
+  if (warning && (warning.window === "short" || warning.window === "long")
+    && percent(warning.fromPercent) && percent(warning.toPercent)
+    && typeof warning.observedAt === "number" && Number.isFinite(warning.observedAt)) {
+    result.externalUsage = { window: warning.window, fromPercent: warning.fromPercent,
+      toPercent: warning.toPercent, observedAt: warning.observedAt };
+  }
+  return result;
+}
+
+export async function fetchCodexHealthFromLiveProxy(
   fetchImpl: typeof fetch | undefined = undefined,
   findLiveProxyImpl: typeof findLiveProxy = findLiveProxy,
   readRuntimePortImpl: typeof readRuntimePort = readRuntimePort,
@@ -404,7 +462,10 @@ async function fetchCodexHealthFromLiveProxy(
       if (!account?.id || typeof account.id !== "string") continue;
       pushEntry(entries, "codex", account.id, coerceRemoteAccountHealth(account));
     }
-    return { source: "management-api", entries };
+    const mainAccountHardLock = projectMainAccountPolicyHealth(
+      json.accounts.find(account => account?.id === MAIN_CODEX_ACCOUNT_ID)?.mainAccountHardLock,
+    );
+    return { source: "management-api", entries, ...(mainAccountHardLock ? { mainAccountHardLock } : {}) };
   } catch {
     return { source: "management-api-unavailable", entries: null };
   }
@@ -418,6 +479,7 @@ export type CodexHealthSource =
   | "management-api-unavailable";
 
 export type OAuthCliHealthReport = {
+  mainAccountHardLock?: CodexMainAccountPolicyHealth;
   entries: OAuthHealthEntry[];
   codexHealthSource: CodexHealthSource;
 };
@@ -450,7 +512,8 @@ export async function collectOAuthHealthEntriesForCli(
   );
   if (remote.entries) {
     for (const entry of remote.entries) entries.push(entry);
-    return { entries, codexHealthSource: "management-api" };
+    return { entries, codexHealthSource: "management-api",
+      ...(remote.mainAccountHardLock ? { mainAccountHardLock: remote.mainAccountHardLock } : {}) };
   }
   return { entries, codexHealthSource: remote.source };
 }

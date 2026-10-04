@@ -11,15 +11,15 @@ When a successful streamed native response has a missing or unrecognized non-JSO
 
 ## Responses HTTP/SSE
 
-Optional Codex memory selection enters `src/server/responses/request-prepare.ts` for HTTP and WebSocket frames, as specified in [memory phase routing](responses-failover.md#memory-phase-routing); an unset phase keeps its existing route and starts no background work. Responses request preparation stabilizes incoming `<skills_instructions>` under `skills.catalog_refresh`: `per_session` (default) reuses the first received catalog for a conversation; `per_turn` leaves the supplied catalog unchanged. Other instruction sections and user/tool content remain untouched. Requests without a reliable conversation identity bypass snapshots; shared prompt-cache cohorts are not conversation identities. Only a body with exactly one catalog block across its instructions and developer/system content takes part; two or more pass through unchanged. A known snapshot is substituted before parsing, but a new catalog is stored only when preparation reaches its success return, so a request rejected by parsing or admission pins nothing. Without a named principal, snapshots are shared by conversation id only on a server that requires no data-plane auth. Snapshots are process-local, expire after four idle hours, and use bounded LRU retention; oversized blocks bypass caching. The dashboard's `src/codex/prompt-layers.ts` and `src/codex/prompt-text-probe.ts` continue observing current files for previews and do not own session snapshots.
+HTTP ingress applies the [caller header contract](../data-planes/inbound-compat.md#http-caller-conversation-identity) before admission and dispatch. Optional Codex memory selection enters `src/server/responses/request-prepare.ts` for HTTP and WebSocket frames, as specified in [memory phase routing](responses-failover.md#memory-phase-routing); an unset phase keeps its existing route and starts no background work. Responses request preparation stabilizes incoming `<skills_instructions>` under `skills.catalog_refresh`: `per_session` (default) reuses the first received catalog for a conversation; `per_turn` leaves the supplied catalog unchanged. Other instruction sections and user/tool content remain untouched. Requests without a reliable conversation identity bypass snapshots; shared prompt-cache cohorts are not conversation identities. Only a body with exactly one catalog block across its instructions and developer/system content takes part; two or more pass through unchanged. A known snapshot is substituted before parsing, but a new catalog is stored only when preparation reaches its success return, so a request rejected by parsing or admission pins nothing. Without a named principal, snapshots are shared by conversation id only on a server that requires no data-plane auth. Snapshots are process-local, expire after four idle hours, and use bounded LRU retention; oversized blocks bypass caching. The dashboard's `src/codex/prompt-layers.ts` and `src/codex/prompt-text-probe.ts` continue observing current files for previews and do not own session snapshots.
 `/v1/responses` is the main Codex-facing endpoint. The server parses Responses input, routes to a
 provider, lets the selected adapter speak the upstream protocol, then bridges adapter events back to
 Responses-compatible streaming output. The routed provider name follows every adapter build, including retries and continuations; only `github-copilot` injects a configured `modelContextTiers` value as upstream `contextTier`, while unconfigured passthrough retains the caller field. For an opted-in key-auth provider, a hosted-search continuation stays bound to the API-key selection that served the first leg; the contract is the [hosted-search continuation binding](../providers-and-adapters.md#hosted-search-continuation-binding).
 
-The `openai-responses` adapter preserves the incoming `User-Agent` as a non-credential fallback in
-both key and forward modes. A configured provider header with that name wins case-insensitively;
-when the caller omits it, the adapter invents no client identity. This does not widen the canonical
-forward credential/metadata allowlist or copy any other caller header.
+The `openai-responses` adapter preserves caller `User-Agent` unless provider headers own it, in either auth mode.
+`forwardClientHeaders` additionally opts into `originator`, `x-client-request-id`, `x-codex-app-version`, or `user-agent`.
+Provider headers win case-insensitively; arbitrary names are rejected on load/write and ignored at runtime.
+Canonical forward auth retains its separate fixed credential/metadata allowlist; absent caller identity is not invented.
 
 Retired Codex Spark has no model-specific tool or Responses Lite override; general Lite handling and
 namespace scrubbing remain shared compatibility behavior. Codex quota/reset evidence follows the
@@ -49,7 +49,7 @@ keep-alive reuse with `Connection: close` and `keepalive: false`; exact hosts an
 match case-insensitively. `sendWithConnectionPolicy` applies the policy around the fetch that
 performs the physical send, after a dispatch override has selected or rebuilt the destination, so
 matching follows the URL sent on the wire rather than the URL supplied before credential
-revalidation.
+revalidation. At this final HTTP boundary, native ChatGPT Responses and compact JSON strings of at least 1 MiB (UTF-8) become byte buffers to avoid Bun's large-string upload resets. Content, headers, abort signals and retry policy are preserved; WebSocket selection still receives the original string. Other destinations, small strings and existing byte/stream bodies retain their representation.
 
 The wrapped executor alone is not that boundary. An override that revalidates credentials re-reads
 `route.provider.fetch` at send time, because reselection can install a different provider transport
@@ -69,7 +69,7 @@ The Responses proxy does not treat transcript growth as repository progress. It 
 boundaries, response items, tool names and payloads, adapter events, retained bytes, and elapsed
 silence. It cannot observe the client's workspace or prove whether a successful tool result changed
 repository state. Consequently, the active-turn and session-lane gates are concurrency admission
-limits, the translator budget is a live retained-byte limit, the response-state caps are cache
+limits, the translator budget follows [live retained-byte ownership](byte-accounting.md#stream-buffer-accounting), the response-state caps are cache
 retention limits, and the stall watchdog is a silence limit. None is a cumulative continuation or
 semantic no-progress budget.
 
@@ -414,13 +414,13 @@ is composed from the following owners in `src/server/responses/`; none is a gene
 
 | Owner | Responsibility |
 | --- | --- |
-| `request-prepare.ts` | Body parsing, combo handoff, final route, encrypted-task recovery and initial admission. |
+| `request-prepare.ts` | Body parsing, combo handoff, final route, encrypted-task recovery and initial admission, retaining [original policy authorization](policy-fallback.md). xAI OAuth model-scope admission previews the billed Fast lane using the serialization decision shared with Chat, Messages and routed compact admission; final normalization rechecks the actual wire destination. |
 | `shadow-target-availability.ts` | Shadow-call target resolution for `request-prepare.ts`: an unavailable target fails once with `409 intercept_target_unavailable` instead of reaching the native source model or the default provider. |
 | `request-transport.ts` | Live credential selection, dispatch bindings, adapter replacement and same-target request identity. |
 | `request-sidecar-auth.ts` | Routed-compaction image projection, sidecar credential resolution and vision preprocessing. |
 | `response-effects.ts` | Completion notification, replay publication and live request-tool aliases. |
 | `request-send-budget.ts` | Request-wide send accounting, remaining allowance, the pending recovery permit and the shared ambiguous-resend grant. |
-| `reset-replay.ts` | The operator opt-in for replacing an ambiguous native Responses send, and the per-request grant both stages claim from. |
+| `reset-replay.ts` | Self-contained-request eligibility and the shared operator replacement grant for native Responses and generic translated initial/rebuilt pre-header sends; adapter-owned transports and translated post-header failures are excluded. |
 | `request-spend.ts` | This request's entries in the durable spend ledger: one per physical send, settled from the terminal usage. |
 | `passthrough-execution.ts` | Native host-lease transfer and the enclosing dispatch/delivery `finally`. |
 | `passthrough-dispatch.ts` | Native request preparation, upstream sends and pre-commit recovery. |
@@ -434,8 +434,8 @@ is composed from the following owners in `src/server/responses/`; none is a gene
 Reusable helpers live in `core-auth.ts`, `core-codex-account.ts`, `core-combo.ts`,
 `core-combo-failure.ts`, `core-combo-native.ts`, `core-errors.ts`, `core-lifetime.ts`, `core-normalize.ts`,
 `core-opaque-recovery.ts` and `core-replay.ts`. `core-options.ts` owns the public option types
-and small composition contracts. Existing public helper names are re-exported by `core.ts`.
-Adapter construction remains with the existing registry; `fetch-helpers.ts` remains a leaf. For Kiro OAuth with load settings, `request-transport.ts` acquires a lease on the admitted account and transfers it before a reactive replacement send; `core.ts` and `core-lifetime.ts` release it on returned-body completion, error, or cancellation, outside the inner admission `finally`.
+and small composition contracts, including [finite model-refusal evidence](../providers-and-adapters.md#combo-model-refusal-evidence). Existing public helper names are re-exported by `core.ts`.
+Adapter construction remains with the existing registry; `fetch-helpers.ts` remains a leaf. For Kiro OAuth with load settings, `request-transport.ts` acquires a lease on the admitted account and transfers it before a reactive replacement send; cancellation permanently fences the request holder so recovery cannot install a late lease after abort cleanup. `core.ts` and `core-lifetime.ts` release the lease on returned-body completion, error, or cancellation, outside the inner admission `finally`.
 
 Mutable values are not copied across phases. A phase exposes only the values consumed by later
 phases, with getters/setters over the original local bindings where a retry or callback can
@@ -576,7 +576,7 @@ reuses `beginInferenceAttempt` and `createFinalRequestLog` with its own 401/429 
 ## Adapter-to-Responses bridge
 
 `src/bridge.ts` is a re-export facade; the implementation lives in `src/bridge/`.
-`src/bridge/sse.ts` (`bridgeToResponsesSSE`) turns adapter events into the Responses SSE stream,
+`src/bridge/sse.ts` (`bridgeToResponsesSSE`) turns adapter events into the Responses SSE stream; its once-only first-output observer includes nonempty `tool_call_delta` arguments (including custom-tool input), but not tool-start scaffolding or empty arguments,
 and `src/bridge/response-json.ts` (`buildResponseJSON`) builds the non-streaming Responses body
 from the same events. `buildResponseJSON` records a buffered delivery on the attempt unless the
 caller passes `recordBufferedDelivery: false`, which the direct client encoders do because they

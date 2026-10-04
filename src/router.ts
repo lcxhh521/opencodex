@@ -90,6 +90,12 @@ export interface RouteResult {
   /** Bounded route-decision trace (RI-01); never contains secrets. */
   routeDecision?: RouteDecisionTraceV1;
   /**
+   * Full eligible provider/model membership from a policy evaluation, keyed
+   * "provider\u0000model". The trace's candidate list is bounded; fallback
+   * redirect checks need membership for eligible rows that were truncated out.
+   */
+  policyEligibility?: ReadonlySet<string>;
+  /**
    * Set when a blocked-model redirect moved the request to a different
    * provider. Caller credentials addressed to the source route must not follow
    * it, exactly as for combo and policy routes.
@@ -420,6 +426,12 @@ export function routedProviderConfig(providerName: string, provider: OcxProvider
     ...(provider.preserveResponsesReasoningContent === undefined && registryEntry.preserveResponsesReasoningContent !== undefined
       ? { preserveResponsesReasoningContent: registryEntry.preserveResponsesReasoningContent }
       : {}),
+    ...(provider.preserveResponsesInputItemIds === undefined && registryEntry.preserveResponsesInputItemIds !== undefined
+      ? { preserveResponsesInputItemIds: registryEntry.preserveResponsesInputItemIds }
+      : {}),
+    ...(provider.preserveResponsesMessageMetadata === undefined && registryEntry.preserveResponsesMessageMetadata !== undefined
+      ? { preserveResponsesMessageMetadata: registryEntry.preserveResponsesMessageMetadata }
+      : {}),
     ...(provider.dropResponsesReasoningItems === undefined && registryEntry.dropResponsesReasoningItems !== undefined
       ? { dropResponsesReasoningItems: registryEntry.dropResponsesReasoningItems }
       : {}),
@@ -733,6 +745,9 @@ function routeModelInternal(
       ...routed,
       routeKind: "policy" as const,
       routeReason: routed.routeReason === "blocked-model-redirect" ? "blocked-model-redirect" : "policy-selected",
+      policyEligibility: new Set(evaluation.candidates
+        .filter(candidate => candidate.eligible)
+        .map(candidate => candidate.provider + "\u0000" + candidate.model)),
       routeDecision: {
         ...evaluation.trace,
         selected: {

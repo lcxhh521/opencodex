@@ -79,11 +79,23 @@ function isIpLiteral(host: string): boolean {
   return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || host.includes(":");
 }
 
+/**
+ * Port to dial for a proxy URL. `URL.port` is empty both when the port is omitted and when it
+ * equals the scheme default, so `http://proxy:80` must fall back to 80, never to an invented
+ * 8080; that would diverge from the fetch tunnel, which honors the URL as written.
+ */
+export function proxyDialPort(proxyUrl: URL, route: UpstreamTunnel["route"]): number {
+  const explicit = Number(proxyUrl.port);
+  if (explicit) return explicit;
+  if (route === "socks5") return 1080;
+  return proxyUrl.protocol === "https:" ? 443 : 80;
+}
+
 async function dialRaw(target: RawTarget, proxy: string | null, route: UpstreamTunnel["route"], timeout: number, ca: string | undefined): Promise<Socket> {
   if (route === "direct") return tcpConnect(target.host, target.port, timeout);
   const proxyUrl = new URL(proxy!);
   const proxyHost = proxyUrl.hostname.replace(/^\[|\]$/g, "");
-  const proxyPort = Number(proxyUrl.port) || (route === "socks5" ? 1080 : proxyUrl.protocol === "https:" ? 443 : 8080);
+  const proxyPort = proxyDialPort(proxyUrl, route);
   const proxySocket = await tcpConnect(proxyHost, proxyPort, timeout);
   // An https:// proxy speaks TLS on its own port before any handshake, so the CONNECT
   // request must ride that TLS session, with the proxy's hostname as the SNI.
@@ -129,8 +141,9 @@ async function tcpConnect(host: string, port: number, timeout: number): Promise<
 /**
  * Accumulates proxy-handshake bytes until each awaited step has what it needs, then
  * hands any leftover bytes back to the socket so the TLS layer above sees a clean
- * stream. A socket error or timeout fails every pending step; after `dispose()` the
- * reader no longer owns the socket's data events.
+ * stream. A socket error, timeout, or a proxy that closes the connection before finishing
+ * its reply fails every pending step, so the upgrade answers 502 instead of hanging; after
+ * `dispose()` the reader no longer owns the socket's data, end, or close events.
  */
 class ProxyHandshakeReader {
   private buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
@@ -139,10 +152,13 @@ class ProxyHandshakeReader {
   private readonly onData = (chunk: Buffer) => this.feed(chunk);
   private readonly onError = (error: Error) => this.fail(error);
   private readonly onTimeout = () => this.fail(new Error("proxy handshake timeout"));
+  private readonly onClosed = () => this.fail(new Error("proxy closed the connection during the handshake"));
 
   constructor(private readonly socket: Socket, timeout: number) {
     socket.on("data", this.onData);
     socket.on("error", this.onError);
+    socket.on("end", this.onClosed);
+    socket.on("close", this.onClosed);
     socket.setTimeout(timeout, this.onTimeout);
   }
 
@@ -197,6 +213,8 @@ class ProxyHandshakeReader {
   dispose(): void {
     this.socket.removeListener("data", this.onData);
     this.socket.removeListener("error", this.onError);
+    this.socket.removeListener("end", this.onClosed);
+    this.socket.removeListener("close", this.onClosed);
     this.socket.setTimeout(0);
     if (this.buffer.length > 0) this.socket.unshift(this.buffer);
     this.buffer = Buffer.alloc(0);

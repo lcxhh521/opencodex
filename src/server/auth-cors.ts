@@ -27,11 +27,13 @@ import {
   positiveIntegerRecordConfigError,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
+  providerForwardClientHeadersConfigError,
   reasoningSummaryDeliveryRecordConfigError,
   upstreamHttpVersionConfigError,
 } from "../config/provider-validation";
 import { providerDestinationConfigError } from "../lib/destination-policy";
 import { providerEgressConfigError } from "../lib/provider-egress";
+import { providerTlsProfileConfigError } from "../lib/provider-tls-profile";
 import { redactSecretString } from "../lib/redact";
 import { DECLARABLE_HOSTED_TOOL_TYPES } from "../responses/hosted-tool-policy";
 import { effectiveGoogleMode, getProviderRegistryEntry, providerCodexAccountMode, providerMatchesRegistryTransport, registryEntryForProviderDestination } from "../providers/registry";
@@ -764,6 +766,9 @@ export function providerManagementConfigError(
     // validation and then rejected by the seed comparison, so canonical OpenAI could never
     // set OR clear it — the value was admitted and then refused in the same request.
     delete canonicalCandidate.annotateEmptyToolOutputs;
+    // forwardClientHeaders is an editor-managed request-metadata overlay. It is validated
+    // separately below and must not make an otherwise canonical OpenAI provider fail the seed check.
+    delete canonicalCandidate.forwardClientHeaders;
     // Canonical ChatGPT keeps WebSocket as the default, but an operator may
     // select the existing HTTP/SSE path without changing its auth or endpoint.
     if (raw.upstreamWebsocket !== undefined) {
@@ -780,6 +785,11 @@ export function providerManagementConfigError(
     return `provider ${name} must not include codexAccountMode`;
   }
   const typed = provider as unknown as OcxProviderConfig;
+  // Every write path (POST, PUT, reload, both PATCH passes) funnels through here, so a PATCH
+  // that changes authMode/baseUrl/adapter under a retained tlsProfile is refused before it
+  // persists a row the config schema would later reject as document-fatal.
+  const tlsProfileError = providerTlsProfileConfigError(name, typed);
+  if (tlsProfileError) return `provider ${JSON.stringify(redactSecretString(name))} ${tlsProfileError}`;
   const baseUrlError = providerBaseUrlConfigError(typed.baseUrl);
   if (baseUrlError) return `provider ${name} ${baseUrlError}`;
   if (effectiveGoogleMode(name, typed) === "vertex" && typed.location !== undefined) {
@@ -794,6 +804,8 @@ export function providerManagementConfigError(
   }
   const headersError = providerHeadersConfigError(typed.headers);
   if (headersError) return `provider ${name} ${headersError}`;
+  const forwardClientHeadersError = providerForwardClientHeadersConfigError(raw.forwardClientHeaders);
+  if (forwardClientHeadersError) return `provider ${name} ${forwardClientHeadersError}`;
   const retryOn429Error = retryOn429PolicyConfigError(raw.retryOn429);
   if (retryOn429Error) {
     // The provider name is caller-controlled and can be token-shaped; redact and JSON-escape
@@ -992,6 +1004,8 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   supportsServiceTier: "editor",
   modelSupportsServiceTier: "editor",
   preserveResponsesReasoningContent: "editor",
+  preserveResponsesInputItemIds: "editor",
+  preserveResponsesMessageMetadata: "editor",
   dropResponsesReasoningItems: "editor",
   modelReasoningEffortsAuthoritative: "editor",
   decodesNativeCompactionBlobs: "editor",
@@ -1036,6 +1050,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   modelMaxOutputTokens: "editor",
   modelCosts: "editor",
   headers: "redacted",
+  forwardClientHeaders: "editor",
   openRouterRouting: "editor",
   modelOpenRouterRouting: "editor",
   vercelGatewayRouting: "editor",
@@ -1110,6 +1125,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   desktopExecutor: "redacted",
   unsafeAllowNativeLocalExec: "editor",
   nativeLocalExec: "editor",
+  tlsProfile: "editor",
 } as const satisfies Record<keyof OcxProviderConfig, ProviderConfigFieldPolicy>;
 
 type ProviderFieldWithPolicy<Policy extends ProviderConfigFieldPolicy> = {

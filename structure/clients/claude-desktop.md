@@ -80,6 +80,8 @@ only while CLI first-party intent is off. An owned env observed with
 `claudeCode.cliFirstParty === true` is not Desktop-mode evidence, even when the
 intercept is disabled; foreign proxy settings do not count.
 `resolveClaudeDesktopApplyMode` preserves the resolved mode.
+First-party apply refuses `port_mismatch` before writing settings when the configured proxy port differs from the bound pair. Picker listener failures show their reason instead of offering a main-pair start that cannot repair them.
+
 An apply for a first-party install with `claudeCode.intercept.enabled: false` is refused with
 `intercept_disabled` rather than switched to gateway. New installs apply gateway.
 `src/claude/desktop-risk.ts` owns the account-suspension warning: first-party sends subscription
@@ -152,7 +154,7 @@ row; the only lever is the picker's Anthropic id on each request. A binding maps
 bindings overlaid (binding wins per key, `native/` targets normalized to the bare slug, global values
 left verbatim). The live config object is never copied or persisted with the merged map. Every other
 resolution rule is unchanged, so a bound id is translated rather than natively passed through, dated
-ids reach undated keys, and an `ocx-route` directive still wins. `ocx claude` sessions and the public
+ids reach undated keys, and an `ocx-route` directive still wins over a bare model id; an explicit gateway selector wins over that legacy fallback. `ocx claude` sessions and the public
 Messages listener never see bindings.
 
 `PUT /api/claude-desktop/first-party-bindings` (`{ set?, remove? }`) validates ids and routes against
@@ -196,13 +198,15 @@ The User-Agent is a routing hint, not a trust boundary: a client that fakes it r
 any local process already reaches (the `api.anthropic.com` intercept is on the Claude Code proxy
 too; the `claude.ai` relay verifies upstream and adds no credential) and breaks only its own TLS,
 because each terminator presents a certificate only its intended client trusts. `claude.ai:443` is
-terminated by a `node:https` HTTP/1.1 relay (`picker-listener.ts`) only while the runtime's cached
+terminated by a `node:https` HTTP/1.1 relay (`picker-listener.ts`) with a bounded 64 KiB
+incoming-request and ordinary upstream-response header allowance for browser session cookies,
+only while the runtime's cached
 decision is armed: macOS, persisted resolved Desktop mode first-party, Desktop intent on,
 `claudeCode.intercept.picker !== false`, no disarm latch, listener up, and the current picker CA
 trusted in the login keychain (`picker-trust.ts`). The picker CA (`picker-ca.ts`) carries critical
 name constraints permitting only `claude.ai` and excluding every IPv4 and IPv6 address. Its signing
 key exists only in the server process; only public certificates are written under
-`<OPENCODEX_HOME>/claude-picker/`. Every intercept start drops any legacy `ca.key`, even with the intercept or picker off; on restart the lifecycle keeps the applied
+`<OPENCODEX_HOME>/claude-picker/`. Every unbound intercept startup attempt makes a best-effort cleanup of legacy `ca.key` before eligibility checks, including client role, disabled routing/interception, and ephemeral public ports; cleanup failures do not block startup. See the [runtime lifecycle contract](../runtime.md#claude-intercept-pair). On restart the lifecycle keeps the applied
 profile row in place, and removes the prior public root only when the published certificate differs
 from this process's authority — a reused authority stays trusted, and a predecessor that cannot be
 untrusted leaves the picker disabled rather than trusted beside its replacement —
@@ -240,8 +244,26 @@ remote `ccr` (`picker-bootstrap.ts`), failing open to the original bytes; the mo
 comes from a persisted snapshot (`picker-models.ts`), so a bootstrap never waits on discovery. Picker aliases carry `[1m]` only for authoritative windows of at least 1M, using the shared context marker helper with auto-context disabled. Sub-million opt-ins remain unmarked because the picker cannot guarantee the Desktop runner's compaction environment. A
 CONNECT to claude.ai that arrives before the first refresh waits at most 3 s, then goes blind. A
 picker proxy bind failure only disables picker mode; a picker construction or start failure closes
-every socket the start had bound before rethrowing. Nothing is logged but method, bootstrap or
-other, and status.
+every socket the start had bound before rethrowing. Ordinary session cookies within the header
+allowance relay unchanged. Upstream header overflow returns an empty 502 and logs the fixed
+reason `upstream:headers-too-large`; other records contain only method, bootstrap or other,
+status, and fixed bootstrap rewrite outcomes. Header values and request paths are not logged.
+Upgraded connections retain raw TLS relay semantics; their upstream bytes do not pass through
+the ordinary HTTP response parser.
+
+### Picker catalog rewrite bounds
+
+`src/claude/intercept/picker-budget.ts` preflights plain JSON before copying injected rows.
+Each retained field value and key is limited to 64 KiB of serialized UTF-8, each added row to
+256 KiB, and the whole response to 4096 added rows and 2 MiB of added JSON (including separators).
+All selected surfaces, including duplicate surface ids, share that budget. The original body plus
+reserved additions must fit 16 MiB before deep clones or final serialization. The CLI's explicit
+bootstrap fallback uses the same budget, including space for a newly created options property.
+A refused rewrite leaves every original row and the upstream response unchanged; it never publishes
+a partially extended picker. Small nested capabilities/thinking metadata retain their shape,
+while presentation/version stripping, descriptions, context windows, and surface eligibility keep
+their existing rules. Regression coverage is in `tests/claude-integration/claude-picker-bootstrap.test.ts`
+and `tests/claude-integration/claude-cli-picker.test.ts`.
 
 `src/claude/desktop-picker.ts` owns every mutation while a server is running. One controller lock
 serializes `enable`, `disable`, and `transition`; the latter wraps a whole Desktop mode change so
@@ -487,7 +509,9 @@ Native Anthropic passthrough in `src/server/claude-messages.ts` forwards the cal
 
 ## Native passthrough stream terminals
 
-`tapAnthropicSseForLog` in `src/server/claude-messages.ts` relays the streamed body of both the native passthrough and the managed native Messages lane (`src/server/messages-native.ts`). The response headers are already sent, so a stall, a byte-cap overflow, or an upstream read failure ends the body with an Anthropic `event: error` frame after a blank-line boundary and a clean close: `timeout_error` for an idle stall, `api_error` for the byte cap, and `api_error` when an upstream read fails mid-stream (a socket reset). The mid-stream reset is logged like the Responses relay's read error: status 502, `terminalStatus: "failed"`, `closeReason: "terminal"`, `transportPhase: "mid_stream"`, a synthetic terminal source, the attempt marked `streamAborted`, the redacted reason in `upstreamError`, and the usage seen before the reset. The non-streaming fold in the managed lane closes its row with the tap's meta for a reset, a stall or the byte cap, so its row matches the streaming lane's. The request is not replayed. The logged status is not uniform across these frames: a stall and the byte cap keep status 200 with `closeReason` `body_stall` or `body_overflow`, which classify as `incomplete`, while a reset is a 502 that classifies as `failed`. Some read failures are not upstream failures. When the cancel signal is already aborted, the rejection is a `499` client cancel, because Bun can reject the read before it dispatches the abort listener. The managed lane passes its upstream controller's signal, so shutdown and turn release count as cancels too. When `message_stop` or an upstream `error` event has been seen, including one still in the buffer without its blank-line delimiter, the turn is complete: it logs 200 and closes with no error frame. A terminal found only in that unterminated tail gets its blank line restored, because an SSE parser drops an event that EOF cuts off. A translator budget overflow is a local cap, so it still errors the stream, and the non-streaming fold answers it with 413. `tests/claude-integration/claude-native-passthrough.test.ts` and `tests/claude-integration/messages-native.test.ts` cover both lanes against an upstream that resets after a partial or a complete body, plus both cancel paths.
+Native passthrough retains upstream `anthropic-ratelimit-*` response headers for Claude Code quota/statusLine consumers on SSE, JSON and upstream errors. `src/server/anthropic-rate-limit-headers.ts` selects only that family instead of copying all upstream headers, so cookies and unrelated metadata are not relayed. Missing rate-limit headers are not fabricated; body, status, content type and existing non-stream `Retry-After` behavior stay unchanged. `tests/claude-integration/claude-native-rate-limit-headers.test.ts` exercises the production ingress against a synthetic upstream for all four response shapes (SSE, JSON, upstream error and count_tokens).
+
+`tapAnthropicSseForLog` in `src/server/claude-messages.ts` relays the streamed body of both the native passthrough and the managed native Messages lane (`src/server/messages-native.ts`). The response headers are already sent, so a stall, a byte-cap overflow, or an upstream read failure ends the body with an Anthropic `event: error` frame after a blank-line boundary and a clean close: `timeout_error` for an idle stall, `api_error` for the byte cap, and `api_error` when an upstream read fails mid-stream (a socket reset). The mid-stream reset is logged like the Responses relay's read error: status 502, `terminalStatus: "failed"`, `closeReason: "terminal"`, `transportPhase: "mid_stream"`, a synthetic terminal source, the attempt marked `streamAborted`, the redacted reason in `upstreamError`, and the usage seen before the reset. The non-streaming fold in the managed lane closes its row with the tap's meta for a reset, a stall or the byte cap, so its row matches the streaming lane's. The request is not replayed. Every one of these frames logs status 502. A stall is `terminalStatus: "incomplete"` with `closeReason: "body_stall"`, the status the Responses relay gives a stall-timeout incomplete. The byte cap is `incomplete` with `closeReason: "body_overflow"`, the same 502 the non-stream passthrough answers for it. Both carry the proxy's message in `upstreamError`, and a reset is `terminalStatus: "failed"`. Either way the row keeps its failure diagnostics in usage.jsonl. A stall or overflow after the turn's own terminal (`message_stop` or an upstream `error` event) is a finished turn: it logs 200 and closes without an error frame, as the read-error branch does. The tap finds frames in a copy normalized to LF, because SSE lines may end in CRLF, LF or CR; it holds a trailing CR until the next chunk so a split CRLF stays one line ending, and forwards the original bytes unchanged. Some read failures are not upstream failures. When the cancel signal is already aborted, the rejection is a `499` client cancel, because Bun can reject the read before it dispatches the abort listener. The managed lane passes its upstream controller's signal, so shutdown and turn release count as cancels too. When `message_stop` or an upstream `error` event has been seen, including one still in the buffer without its blank-line delimiter, the turn is complete: it logs 200 and closes with no error frame. A terminal found only in that unterminated tail gets its blank line restored, because an SSE parser drops an event that EOF cuts off. A translator budget overflow is a local cap, so it still errors the stream, and the non-streaming fold answers it with 413. `tests/claude-integration/claude-native-passthrough.test.ts` and `tests/claude-integration/messages-native.test.ts` cover both lanes against an upstream that resets after a partial or a complete body, plus both cancel paths.
 
 A native passthrough answered without a stream records its reason in `upstreamError`, so the row and the failure diagnostics in usage.jsonl name the cause. An upstream error response (status 400 or above) is relayed verbatim; the stored diagnostic is `Provider error <status>: <type>` only for a valid Anthropic error envelope with one of the closed types `invalid_request_error`, `authentication_error`, `permission_error`, `not_found_error`, `rate_limit_error`, `api_error`, `overloaded_error` or `request_too_large`. Upstream messages and arbitrary type strings never enter this diagnostic. Unknown or malformed envelopes, non-JSON bodies and bodies over 64 Ki characters log `Provider error <status>`. Local header timeout, body stall, byte-cap overflow and cancel diagnostics contain fixed text plus validated guard limits. Fetch failures log the fixed reason `anthropic passthrough failed: upstream connection error`; the existing redacted client response is preserved. Classification uses these stored reasons and HTTP status, so a `permission_error` at 403 is `permission_denied` regardless of upstream message wording. `tests/claude-integration/claude-native-passthrough.test.ts` covers these cases and checks that echoed account identifiers and request content are absent from both history sinks.
 

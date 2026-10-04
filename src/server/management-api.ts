@@ -66,9 +66,11 @@ import { handleRoutingAnalyticsRoutes } from "./management/routing-analytics-rou
 import { handleMetricsRoutes } from "./management/metrics-routes";
 import { handleProviderRoutes } from "./management/provider-routes";
 import { handleModelRoutes } from "./management/model-routes";
+import { handleClaudeInterceptRoutes } from "./management/claude-intercept-routes";
 import { handleAgentSettingsRoutes } from "./management/agent-settings-routes";
 import { handleOauthAccountRoutes } from "./management/oauth-account-routes";
 import { handleComboRoutes } from "./management/combo-routes";
+import { handleDecisionRoutes } from "./management/decision-routes";
 import { handleSystemRoutes } from "./management/system-routes";
 import { handleSidebarRoutes } from "./management/sidebar-routes";
 import { handleUsageTimelineRoutes } from "./management/usage-timeline-routes";
@@ -332,7 +334,8 @@ export async function handleManagementAPI(
   }
   let routed: Response | null | undefined;
   try {
-    routed = handleSessionRoutes(ctx)
+    routed = await handleClaudeInterceptRoutes(ctx)
+    ??     handleSessionRoutes(ctx)
     ??     (await handleLinkRoutesOnDemand(ctx))
     ??     (await handleRemoteWorkspaceRoutesOnDemand(ctx))
     ??     (await handleConfigRoutes(ctx))
@@ -358,6 +361,7 @@ export async function handleManagementAPI(
     ??     (await handleAgentSettingsRoutes(ctx))
     ??     (await handleCodexPromptRoutes(ctx))
     ??     (await handleOauthAccountRoutes(ctx))
+    ??     (await handleDecisionRoutes(ctx))
     ??     (await handleComboRoutes(ctx))
     ??     (await handleSystemRoutes(ctx))
     ??     (await handleLabRoutesOnDemand(ctx))

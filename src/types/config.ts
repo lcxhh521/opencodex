@@ -219,6 +219,8 @@ export interface OcxClaudeCodeConfig {
    * definition. Unset inherits the parent session effort.
    */
   subagentEffort?: "low" | "medium" | "high" | "xhigh" | "max";
+  /** Optional roster-style model forced on subagents at the next routed Claude Code launch. */
+  subagentModelForce?: string;
   /** Claude-originated web-search override. Unset fields inherit the global sidecar settings. */
   webSearchSidecar?: { backend?: "openai" | "anthropic" | "xai" | "gemini" | "exa"; model?: string };
   /** Claude-originated vision override. Unset fields inherit the global sidecar settings. */
@@ -495,6 +497,11 @@ export interface OcxClientConnectionConfig {
 }
 
 export interface OcxConfig {
+  /**
+   * Independent experimental macOS shim/intercept flags, default off; optional fixed TLS port.
+   * `pacFallback` launches the intercepted app with a generated PAC instead of a resolver rule.
+   */
+  chatgptDesktop?: { appServerShim?: boolean; unblockSend?: boolean; pacFallback?: boolean; port?: number };
   port: number;
   /** Runtime topology role. Absence preserves the historical standalone behavior. */
   runtimeRole?: OcxRuntimeRole;
@@ -576,13 +583,15 @@ export interface OcxConfig {
    */
   ultraFastTier?: boolean;
   /**
-   * Stop new identity-matched main-account requests at observed 98% usage (#5694).
+   * Stop new identity-matched main-account requests at configured window usage (#5694).
    *
    * On by default: an absent key and `true` both enable it, and only an explicit `false`
    * opts out. While it blocks, the main account's Luna Reserve cannot activate, so an operator
    * who wants Reserve has to turn the setting off rather than delete the key.
    */
   codexMainAccountHardLock?: boolean;
+  /** Per-window percentages: short defaults to 90, long to 98; integers 80..100, short <= long. */
+  codexMainAccountHardLockThresholds?: { short?: number; long?: number };
   /** Explicit top-level deletion intent used by stale whole-config rebases. */
   configRebaseProvenance?: OcxConfigRebaseProvenance | Record<string, unknown>;
   /** OpenAI provider-contract migration marker (v2 = single `openai` provider with account mode). */
@@ -651,6 +660,11 @@ export interface OcxConfig {
    * reject the whole role file as an unknown field (#1190).
    */
   subagentModelFallbackByModel?: Record<string, string[]>;
+  /**
+   * Capability tier of named models for Codex role auto-assign, overriding its price-rank
+   * classification. Models no list names and no price covers are never proposed.
+   */
+  codexRoleTiers?: { fast?: string[]; standard?: string[]; frontier?: string[] };
   /**
    * TTL (ms) for cached sub-agent model availability probes. Default 60_000.
    */
@@ -741,6 +755,8 @@ export interface OcxConfig {
   modelPinnedEfforts?: Record<string, string>;
   compactionRouting?: {
     model: string;
+    /** Incoming model allowlist: exact selectors or provider/*; omitted means all models. */
+    sourceModels?: string[];
     reasoningEffort?: string;
     /** Compaction triggers this override covers; omission means `["manual"]`. */
     triggers?: ("manual" | "auto")[];
@@ -1016,6 +1032,12 @@ export interface OcxConfig {
   /** Account ids administratively excluded from future pool selection until resumed. */
   pausedCodexAccountIds?: string[];
   /**
+   * Account ids, `__main__` included, allowed to keep serving from ChatGPT credits once one of
+   * their usage windows is full. Every other account is skipped by selection at 100% until its
+   * window resets, so spending credits is opt-in.
+   */
+  creditCodexAccountIds?: string[];
+  /**
    * Codex pool selection policy. Absent means no policy, so an existing install rotates exactly
    * as before.
    *
@@ -1081,27 +1103,6 @@ export interface OcxConfig {
    * spends a second credit. A malformed value reads as off.
    */
   resetCreditAutoRedeem?: { enabled?: boolean; leadTimeMinutes?: number };
-  /**
-   * ChatGPT desktop-app integration, opt-in and off by default.
-   *
-   * With `unblockSend: true` the service binds a local TLS listener for `chatgpt.com` and
-   * rewrites the subscription-quota send locks out of the payloads the desktop app reads:
-   * `blocked_features[send]` / `limits_progress[send]` entries in conversation payloads, and
-   * `rate_limit.allowed` / `rate_limit.limit_reached` in the `/backend-api/wham/usage`
-   * snapshot and stream. Quota display (percentages, reset times, upsell banner) is left
-   * untouched, so the app keeps showing the account's real usage while the composer unlocks
-   * for turns whose model calls are routed to third-party providers. There are two launch
-   * modes: by default the app must be launched with the resolver rule printed at startup,
-   * while `pacFallback: true` launches it with a generated PAC URL instead (the app then
-   * routes chatgpt.com through the local entry first and falls back to the system route).
-   * In both modes the intercept CA must be trusted once (see the startup log). A malformed
-   * value reads as off. `appServerShim: true` also runs the app's bundled app-server through a
-   * stdio shim that opens the account rate-limit gate the app reads from it, for builds where
-   * that gate does not come through the Chromium network stack; the app must be launched with
-   * `ocx chatgpt launch` after changing it. `port` (1–65535) overrides the default listener port (public
-   * port + 200).
-   */
-  chatgptDesktop?: { unblockSend?: boolean; pacFallback?: boolean; appServerShim?: boolean; port?: number };
   /**
    * Shared account-pool kernel, opt-in and off by default.
    *
@@ -1220,6 +1221,8 @@ export interface OcxConfig {
    */
   anthropicAccountPool?: {
     enabled?: boolean;
+    /** Preserve native Claude Messages while the pool is enabled. Default true; false selects legacy translation. */
+    nativeMessages?: boolean;
     /** Usage % threshold for new-session auto-pick. Default 80. 0 = disabled (affinity/active only). */
     autoSwitchThreshold?: number;
     /** New-session rotation strategy. Default quota (today's behaviour). */
@@ -1363,6 +1366,21 @@ export interface OcxComboConfig {
   nativeAlias?: boolean;
   /** Display-only label for the public catalog row. Required for native aliases. */
   displayName?: string;
+  /**
+   * `strategy: "jev"` only: provider id of the decision service. Omitted or `"jev"` uses the
+   * canonical TypeSafe endpoint; any other id must name a configured `adapter: "jev-decision"`
+   * row, such as a self-hosted Ollama `tev1` endpoint. That row's baseUrl is the full decision
+   * endpoint and only its own apiKey is sent there.
+   */
+  decisionProvider?: string | null;
+  /** JEV only: an ordinary model route for decisions; null explicitly clears management input. */
+  decisionModel?: string | null;
+  /**
+   * `strategy: "jev"` only: decision deadline in milliseconds before failing open to the first
+   * eligible target. Default 4000; range 1000..120000. Raise it for a self-hosted decision model
+   * whose first call may include a cold model load.
+   */
+  decisionTimeoutMs?: number;
 }
 
 export type OcxRoutingUnknownEvidenceMode = "allow" | "penalize" | "exclude";

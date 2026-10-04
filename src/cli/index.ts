@@ -127,7 +127,6 @@ import { assertNotAdminToken, diagnoseService, isServiceOwnershipError, proxySti
 import { acquireOwnershipMutationLease } from "../service/ownership-mutation-lease.mjs";
 import { formatStartupRoutingDetail, startupHealthSummary } from "../codex/autostart-health";
 import { injectSystemEnv, reconcileShellHook, revertSystemEnv, uninstallShellHook } from "../server/system-env";
-import { buildDesktop3pRegistry } from "../claude/desktop-3p";
 import { startTokenGuardian } from "../oauth/token-guardian";
 import { startHistoryMigrationGuardian } from "../codex/history-migration-guardian";
 import { maybeShowStarPrompt } from "./star-prompt";
@@ -143,6 +142,7 @@ import { honorSiblingMarker, markSiblingStart, siblingOfLivePort, siblingRuntime
 import { consumeSiblingHandoff } from "../codex/sibling-handoff";
 import {
   reconcileClientStartupBeforeReady,
+  syncCodexBeforeCatalogObservation,
   syncClaudeAgentDefsAtProxyStartup,
 } from "./claude-agent-startup-sync";
 import {
@@ -616,12 +616,14 @@ async function handleStart(options: { block?: boolean } = {}) {
   // Loopback-only (legacy mode still forward-tags) and respects syncResumeHistory opt-out.
   let historyGuardian: ReturnType<typeof startHistoryMigrationGuardian> | undefined;
   let routingHealer: { stop(): void } | undefined; // routing-healer.ts; stopped first in syncCleanup
+  let catalogHealer: { stop(): void } | undefined;
 
   let cleaned = false;
   let cleanupSucceeded = true;
   const syncCleanup = () => {
     if (cleaned) return cleanupSucceeded;
     cleaned = true;
+    try { catalogHealer?.stop(); } catch { /* best-effort */ }
     try { routingHealer?.stop(); } catch { /* best-effort */ }
     try { guardian.stop(); } catch { /* best-effort */ }
     try { historyGuardian?.stop(); } catch { /* best-effort */ }
@@ -704,34 +706,21 @@ async function handleStart(options: { block?: boolean } = {}) {
   // deferred until the best-effort Claude roster and Desktop registry settle. This
   // keeps /readyz closed across startup initialization without making an optional
   // Claude integration failure prevent the proxy from starting.
+  const catalogHealerModule = siblingStart ? null : await import("../codex/catalog-self-heal");
   const startupSync = await reconcileClientStartupBeforeReady(
     readinessGate,
-    gate => syncCodexOnStartIfEnabled(port, config, undefined, gate),
+    gate => syncCodexBeforeCatalogObservation(gate,
+      forwarding => syncCodexOnStartIfEnabled(port, config, undefined, forwarding),
+      () => {
+        if (catalogHealerModule && !siblingStart && !cleaned) catalogHealer = catalogHealerModule.startCodexCatalogSelfHeal({ port });
+      }),
     () => systemEnv.injected
       ? Promise.resolve(null)
       : syncClaudeAgentDefsAtProxyStartup(config, port),
     async () => {
-      try {
-        const { fetchAllModels } = await import("../server/management-api");
-        const { desktopVisibleNativeSlugs } = await import("../codex/catalog");
-        const { resolveAdmittedCodexModelEntitlements } = await import("../codex/model-entitlement-admission");
-        const { buildDesktopDiscoveryInputs } = await import("../claude/desktop-discovery-inputs");
-        const [models, modelEntitlements] = await Promise.all([
-          fetchAllModels(config),
-          resolveAdmittedCodexModelEntitlements(config, { clientVersion: null }),
-        ]);
-        const inputs = buildDesktopDiscoveryInputs({
-          config, models, modelEntitlements,
-          desktopNativeCandidates: desktopVisibleNativeSlugs(config),
-        });
-        buildDesktop3pRegistry(
-          inputs.nativeSlugs, inputs.routedModels,
-          config.claudeCode?.desktopProfile, inputs.nativeContextCap,
-        );
-      } catch {
-        // Best-effort; model discovery can rebuild it. Never reflect credential or provider errors.
-        console.warn("[opencodex] Claude Desktop model registry could not be initialized at startup.");
-      }
+      // Shared with the Claude Code CLI picker, which awaits this same build (desktop-3p-startup.ts).
+      const { initDesktop3pRegistry } = await import("../claude/desktop-3p-startup");
+      await initDesktop3pRegistry(config);
     },
   );
   if (!startupSync.ran) console.log(startupLeftCodexNativeLine(localClientSkipReason(config), server.port ?? port));
@@ -1212,7 +1201,7 @@ async function handleStopUnlocked(snapshot?: GuardedStopSnapshot) {
 
   if (snapshot) {
     if (guardedStep?.effect === "approval-changed") {
-      return approvalChanged();
+      return approvalChanged(guardedStep.detail);
     }
     if (guardedStep?.effect === "manager-still-active") {
       return managerStillActive(record.service, record);
@@ -1705,7 +1694,7 @@ async function handleStatus() {
     process.exit(1);
   }
 
-  const status = await collectStatus();
+  const status = await collectStatus({ mainAccountPolicy: wantsJson });
   if (wantsJson) {
     console.log(JSON.stringify(status.json, null, 2));
     return;

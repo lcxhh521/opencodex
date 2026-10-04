@@ -1,3 +1,4 @@
+import type { CodexAccountModelRefusal } from "../../combos/failover";
 import type { NativeResponseControl } from "./native-response-control";
 import type { AdapterEvent, OcxUsage, OcxProviderContinuationState, OcxConfig } from "../../types";
 import type { RouteResult } from "../../router";
@@ -19,10 +20,13 @@ import type { TransientSendBudget } from "../../lib/upstream-retry";
 import type { RequestLogContext } from "../request-log";
 import type { UpstreamHostAdmissionLease } from "../../codex/upstream-host-health";
 import type { AccountLease } from "../../oauth/kiro-account-load";
+import type { PolicyRequestScope } from "./policy-request-scope";
 
 export interface ConsumedComboFailure {
   response: Response;
   classificationText: string;
+  /** Complete bounded-envelope evidence captured before display truncation; never serialized. */
+  codexModelRefusal?: CodexAccountModelRefusal;
   /** Structured upstream `error.code` when present in the failure body. */
   upstreamCode?: string;
   /** Complete structured provider type, retained for conservative recovery classification. */
@@ -57,6 +61,10 @@ export interface ClientEncoderOption {
 }
 
 export interface HandleResponsesOptions {
+  /** Internal request-owned policy authorization; never read from client headers or body. */
+  policyRequestScope?: PolicyRequestScope;
+  /** Internal concrete selector chosen from the original policy evaluation. */
+  policyFallbackCandidate?: { provider: string; model: string };
   /** Internal routed-compaction recovery: one logical request, one emergency target. */
   compactionRecoveryAttempted?: boolean;
   compactionRecoveryPermit?: SingleUseDispatchPermit;
@@ -66,7 +74,7 @@ export interface HandleResponsesOptions {
   /** Physical-send reports already delivered to the shared used setter, including booking settlement. */
   onCompactionRecoverySendsReported?: (count: number) => void;
   /** Private holder for the Kiro serving-account lease. */
-  accountLoad?: { lease: AccountLease | null };
+  accountLoad?: { lease: AccountLease | null; cancelled: boolean };
   /** Internal Claude replay identity; consumed only by the final canonical Go transport. */
   claudeGoAffinity?: { sessionLane?: string };
   /** Validated Claude metadata identity; projected only into final canonical attempt headers. */
@@ -74,6 +82,11 @@ export interface HandleResponsesOptions {
   /** Original live policy owner; separate from caller-specific routing/sidecar snapshots. */
   codexAuthPolicy?: CodexAuthPolicyConfig;
   turnAdmissionLease?: AdmissionLease;
+  /**
+   * A JEV decision-model call issued by a combo. It never carries caller credentials, is never
+   * rewritten by memory or shadow-call routing, and may not dispatch into a JEV combo.
+   */
+  internalDecisionCall?: boolean;
   /**
    * How the caller proved data-plane admission (#1686).
    *
@@ -121,6 +134,8 @@ export interface HandleResponsesOptions {
    * it. Omitted means a genuine Responses inbound.
    */
   inboundWire?: InboundWire;
+  /** Droid's per-request effort default; each concrete combo or policy target applies it only if its ladder allows it. */
+  droidDefaultEffort?: string;
   /** PF-07: the Chat source a combo child may send natively; set only by the Chat ingress. */
   protocolSource?: import("./core-combo-native").ComboProtocolSource;
   /** Internal transport identity for route-scoped upstream compatibility policy. */

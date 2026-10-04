@@ -10,6 +10,9 @@ Native steering follows [the shared WebSocket contract](../transports/streaming-
 Compatibility callers retain the public Responses ingress described by the
 [core module ownership](../transports/responses.md#core-module-ownership). This surface retains its existing behavior.
 
+Chat and Messages admission previews the [xAI OAuth Fast wire destination](../providers/xai-grok.md#grok-47-fast-lane-oauth)
+using the same policy as final Responses serialization. Native dispatch retains its own destination scope check.
+
 The configuration-only [plaintext V2 contract](../subagents.md#plaintext-v2-agent-messages)
 is scoped to canonical ChatGPT Responses forwarding; other source-area behavior described here is unchanged. Cursor's localized native-shell names follow the [routing-commentary guard contract](../providers/cursor.md#cursor-native-exec).
 
@@ -78,6 +81,26 @@ Shared parsing and streaming follow the [request-copy](../transports/byte-accoun
 
 ## Chat Completions inbound native path
 
+### Droid request defaults
+
+`src/server/droid-reasoning-default.ts` reads the model-scoped
+`x-opencodex-droid-default-effort` preference at Chat ingress for both native and
+translated routes. A canonical value fills `reasoning_effort` only when neither
+that property nor nested `reasoning.effort` is present. A concrete route validates
+the preference against that model's effective reasoning ladder. Combo and policy
+routes retain it as logical request intent until each concrete attempt applies the
+existing target-specific reasoning normalization, so an incompatible first target
+cannot discard it for a compatible fallback. With no configured or metadata ladder,
+the routed catalog's canonical fallback ladder applies; an explicit empty per-model
+ladder stays empty. Unsupported or invalid defaults have no effect; even an explicit
+null or invalid effort suppresses the default and retains the existing request
+semantics. Synthetic effort rows keep their selected effort. Provider headers do
+not forward this internal preference. Existing pins and caps run afterward with
+their usual authority. The [Droid integration](../clients/integrations.md#droid-reasoning-defaults)
+owns the persisted per-model values.
+
+### Route selection
+
 `POST /v1/chat/completions` sends eligible `openai-chat` routes directly to the provider's Chat
 Completions endpoint. Route selection reads the raw Chat body and the native request keeps that body
 as its wire source; a Responses projection is constructed only after the native route is declined
@@ -143,7 +166,7 @@ which also decides which role that slot carries. Regression coverage is in
 `tests/responses/chat-inbound-developer-position.test.ts`, which compares the final upstream body
 on the native Chat route, a combo route and the Responses endpoint.
 
-The direct SSE relay accepts CRLF and arbitrary transport chunk boundaries while retaining at most
+The direct SSE relay accepts CR, LF and CRLF across arbitrary transport chunk boundaries while retaining at most
 one bounded event. EOF with an unterminated event and an event above the translator limit are typed
 upstream failures, never successful partial completions. Provider-controlled structured error
 messages are redacted before either JSON or SSE reaches the client. The native path uses the same
@@ -162,10 +185,14 @@ allowance; comments, role-only frames, empty deltas, and usage alone do not. Dow
 pauses this wait budget. A stall emits a Chat error with `upstream_stall_timeout` and logs 502;
 the non-streaming endpoint returns HTTP 502 rather than a successful partial result.
 
-`src/chat/outbound.ts` collects LF/CRLF, multiline data, and split UTF-8 through the shared SSE
+`src/chat/outbound.ts` collects CR/LF/CRLF, multiline data, and split UTF-8 through the shared SSE
 block buffer and tracks appended output bytes incrementally. A caller cancellation before a native
 terminal returns 499 / `client_cancelled`; an already accepted terminal keeps its result. Reader,
 timer, turn, and translator ownership are released through the existing lifecycle.
+
+## HTTP caller conversation identity
+
+`src/server/caller-session-identity.ts` promotes validated `x-session-id` on HTTP Responses and Messages before turn admission in `src/server/index/serve-options.ts`. Explicit `session_id`, `session-id`, or `thread-id` presence wins, including empty values; managed Grok promotion runs first on Responses. The trimmed marker must start with an ASCII letter/digit, contain only letters, digits, dots, underscores, colons or hyphens, and stay within 128 characters. Loopback admission keeps it; authenticated admission scopes it with the trusted credential principal into an opaque SHA-256 identifier and skips promotion without that principal. Bodies and abort signals are preserved, and the original Request owns Bun timeout lookup. This provides continuity, not authorization or guaranteed cache hits. Existing explicit/Grok identities, Chat Completions, WebSocket frames, compact and count_tokens retain their behavior.
 
 ## Chat conversation identity forwarding
 
@@ -257,6 +284,15 @@ Optional Codex transport-hint suppression is scoped to canonical Responses clien
 its defaults and exclusions are owned by [Responses transport](../transports/responses.md).
 
 The provider summary default applies at Responses ingress; native Chat and Anthropic inbound preferences keep their existing handling. Raw content is never renamed to a summary. See [bridge contract](../providers/chat-compat.md).
+
+## Claude context rejection
+
+Claude Messages preserves the classified `context_length_exceeded` error through
+`src/claude/outbound.ts`, `src/protocols/encoders/messages.ts`, and
+`src/server/claude-messages.ts`. Streaming output carries one `invalid_request_error`
+terminal with that code; collected and failed-JSON responses return HTTP 400 without
+a retry hint. This mapping adds no recovery send or context pruning. Unknown upstream
+failures, replay refusal, and local translation-buffer limits retain their distinct handling.
 
 ## Claude affinity at final Go dispatch
 
@@ -427,3 +463,7 @@ Unicode pattern normalization uses [copy-on-write traversal](../transports/byte-
 Dashboard Fast-row persistence and client refresh follow the [Fast selector rows setting contract](../gui-and-management-api.md#fast-selector-rows-setting).
 
 The [compaction routing override](../transports/responses-failover.md#compaction-routing-overrides) requires original Responses ingress; translated Chat and Messages calls retain their own routing.
+
+Managed native Anthropic OAuth metadata follows [the native Messages binding contract](protocol-paths.md#managed-native-messages): the serving credential's provider UUID replaces only recognized account metadata, with each attempt rebuilt from the source.
+
+Managed native Messages retain a coherent observed CLI identity bundle only for first-party Anthropic; [native Messages](protocol-paths.md#managed-native-messages) owns its bounds and credential separation. Header identity never selects an account or authorizes a request.

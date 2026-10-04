@@ -29,9 +29,11 @@ import {
 import { decodeWindowsTextBytes } from "./lib/windows-text";
 import { WINSW_SERVICE_ID } from "./lib/winsw";
 import { BUN_RUNTIME_PATH_ENV, BUN_RUNTIME_SOURCE_ENV } from "./lib/bun-runtime";
+import { REAL_BUN_MIN_BYTES } from "./lib/bun-binary-validator.mjs";
 import { WINDOWS_WRAPPER_PROTOCOL_ENV, WINDOWS_WRAPPER_STAY_OUT_EXIT_CODE } from "./service/windows-wrapper-exit";
 import { buildWindowsServiceScript, windowsTaskActionMatches } from "./service/windows-taskxml";
 import { inspectServiceStateEvidence, serviceStatePathsForOpenCodexHome } from "./service/state";
+import { parseSystemdUnitHomes } from "./service/systemd-env";
 
 /** Short: this runs inside admission, and a slow answer is the same as none. */
 export const SERVICE_PROBE_TIMEOUT_MS = 2_000;
@@ -238,21 +240,23 @@ function unknown(reason: string): ServiceManagerInstallation {
   return { kind: "unknown", reason };
 }
 
+/** Decode the entities buildPlist's plistString applies. `&amp;` goes last so a
+ *  literal `&amp;lt;` written by a double-escaped value stays `&lt;`. */
+function plistStringValue(raw: string): string {
+  return raw
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
 /** Pull `<key>NAME</key><string>VALUE</string>` out of a plist body. */
 function plistEnvValue(body: string, key: string): string | null {
   const match = body.match(
     new RegExp(`<key>\\s*${key}\\s*</key>\\s*<string>([^<]*)</string>`),
   );
-  return match ? match[1] : null;
-}
-
-/** Pull `Environment="NAME=VALUE"` (quoted or bare) out of a systemd unit. */
-function unitEnvValue(body: string, key: string): string | null {
-  for (const line of body.split("\n")) {
-    const match = line.match(new RegExp(`^\\s*Environment=\\s*"?${key}=([^"\\n]*)"?\\s*$`));
-    if (match) return match[1];
-  }
-  return null;
+  return match ? plistStringValue(match[1]) : null;
 }
 
 /**
@@ -321,15 +325,14 @@ function inspectSystemdOffline(home: string): ServiceManagerInstallation {
   } catch (error) {
     return unknown(`the session bus is unreachable and the systemd unit could not be read: ${String(error)}`);
   }
+  const parsed = parseSystemdUnitHomes(body);
+  if (parsed.kind === "invalid") return unknown("the systemd unit has unsupported or ambiguous environment assignments");
   return {
     kind: "present",
     claims: [{
       backend: "systemd",
       definitionPath,
-      homes: {
-        codexHome: unitEnvValue(body, "CODEX_HOME"),
-        opencodexHome: unitEnvValue(body, "OPENCODEX_HOME"),
-      },
+      homes: parsed.homes,
       registration: "absent",
     }],
   };
@@ -463,16 +466,14 @@ function inspectSystemd(deps: Required<Pick<ProbeDeps, "run" | "home">>): Servic
   } catch (error) {
     return unknown(`the systemd unit exists but could not be read: ${String(error)}`);
   }
-
+  const parsed = parseSystemdUnitHomes(body);
+  if (parsed.kind === "invalid") return unknown("the systemd unit has unsupported or ambiguous environment assignments");
   return {
     kind: "present",
     claims: [{
       backend: "systemd",
       definitionPath,
-      homes: {
-        codexHome: unitEnvValue(body, "CODEX_HOME"),
-        opencodexHome: unitEnvValue(body, "OPENCODEX_HOME"),
-      },
+      homes: parsed.homes,
       registration,
     }],
   };
@@ -613,8 +614,41 @@ function matchesGeneratedStandaloneControlFlow(body: string, port: number): bool
     scriptLines.filter((line, index) => index >= end || line === 'set "ERRORLEVEL="' || !line.startsWith('set "'));
   const actualFlow = withoutPrefixSets(lines, boundary);
   const generatedFlow = withoutPrefixSets(expected, expectedBoundary);
-  return actualFlow.length === generatedFlow.length
-    && actualFlow.every((line, index) => line === generatedFlow[index]);
+  // Read-only recognition of the exact previous generator output keeps installed
+  // standalone services identifiable across the backup-log hardening update.
+  // Never emit or execute this legacy variant; every other control line still matches.
+  const legacyFlow = generatedFlow.flatMap(line => {
+    if (line === "      goto backup_restored") return ['      set "OCX_RESTORED_BACKUP=%%B"', line];
+    if (line === '>>"%OCX_SERVICE_LOG%" echo [%DATE% %TIME%] restored previous install from transactional-update backup') {
+      return ['>>"%OCX_SERVICE_LOG%" echo [%DATE% %TIME%] restored previous install from %OCX_RESTORED_BACKUP%'];
+    }
+    return [line];
+  });
+  // Also recognize the exact pre-placeholder version, not a partial size-gate
+  // hybrid. Only remove these complete known blocks from trusted generator output.
+  const beforePlaceholderGate = (flow: string[]): string[] | null => {
+    const blocks = [
+      ['set "OCX_BUN_BYTES="', 'for %%F in ("%OCX_BUN%") do set "OCX_BUN_BYTES=%%~zF"',
+        'if not defined OCX_BUN_BYTES goto bun_not_ready', `if %OCX_BUN_BYTES% LSS ${REAL_BUN_MIN_BYTES} goto bun_not_ready`],
+      [":bun_not_ready",
+        '>>"%OCX_SERVICE_LOG%" echo [%DATE% %TIME%] bundled Bun is not ready (%OCX_BUN_BYTES% bytes, npm placeholder or mid-install); waiting for its postinstall, retrying in 5s - if this persists, reinstall opencodex with bun scripts allowed',
+        "ping -n 6 127.0.0.1 >nul", "goto loop"],
+    ];
+    let earlier = flow;
+    for (const block of blocks) {
+      const at = earlier.indexOf(block[0]!);
+      if (at < 0 || !block.every((line, offset) => earlier[at + offset] === line)) return null;
+      earlier = [...earlier.slice(0, at), ...earlier.slice(at + block.length)];
+    }
+    return earlier;
+  };
+  const recognized = [generatedFlow, legacyFlow];
+  for (const flow of [...recognized]) {
+    const earlier = beforePlaceholderGate(flow);
+    if (earlier) recognized.push(earlier);
+  }
+  return recognized.some(expectedFlow => actualFlow.length === expectedFlow.length
+    && actualFlow.every((line, index) => line === expectedFlow[index]));
 }
 
 /** Validate the generated launch shape before interpreting omitted optional homes. */
@@ -799,6 +833,59 @@ function probeWinswRegistration(
   // text so localized OEM output cannot affect the numeric classification.
   const text = `${queried.stdout.toString("latin1")}\n${queried.stderr.toString("latin1")}`;
   return /\b1060\b/.test(text) ? "absent" : "unknown";
+}
+
+/**
+ * The `BINARY_PATH_NAME` value from `sc.exe qc` output, or null when the line is missing.
+ * `sc qc` field names are not localized; the value may be quoted and carry arguments.
+ */
+export function parseScQcBinaryPathName(output: string): string | null {
+  const match = /^[ \t]*BINARY_PATH_NAME[ \t]*:[ \t]*([^\r\n]*)$/m.exec(output);
+  const value = match?.[1]?.trim();
+  return value ? value : null;
+}
+
+function normalizeWindowsExecutablePath(path: string): string {
+  const stripped = path.startsWith("\\\\?\\") ? path.slice(4) : path;
+  return win32Path.normalize(stripped).toLowerCase();
+}
+
+/**
+ * Whether an SCM `BINARY_PATH_NAME` launches exactly `exePath`. A quoted value names the
+ * text between its quotes; an unquoted value names the text through the first `.exe`
+ * followed by whitespace or the end. Comparison is Windows path-normalized and case-insensitive.
+ */
+export function scBinaryPathNamesExecutable(binaryPathName: string, exePath: string): boolean {
+  const value = binaryPathName.trim();
+  let executable: string | null;
+  if (value.startsWith("\"")) {
+    const end = value.indexOf("\"", 1);
+    executable = end > 1 ? value.slice(1, end) : null;
+  } else {
+    executable = /^(.*?\.exe)(?=\s|$)/i.exec(value)?.[1] ?? null;
+  }
+  if (!executable || !exePath.trim()) return false;
+  return normalizeWindowsExecutablePath(executable) === normalizeWindowsExecutablePath(exePath.trim());
+}
+
+/**
+ * The registered WinSW service's `BINARY_PATH_NAME` through trusted System32 `sc.exe qc`,
+ * bounded like every other probe query. Null on any failure; the WinSW executable is never run.
+ */
+export function queryWinswBinaryPathName(
+  deps: Pick<ProbeDeps, "runRaw" | "windowsLocale"> = {},
+): string | null {
+  let sc: string;
+  try {
+    sc = join(resolveTrustedWindowsSystemDirectory(), "sc.exe");
+    if (artifactPresence(sc) !== "present") return null;
+  } catch {
+    return null;
+  }
+  const runRaw = deps.runRaw ?? defaultRawProbeRunner;
+  const queried = runRaw(sc, ["qc", WINSW_SERVICE_ID]);
+  if (queried.spawnFailed || queried.timedOut || queried.status !== 0) return null;
+  return parseScQcBinaryPathName(decodeWindowsTextBytes(queried.stdout, { locale: deps.windowsLocale }));
 }
 
 function inspectWindows(

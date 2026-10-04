@@ -93,7 +93,9 @@ Anthropic。若任一提供方请求头包含代理准入密钥，该密钥会�
 解析后返回的模型保持不变；并且在非回环绑定上，专用代理准入请求头有效。这也意味着使用 `ocx claude` 时不再出现
 “claude.ai connectors are disabled”警告。
 
-请求体中唯一会改动的是工具调用 ID。Anthropic 会拒绝的 `tool_use.id` 或 `tool_result.tool_use_id`（含 `a-zA-Z0-9_-` 以外的字符或超过 64 个字符，例如会话早先由路由模型生成的 ID）会被改写为合规 ID，并保持调用与结果的配对。合规 ID 原样发送，空 ID 会在本地直接返回 400。
+在使用调用方凭据的这条透传路径中，请求体只会改动工具调用 ID。Anthropic 会拒绝的 `tool_use.id` 或 `tool_result.tool_use_id`（含 `a-zA-Z0-9_-` 以外的字符或超过 64 个字符，例如会话早先由路由模型生成的 ID）会被改写为合规 ID，并保持调用与结果的配对。合规 ID 原样发送，空 ID 会在本地直接返回 400。
+
+使用代理已保存 OAuth 凭据的受管理原生请求还会统一已声明自定义工具在延迟引用和内联添加或删除中的名称。参数、模式和缓存标记保持不变。系统消息中的内联工具变更需要发送 `inline-tools-2026-09-15`；存在相应类型的块时，面向 Anthropic 官方 API 的构建器会保留该请求头。
 
 可以设置 `claudeCode.nativePassthrough: false` 来禁用；也可以通过
 `claudeCode.anthropicBaseUrl` 指向其他位置。
@@ -569,3 +571,17 @@ Claude 模型时自动加载。对于原生透传，这是正常现象；对于�
 ### 第一方模型选择器的上下文标记
 
 对于权威上下文窗口至少为一百万 token 的路由模型，Desktop Code 标签页的模型选择器会添加 `[1m]`，使 Claude 按 1M 窗口计量，而不是使用自定义模型较小的默认窗口。标签、配置中的顺序和提供方路由保持不变。窗口未知或小于一百万 token 的模型（包括原生模型的大窗口选项）不添加标记，因为选择器无法保证 Desktop 或远程运行器收到配套的压缩环境设置。`ocx claude` 的自动上下文与压缩配套设置保持不变。现有对话会保留已保存的选择器，直到你在刷新后的模型选择器中重新选择该模型。
+
+### Forced Claude Code subagent model
+
+The Subagents page offers **Force all subagents onto one model**, off by default. Select an exposed roster-style id, such as `combo/tev-auto`, then enable the switch. The roster is offered first; unavailable saved roster entries cannot be force targets.
+
+`ocx agent subagents force combo/tev-auto` sets `claudeCode.subagentModelForce`; `ocx agent subagents force -` clears it. `ocx agent status` reports the setting. `GET /api/subagent-models` returns `force`, `forceAvailable`, and `forceStatus`; `PUT` accepts `{ "force": "combo/tev-auto" }` or `{ "force": null }` without changing the roster. Omitting `force` leaves it unchanged. Invalid or unexposed targets are rejected on write; stale targets are reported and skipped at launch.
+
+This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` only for an authoritative million-token window; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
+
+Claude Code **2.1.257 or newer** is required for FORCE. Plugin and built-in agents (including Explore/Plan) and per-call model arguments are overridden. Forks and subagent skills with `model: inherit` keep the main conversation model. The main loop and Haiku/small-fast sidecars are unaffected. Existing roster files remain available.
+
+The dashboard warns about old or unknown CLI versions, unavailable targets, and either variable already present in `settings.json` → `env` (which overrides launch env). Detection is read-only and server-local: it cannot inspect another launch shell, another machine, or project-local settings. An unknown result is not proof of force support.
+
+Explicit gateway selectors on a generated agent request take precedence over its legacy `ocx-route` fallback, even if the saved force setting changes after launch. For shell or settings overrides of generated roster agents, use an explicit gateway alias; bare Claude ids retain the older-client fallback behavior. Native aliases restore their bare model before the existing credential and model-map checks. Connected launches validate force targets against a fresh authenticated gateway catalog; failed discovery skips automatic force injection, and cached context windows alone never prove availability.

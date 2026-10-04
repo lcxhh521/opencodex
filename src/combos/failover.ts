@@ -11,6 +11,7 @@ import {
 
 interface TargetCooldown {
   cooldownUntil: number;
+  status?: number;
 }
 
 const DEFAULT_COOLDOWN_MS = 60_000;
@@ -195,6 +196,23 @@ export function remainingComboCooldownMs(comboId: string, now = Date.now()): num
   return soonest;
 }
 
+/** Snapshot active quota cooldowns without inspecting request eligibility or changing state. */
+export function snapshotComboQuotaCooldowns<T extends Pick<OcxComboTarget, "provider" | "model">>(
+  comboId: string,
+  targets: Iterable<T>,
+  now = Date.now(),
+): Array<{ target: T; cooldownUntil: number }> {
+  const snapshot: Array<{ target: T; cooldownUntil: number }> = [];
+  for (const target of targets) {
+    const key = cooldownMapKey(comboId, target);
+    const cooldown = targetCooldowns.get(key);
+    if (!cooldown || cooldown.cooldownUntil <= now) continue;
+    if (cooldown.status !== 429 && cooldown.status !== 402) continue;
+    snapshot.push({ target, cooldownUntil: cooldown.cooldownUntil });
+  }
+  return snapshot;
+}
+
 export function comboCooldownRetryAfterSeconds(comboId: string, now = Date.now()): string | undefined {
   const remainingMs = remainingComboCooldownMs(comboId, now);
   if (remainingMs === undefined) return undefined;
@@ -244,6 +262,7 @@ export function coolComboTarget(
   targetCooldowns.set(cooldownMapKey(comboId, target), {
     // Local fallbacks are capped at ten minutes; explicit server delays at one day.
     cooldownUntil: now + (serverDelayMs ?? Math.min(Math.max(cooldownMs, 1), MAX_COOLDOWN_MS)),
+    status: options?.status,
   });
   sweepExpiredOnWrite(now);
   return true;
@@ -670,10 +689,84 @@ function isDefiniteContextOverflow(status: number, message: string): boolean {
   return false;
 }
 
+const CODEX_ACCOUNT_MODEL_REFUSAL = /^The '[^']{1,256}' model is not supported when using Codex with a ChatGPT account\.$/;
+
+export type CodexAccountModelRefusal = "other" | "refusal" | "ambiguous";
+
+/** Inspect only the original root and its own response record, before carrier selection. */
+export function hasConflictingCodexModelRefusalEnvelopes(status: number, payload: unknown): boolean {
+  if (status !== 400 || !payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const response = Object.hasOwn(payload, "response") ? (payload as Record<string, unknown>).response : undefined;
+  const nested = response && typeof response === "object" && !Array.isArray(response) ? response : undefined;
+  return (Object.hasOwn(payload, "detail") || !!nested && Object.hasOwn(nested, "detail"))
+    && (Object.hasOwn(payload, "error") || !!nested && Object.hasOwn(nested, "error"));
+}
+
+/** Inspect an already parsed, bounded error frame without copying or walking its body. */
+export function codexAccountModelRefusalPayload(status: number, payload: unknown): CodexAccountModelRefusal {
+  if (status !== 400 || !payload || typeof payload !== "object" || Array.isArray(payload)) return "other";
+  if (Object.hasOwn(payload, "detail") && Object.hasOwn(payload, "error")) return "ambiguous";
+  const { detail, error } = payload as { detail?: unknown; error?: unknown };
+  const field = typeof detail === "string" ? detail
+    : error && typeof error === "object" && !Array.isArray(error)
+      && typeof (error as Record<string, unknown>).message === "string"
+      ? (error as { message: string }).message : undefined;
+  return field !== undefined && CODEX_ACCOUNT_MODEL_REFUSAL.test(field) ? "refusal" : "other";
+}
+
+/** One complete, bounded HTTP envelope; accept only a single exact status prefix. */
+function parseCodexRefusalEnvelope(status: number, message: string): { text: string; payload: unknown } | undefined {
+  if (status !== 400 || message.length > 16_384) return undefined;
+  let text = message.trim();
+  if (text.startsWith("Provider error 400: ")) text = text.slice("Provider error 400: ".length);
+  let payload: unknown;
+  try { payload = JSON.parse(text); } catch { /* Bare refusal text is also a supported carrier. */ }
+  return { text, payload };
+}
+
+/** Only allowlisted hard stops cross the same HTTP boundary as positive refusal evidence. */
+export function codexAccountModelRefusalHardStopCode(status: number, message: string): string | undefined {
+  const payload = parseCodexRefusalEnvelope(status, message)?.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+  const root = payload as Record<string, unknown>;
+  const response = Object.hasOwn(root, "response") ? root.response : undefined;
+  const records = response && typeof response === "object" && !Array.isArray(response)
+    ? [root, response as Record<string, unknown>] : [root];
+  for (const record of records) {
+    const error = record.error && typeof record.error === "object" && !Array.isArray(record.error)
+      ? record.error as Record<string, unknown> : undefined;
+    // Diagnostic type is never code evidence, even when a code is absent or malformed.
+    for (const code of [error?.code, record.code]) {
+      if (typeof code !== "string") continue;
+      if (isNonReplayableUpstreamCode(code) || isCyberPolicyCode(code)) return code;
+      if (normalizedFailureCode(code) === "origin_rejected") return "origin_rejected";
+    }
+  }
+  return undefined;
+}
+
+/** A bounded fallback signal, never credential or account-entitlement evidence. */
+export function codexAccountModelRefusal(
+  status: number, message: string, options?: { allowNestedResponse?: boolean },
+): CodexAccountModelRefusal {
+  const envelope = parseCodexRefusalEnvelope(status, message);
+  if (!envelope) return "other";
+  if (CODEX_ACCOUNT_MODEL_REFUSAL.test(envelope.text)) return "refusal";
+  const payload = envelope.payload;
+  if (hasConflictingCodexModelRefusalEnvelopes(status, payload)) return "ambiguous";
+  // A present root carrier stays authoritative, even when malformed or nonmatching.
+  if (options?.allowNestedResponse !== false && payload && typeof payload === "object" && !Array.isArray(payload)
+    && !Object.hasOwn(payload, "detail") && !Object.hasOwn(payload, "error")
+    && Object.hasOwn(payload, "response")) {
+    return codexAccountModelRefusalPayload(status, (payload as Record<string, unknown>).response);
+  }
+  return codexAccountModelRefusalPayload(status, payload);
+}
+
 export function comboFailureDecision(
   status: number,
   message: string,
-  options?: { code?: string | null },
+  options?: { code?: string | null; codexModelRefusal?: CodexAccountModelRefusal },
 ): ComboFailureDecision {
   if (status === 499) return "stop";
   if (message.toLowerCase().includes("origin_rejected")) return "stop";
@@ -688,6 +781,12 @@ export function comboFailureDecision(
   // Cyber policy is a hard non-retryable refusal — honor structured code even when
   // classificationText was truncated before the JSON code field.
   if (isCyberPolicyCode(options?.code)) return "stop";
+  // HTTP consumers retain hard codes before truncation; SSE metadata owns its selected carrier.
+  if (options?.codexModelRefusal === undefined && codexAccountModelRefusalHardStopCode(status, message)) return "stop";
+  const modelRefusal = status === 400
+    ? options?.codexModelRefusal ?? codexAccountModelRefusal(status, message) : "other";
+  // Competing envelopes cannot grant a hop through an earlier structured-code rule either.
+  if (modelRefusal === "ambiguous") return "stop";
   // HTTP 410 is normally terminal. A model-specific lifecycle verdict is target-local,
   // however: another provider/model in the declared combo can still serve the request.
   // Require structured lifecycle code or explicit model+lifecycle prose so unrelated
@@ -738,6 +837,7 @@ export function comboFailureDecision(
   if (["model_not_found", "model_unavailable", "unsupported_model"].includes(failureCode)) {
     return "hop";
   }
+  if (modelRefusal === "refusal") return "hop";
   // `free_rate_limited` no longer routes through `isProviderScopedQuotaCap` (it is a
   // per-request cap, not provider-wide evidence), so keep its hop verdict explicit here.
   if (failureCode === "free_rate_limited") return "hop";

@@ -363,12 +363,17 @@ JEV は `jev-auto` でのみ、論理的なモデル呼び出しごとに一度�
 呼び出し元のキャンセルは引き続きリクエストをキャンセルします。自動テストは TypeSafe のモック
 エンドポイントを使い、実際の JEV アカウントは検証しません。
 
+JEV Combo は、キー不要の Ollama `tev1` のようなセルフホストの判断モデルを代わりに使うこともできます。
+`baseUrl` が完全な `/v1/systemone` エンドポイントである `jev-decision` プロバイダーを追加し、Combo の
+`decisionProvider` に指定します。TypeSafe の認証情報がそこへ送られることはありません。詳しくは
+[セルフホストの判断モデル](https://opencodex.me/ja/guides/combos/)を参照してください。
+
 ## プロバイダーとアダプター
 
 <!-- sponsors:main-first-mention -->
 OpenAI（ChatGPT ログインまたは API キー）、Anthropic、Google Gemini、xAI、Kimi、Azure OpenAI、Ollama
 （ローカル + Cloud）、Cursor（実験的）、そしてあらゆる OpenAI 互換エンドポイント。さらに DeepSeek、
-Groq、OpenRouter、Together、Fireworks、Cerebras、Mistral、Hugging Face、NVIDIA NIM、MiniMax、
+Groq、OpenRouter、OpenGateway、Together、Fireworks、Cerebras、Mistral、Hugging Face、NVIDIA NIM、MiniMax、
 Qwen Cloud、Qoder Global と CN（公式 PAT + CLI）、SiliconFlow などがあります。全一覧は `ocx init` か
 [プロバイダーのドキュメント](https://opencodex.me/ja/guides/providers/)で確認できます。
 

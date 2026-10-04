@@ -22,7 +22,7 @@ import {
   repairFreeformToolInput,
 } from "../responses/apply-patch-envelope";
 import { progressiveFreeformInput } from "../responses/progressive-freeform-input";
-import { encodeCompactionSummary } from "../responses/compaction";
+import { encodeCompactionSummary, releaseCompactionCiphertextLease } from "../responses/compaction";
 import { compileCodeModeHelperInput, resolveCodeModeHelperName } from "../responses/code-mode-helper-compat";
 import { mayBecomeCodeModeShellInput } from "../responses/code-mode-shell-input";
 import { isTruncatedStopReason, truncationReasonFor } from "../responses/truncated-stop-reason";
@@ -88,7 +88,7 @@ export function bridgeToResponsesSSE(
      * response.completed — codex-rs collect_compaction_output requires exactly one.
      */
     compaction?: boolean;
-    /** One-shot: first non-empty text/thinking/raw-reasoning delta observed (WP4 TTFT). */
+    /** One-shot: first non-empty text/thinking/raw-reasoning/tool-input delta observed. */
     onFirstOutput?: () => void;
     onTerminal?: (status: ResponsesTerminalStatus) => void;
     onCompletedResponse?: (response: Record<string, unknown>, providerState?: OcxProviderContinuationState) => void;
@@ -707,10 +707,16 @@ export function bridgeToResponsesSSE(
             ? event.thinking.length > 0
             : event.type === "reasoning_raw_delta"
               ? event.text.length > 0
-              : false;
+              : event.type === "tool_call_delta"
+                ? event.arguments.length > 0
+                : false;
         if (!nonEmpty) return;
         firstOutputReported = true;
         try { options?.onFirstOutput?.(); } catch { /* metrics must not break the stream */ }
+      };
+      const releaseEvent = (event: AdapterEvent) => {
+        releaseTranslatedEvent(event, budget);
+        releaseCompactionCiphertextLease(event, budget);
       };
       const it = events[Symbol.asyncIterator]();
       let iteratorStarted = false;
@@ -732,8 +738,11 @@ export function bridgeToResponsesSSE(
         if (!iteratorStarted) {
           iteratorStarted = true;
           try {
-            void it.next().then(finishReturn, () => {}).catch(() => {});
+            void it.next().then(next => {
+              try { if (!next.done) releaseEvent(next.value); } finally { finishReturn(); }
+            }, finishReturn).catch(() => {});
           } catch {
+            finishReturn();
             /* synchronous iterator start failure is also best-effort */
           }
           return;
@@ -807,6 +816,7 @@ export function bridgeToResponsesSSE(
         while (!terminated && !closed && emittedFrames === emittedAtStart) {
           iteratorStarted = true;
           const next = await it.next();
+          try {
           // A cancel during this await disposes the owned budget; a late event
           // must never be processed or charged against it. Exit step() outright:
           // falling into EOF synthesis would let closeCurrentMessage() charge
@@ -1226,9 +1236,8 @@ export function bridgeToResponsesSSE(
                   encrypted_content: event.compactionEncryptedContent ?? encodeCompactionSummary(joinChunks(compaction)),
                 };
                 emit("response.output_item.done", { output_index: outputIndex, item });
-                retainFinishedItem(item as OutputItem, event.compactionEncryptedContent
-                  ? bytesOf(event.compactionEncryptedContent)
-                  : compaction.bytes);
+                retainFinishedItem(item as OutputItem, event.compactionEncryptedContent ? 0 : compaction.bytes);
+                releaseCompactionCiphertextLease(event, budget);
                 outputIndex++;
               }
               // Recognize every adapter's truncation vocabulary, not just the canonical pair.
@@ -1330,6 +1339,9 @@ export function bridgeToResponsesSSE(
             cancelUpstreamOnce();
             terminated = true;
             break;
+          }
+          } finally {
+            if (!next.done) releaseEvent(next.value);
           }
         }
       } catch (err) {

@@ -1,3 +1,4 @@
+import { codexAccountUsesCreditsAfterLimit } from "../account-credit-use";
 import { nextCodexUsageQueryAt, nextQuotaQueryDelay, pruneRemovedCodexPoolUsageAccounts } from "../quota-query-backoff";
 import { CODEX_PRIORITY_FAILBACK_REFRESH_MS } from "../account-priority";
 import { codexQuotaHasFreshUsage } from "../quota-observation-freshness";
@@ -6,8 +7,8 @@ import { getAccountQuota, isCompleteCodexQuotaRecoverySnapshot } from "../quota"
 import { reconcileMainCodexAccountRuntimeState } from "../account-lifecycle";
 import { claimDueCodexQuotaRecoveryProbes, settleCodexQuotaRecoveryProbe } from "../routing";
 import { readCodexTokens } from "../auth-collision";
-import { isAccountNeedsReauth, markAccountNeedsReauth } from "../account-runtime-state";
-import { getValidMainAccountToken, MainAccountTokenRefreshError, MAIN_CODEX_ACCOUNT_ID, getMainAccountPlan } from "../main-account";
+import { isAccountNeedsReauth } from "../account-runtime-state";
+import { getValidMainAccountToken, MAIN_CODEX_ACCOUNT_ID, getMainAccountPlan } from "../main-account";
 import { captureConfigGeneration, registerStateSweepAfterTick } from "../../lib/state-store-sweeper";
 import { observeMainQuotaCredential, getMainQuotaCredentialGeneration, captureMainAccountIdentityGeneration, isMainAccountIdentityGenerationLive } from "../main-account-cache";
 import { getMainAccountHardLockStatus } from "../main-account-hard-lock";
@@ -58,7 +59,7 @@ export async function runCodexCooldownRecoveryProbes(config: OcxConfig, now = Da
         // Defence in depth: independent scopes are already excluded at the claim site.
         // Generic WHAM must never clear Reserve even if claim selection changes.
         const recovered = (claim.scope === undefined || claim.scope === "shared")
-          && isCompleteCodexQuotaRecoverySnapshot(result.freshQuota ?? null, result.freshPlan ?? account.plan);
+          && isCompleteCodexQuotaRecoverySnapshot(result.freshQuota ?? null, result.freshPlan ?? account.plan, codexAccountUsesCreditsAfterLimit(config, claim.accountId));
         settleCodexQuotaRecoveryProbe(claim, recovered, {
           credentialGeneration: result.freshCredentialGeneration,
         }, now);
@@ -100,18 +101,14 @@ export async function runMainAccountHardLockRecovery(config: OcxConfig): Promise
     if (getMainAccountHardLockStatus(config).state !== "blocked"
       || isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID)) return;
     const identityGeneration = captureMainAccountIdentityGeneration();
-    const writerGeneration = captureConfigGeneration();
     try {
       // Refresh can require an exclusive credential claim: never hold WHAM's shared
       // claim while obtaining a valid token. The runtime lease spans both operations.
       const prepared = await getValidMainAccountToken({ preserveReauth: true });
       if (!prepared) return;
       observeMainQuotaCredential(prepared.accessToken, prepared.chatgptAccountId);
-    } catch (error) {
-      if (error instanceof MainAccountTokenRefreshError && error.reason === "reauth"
-        && isMainAccountIdentityGenerationLive(identityGeneration)) {
-        markAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID, writerGeneration);
-      }
+    } catch {
+      // Native refresh retains its own grant-scoped refusal; global quarantine would outlive it.
       return;
     }
     if (isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID)) return;

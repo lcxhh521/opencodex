@@ -1,13 +1,15 @@
 # Providers And Adapters
 
-Anthropic account pause, model routes, and quota labels follow the
-[Anthropic account-pool contract](providers/anthropic-account-pool.md). Devin Messages follows the [per-turn output ordering contract](clients/claude-desktop.md#devin-messages-output-ordering), preserving late signatures before text/tools without changing Responses or Chat ordering.
+Anthropic account pause, model routes, and quota labels follow the [Anthropic account-pool contract](providers/anthropic-account-pool.md). Devin Messages follows the [per-turn output ordering contract](clients/claude-desktop.md#devin-messages-output-ordering), preserving late signatures before text/tools without changing Responses or Chat ordering.
+
+Managed native Anthropic serving UUID and observed CLI header continuity follow [native Messages](data-planes/protocol-paths.md#managed-native-messages); generated Responses retain the adapter's compatibility fingerprint.
 
 Per-account usage thresholds follow the [Anthropic account thresholds contract](providers/anthropic-account-thresholds.md).
-An Anthropic 429 or classified pre-output account 403 records the served account's cooldown even when the request has used its allowed retry sends. That final account remains excluded on the next request; combo target cooling for 429 is skipped only after the matching account cooldown is present.
+A shared-quota Anthropic 429 or classified pre-output account 403 records the served account's cooldown even when the request has used its allowed retry sends. That final account remains excluded on the next request; combo target cooling for 429 is skipped only after the matching account cooldown is present.
 
-GitHub Copilot `modelContextTiers` is selected per upstream model. The Chat and Responses
-adapters set `contextTier` only when the canonical routed provider is `github-copilot`
+The Anthropic helper sends share the same routing authority: `getAnthropicSidecarAccessToken` resolves the vision-describe and web-search sidecars' helper model through the same first-match route decision, so a routed send authenticates as the route's own account rather than whatever pool account happens to be active. A strict route with no eligible account fails the helper locally instead of silently falling back to the active outsider, matching the primary-traffic contract; callers without a pool config keep the plain stored-credential path.
+
+GitHub Copilot `modelContextTiers` is selected per upstream model. The Chat and Responses adapters set `contextTier` only when the canonical routed provider is `github-copilot`
 and a tier is configured. Otherwise passthrough retains caller-supplied values. The server carries provider identity
 through initial builds, retries, continuations, and sidecar builds.
 
@@ -33,6 +35,8 @@ Direct MCP names emitted in a verified custom code-mode catalog follow the
 Ordinary structured functions named `exec` do not opt into this compatibility path.
 
 RunTurn hosted search uses `src/web-search/run-turn-loop.ts`: synthetic calls remain private, progress reaches the bridge during collection, and a validated terminal precedes search execution. Complete search calls remain actionable at a truncated `done`; cancellation prevents subsequent queries and calls. OAuth preflight replay in `src/server/responses/run-turn-execution.ts` retains the synthetic tool while refreshing credential-scoped route state. In `src/server/responses/sidecar-execution.ts`, a search plan takes priority over image/video bridge execution for both transports; only fetch-capable adapters enter the fetch search loop.
+
+Both search loops keep `web_search` declared after the search budget is exhausted. Further calls receive a paired limit-reached result without another physical search; at most `maxSearches + 3` model iterations run before a terminal error. Ordinary caller tools and cancellation still end the loop. Empty-answer recovery alone removes all tools.
 
 Combo preflight allows the private search tool only while a search plan is active; client tool declaration checks and replay-unsafe heartbeat protection remain enforced.
 
@@ -78,7 +82,7 @@ the [bounded ingestion contract](transports/inventory.md#bounded-response-ingest
 
 Anthropic model-scoped quota labels in `src/providers/quota/vendor-probes-oauth.ts` publish
 only canonical Fable, Opus, or Sonnet labels after removing terminal controls; unknown upstream display names are omitted.
-Anthropic usage flights replace older joinable transports when recovery requires a fresh read. `src/providers/quota/anthropic-cooldown-recovery.ts` fences successful, empty, and rejected results by credential and cooldown generation before cache publication. Live account quota entries retain that currentness predicate; routing and account-list readers reject a superseded entry before its TTL expires. Persisted and header-only observations carry no live probe predicate of their own.
+Anthropic usage flights replace older joinable transports when recovery requires a fresh read. `src/providers/quota/anthropic-cooldown-recovery.ts` fences successful, empty, and rejected results by credential and cooldown generation before cache publication. Live account quota entries retain that currentness predicate; routing and account-list readers reject a superseded entry before its TTL expires. Header-only family observations carry a private credential-generation fence and their own thirty-minute clock. Active non-enumerating probes retain absent families; authoritative limits enumeration retires them. Persisted observations carry no live probe predicate of their own.
 Per-account quota flights also retain their starting cooldown generation through token resolution. A stale token failure returns unavailable to its caller without replacing the cache row or its timestamp; a joined flight rechecks ownership before returning.
 
 MiniMax and MiniMax CN Coding Plan quota in `src/providers/quota/vendor-probes-key.ts` uses the
@@ -172,6 +176,7 @@ rewrite rules and the routed-id settlement.
 | `src/providers/resolved-model-policy.ts`, `src/providers/resolved-model-policy-merge.ts` | Static provider/model policy resolution for the final upstream wire model, plus its pure clone/merge/URL/family helpers. The resolver detaches and freezes registry defaults, operator overrides, exact explicit input-modality declarations, provider-scoped hard wire pins (including Command Code's `claude-` prefix), aliases, and explicit false/empty values with field-level provenance. Provider derivation, routing, catalog hints, gather admission, and adapter selection consume its detached frozen result. Callers supply transport match, the exact capability row, and a credential-free effective auth decision; credential bytes, usability evidence, account/quota/health state, and observed limits remain outside the result. |
 
 | `src/oauth/` | OAuth providers, token storage, refresh, and auth-token resolution. Meta Muse device authorization, polling, and key-mint JSON responses share the 64 KiB bounded-body ceiling and the request's deadline; oversized declared or streamed bodies are rejected before JSON parsing. The login callback listener binds a per-provider FIXED loopback port, so consecutive logins reuse the same number; every response it sends ends its connection (`Connection: close`, including non-callback paths such as a stray `/favicon.ico` 404). Stopping the listener does not close an established socket, so without that a pooled client would deliver the next login's callback to the retired flow, which rejects the unknown state as a CSRF mismatch while the live flow waits. Command Code manual callback JSON remains opaque to the shared `code#state` parser and is state-validated by its provider parser. A raw Command Code paste with an explicit `#state` suffix must match the flow state on the direct prompt as well. Kiro add-account identity prefers same-session `whoami` over a leftover SQLite state profile, and never persists the Builder ID service profile ARN as `accountId`. |
+| `src/combos/failover.ts` | Recognizes the exact bounded ChatGPT plan/model HTTP400 refusal in a bare message or a single `detail`/`error.message` envelope. Competing envelopes stop before code-based hops; finite evidence survives display truncation and SSE error reconstruction without retaining raw bodies. This permits another declared target before output commitment, never credential revocation or provider-wide quota evidence. |
 | `src/combos/request.ts` | Clones each selected combo target request and applies the existing target capability ladder: adaptive unknown targets and explicit empty ladders receive no unsupported reasoning/thinking controls, while known ladders retain per-target resolution. |
 | `src/adapters/openai-responses.ts`, `src/adapters/openai-responses/` | Native OpenAI/ChatGPT Responses passthrough. The canonical ChatGPT adapter forces its upstream-only `stream: true` requirement without changing caller `store`; downstream JSON negotiation remains owned by the [Responses HTTP/SSE contract](transports/responses.md#responses-httpsse). |
 | `src/responses/muse-tool-name-alias.ts` | Host-gated Meta Muse 64-char tool-name alias/restore used by the Responses passthrough. |
@@ -183,12 +188,15 @@ rewrite rules and the routed-id settlement.
 | `src/adapters/declaration-carrier.ts`, `src/adapters/input-media-guard.ts` | Default-deny allowlists for constraints the normalized request carries but a wire may not be able to express: `tools[*].allowed_callers`, which fences a tool off from callers, and inline document bytes. Both are refused with a 400 at the single guard every registered adapter passes through, rather than left to each adapter, because an adapter that never learned about the carrier rebuilds without it and answers normally. `allowed_callers` reaches the `anthropic` wire; document bytes reach `anthropic`, `openai-chat` and `google`; the `openai-responses` wire is exempt from the whole guard because it forwards the original body. Adding an `AdapterWire` member makes the omission visible in these lists instead of at a customer's upstream. The unrestricted `["direct"]` caller default is not a restriction. |
 | `src/adapters/azure.ts` | Azure OpenAI bridge. |
 | `src/adapters/cursor.ts`, `src/adapters/cursor/` | Cursor protobuf transport: discovery, request builder, event decoding, MCP, thread continuity, native-exec policy. |
-| `src/adapters/devin.ts`, `src/adapters/devin/cloud-direct/` | Devin runTurn transport over Cognition Connect-RPC. Assistant reasoning replays as ChatMessagePrompt #11 thinking, #12 signature and #18 signature type (`src/adapters/devin/reasoning-signature.ts`): the #10/#21 pair arrives after the visible answer and becomes its own signature-only reasoning item, so a single unsigned thinking block plus exactly one signature-only block is replayed as one signed prompt, and a signature-only turn (GPT, Gemini) is replayed rather than dropped. An Anthropic signature is replayed, but because the streamed thinking is a summary the signature may not cover, a turn Cognition refuses with `invalid_argument` before any visible output (reasoning alone does not count) is retried once with Anthropic signatures withheld and the thinking text kept. `GetChatMessage` uses the Responses provider executor and shared physical-send budget; catalog, JWT, and `src/web-search/devin-executor.ts` native search support RPCs remain outside inference-send accounting. Provider-stated pre-output 429 reset delays are surfaced immediately by default, releasing shared active-turn capacity. A positive `OPENCODEX_DEVIN_STATED_RESET_WAIT_MS` explicitly enables bounded waiting and up to two replays on standalone turns, which hold that capacity until completion or cancellation. Combo children bypass that wait and surface a pre-output 429 so the next target can run. During an opted-in standalone wait, safe heartbeats commit the response preflight and keep the stream's stall watchdog fed. Invalid values fail closed to the immediate-refusal behavior. A recorded tenant host is used only for the stored account whose credential owns the transmitted key, searched in the configured provider id and then its deprecated alias; a configured, forwarded, or unmatched key uses the configured base URL or the US default. Native search previews the current route by effective adapter without mutating combo selection state, pins one admitted active-account snapshot for the request, and calls `GetWebSearchResults`, so it starts no CLI or second model. The wire model UID comes from the catalog's family metadata (`ClientModelConfig` #23/#30/#31): a family id with no effort anchors on the family's default member and selects the nearest enabled rung, rounding up first; an effort moves only the effort axis, to the lowest rung at or above it (else the highest below) while Fast Mode, 1M Context and the other axes stay at the anchor's values unless the caller asked for `fast` or a `1m` value; not lowering a requested effort outranks keeping those axes (an unranked member counts as lower), a disabled row the caller named is kept when the request still selects it so the preflight names that refusal, and resolution never leaves the family. Rows without family metadata fall back to suffix resolution, whose variant scan matches the collapsed base rather than a string prefix. With no caller or configured output cap, the selected row's catalog `maxOutputTokens` fills CompletionConfiguration #2; #3 is `max_newlines` and is sent at a fixed value, never a context window. The leading system text is sent as `GetChatMessage` #2, a failed tool result sets ChatMessagePrompt #9 and keeps an in-band `ERROR:` marker, and Gemini uids have JSON-Schema type arrays split into per-type `anyOf` branches in tool parameters while preserving outer enum/const, boolean constraints (including `not`, `oneOf`, and `allOf`) on null, and existing null-branch restrictions. A pre-output `invalid_argument` on a history whose word-piece estimate, using the sanitized and truncated tool descriptions actually sent on the wire, reaches 95% of the selected UID's catalog input window, capped by configured provider and model limits (512 KiB of text only when no window is known) is surfaced as `context_length_exceeded` so Codex compacts; a small request with the same code stays a plain 400. Known limit: a malformed schema on a history already at or above that 95% threshold is also reported as overflow because the upstream returns the same `invalid_argument`. The `COGNITION_BLOCKLIST_REWRITES` sanitizer rewrites exact phrases Cognition refuses with `permission_denied`; it runs only on instruction surfaces — tool descriptions and the #2 system prompt — while message text, replayed thinking (#11), and tool-call arguments stay byte-exact, because a rewrite there would silently change literal content such as patches or quoted file bytes; a trigger inside a data field surfaces as the upstream `permission_denied` instead (the Codex `<permissions instructions>` escalation boilerplate is the recorded #2 case). |
+| `src/adapters/zed.ts`, `src/providers/zed.ts`, `src/oauth/zed.ts` | Zed Hosted AI native-app RSA login, account-scoped short-lived LLM-token exchange, bounded live model discovery, and provider-envelope translation through the existing Anthropic, Google, Responses, and Chat builders. Buffered delivery retains events under the shared translator budget and cancels delegated streams on early exit. Experimental and unofficial; the Zed terms risk is intentionally surfaced in user docs and release review. |
+| `src/adapters/devin.ts`, `src/adapters/devin/cloud-direct/` | Devin runTurn transport over Cognition Connect-RPC. Assistant reasoning replays as ChatMessagePrompt #11 thinking, #12 signature and #18 signature type (`src/adapters/devin/reasoning-signature.ts`): the #10/#21 pair arrives after the visible answer and becomes its own signature-only reasoning item, so a single unsigned thinking block plus exactly one signature-only block is replayed as one signed prompt, and a signature-only turn (GPT, Gemini) is replayed rather than dropped. An Anthropic signature is replayed, but because the streamed thinking is a summary the signature may not cover, a turn Cognition refuses with `invalid_argument` before any visible output (reasoning alone does not count) is retried once with Anthropic signatures withheld and the thinking text kept. `GetChatMessage` uses the Responses provider executor and shared physical-send budget; catalog, JWT, and `src/web-search/devin-executor.ts` native search support RPCs remain outside inference-send accounting. Provider-stated pre-output 429 reset delays are surfaced immediately by default, releasing shared active-turn capacity. A positive `OPENCODEX_DEVIN_STATED_RESET_WAIT_MS` explicitly enables bounded waiting and up to two replays on standalone turns, which hold that capacity until completion or cancellation. Combo children bypass that wait and surface a pre-output 429 so the next target can run. During an opted-in standalone wait, safe heartbeats commit the response preflight and keep the stream's stall watchdog fed. Invalid values fail closed to the immediate-refusal behavior. A recorded tenant host is used only for the stored account whose credential owns the transmitted key, searched in the configured provider id and then its deprecated alias; a configured, forwarded, or unmatched key uses the configured base URL or the US default. Native search previews the current route by effective adapter without mutating combo selection state, pins one admitted active-account snapshot for the request, and calls `GetWebSearchResults`, so it starts no CLI or second model. The wire model UID comes from the catalog's family metadata (`ClientModelConfig` #23/#30/#31): a family id with no effort anchors on the family's default member and selects the nearest enabled rung, rounding up first; an effort moves only the effort axis, to the lowest rung at or above it (else the highest below) while Fast Mode, 1M Context and the other axes stay at the anchor's values unless the caller asked for `fast` or a `1m` value; not lowering a requested effort outranks keeping those axes (an unranked member counts as lower), a disabled row the caller named is kept when the request still selects it so the preflight names that refusal, and resolution never leaves the family. Rows without family metadata fall back to suffix resolution, whose variant scan matches the collapsed base rather than a string prefix. With no caller or configured output cap, the selected row's catalog `maxOutputTokens` fills CompletionConfiguration #2; #3 is `max_newlines` and is sent at a fixed value, never a context window. The leading system text is sent as `GetChatMessage` #2, a failed tool result sets ChatMessagePrompt #9 and keeps an in-band `ERROR:` marker, and Gemini uids have JSON-Schema type arrays expressed as type-only `anyOf` branches in tool parameters. Shared constraints remain on the surrounding node, so nested schemas have one wire representation while outer enum/const, boolean constraints (including `not`, `oneOf`, and `allOf`) on null, and existing null-branch restrictions retain their conjunctive meaning. A null-only type keeps its null constraint even when an outer enum/const excludes null, preserving an unsatisfiable schema without producing an empty anyOf. Schema resource identifiers, anchors, definition maps, and existing anyOf branches remain on their original node. The type constraint is appended to existing allOf entries without shifting their indices, so JSON Pointer targets and reference scopes remain unchanged. A pre-output `invalid_argument` on a history whose word-piece estimate, using the sanitized and truncated tool descriptions actually sent on the wire, reaches 95% of the selected UID's catalog input window, capped by configured provider and model limits (512 KiB of text only when no window is known) is surfaced as `context_length_exceeded` so Codex compacts; a small request with the same code stays a plain 400. Known limit: a malformed schema on a history already at or above that 95% threshold is also reported as overflow because the upstream returns the same `invalid_argument`. The `COGNITION_BLOCKLIST_REWRITES` sanitizer rewrites exact phrases Cognition refuses with `permission_denied`; it runs only on instruction surfaces — tool descriptions and the #2 system prompt — while message text, replayed thinking (#11), and tool-call arguments stay byte-exact, because a rewrite there would silently change literal content such as patches or quoted file bytes; a trigger inside a data field surfaces as the upstream `permission_denied` instead (the Codex `<permissions instructions>` escalation boilerplate is the recorded #2 case). |
 | `src/adapters/kiro.ts` and `src/adapters/kiro/` | Kiro event/tool/thinking/truncation/retry handling, including an egress-aware completion fallback, fixed public HTTP 5xx text, and closed-set status/code diagnostics. The original path is a facade over leaves for wire identity, reasoning, conversation state, token estimation, payload assembly, streaming, and the adapter. |
 | `src/adapters/mimo-free.ts` | Mimo Free transport (client identity + JWT). Concurrent requests share one JWT bootstrap bound only to its timeout; each request stops waiting on its own abort without cancelling the others. |
 | `src/adapters/command-code.ts`, `src/adapters/command-code-tool-text.ts`, `src/adapters/command-code-restored-schema.ts` | Command Code OAuth NDJSON translation. For every `xiaomi/mimo-` model, text, native calls, reasoning, and terminal decisions share one byte-bounded queue with linear queue visits. Markup is deduplicated against matching native calls; text-only restoration requires one contiguous bare text block, a clean finish, a declared tool, and arguments validated against supported schema constraints. A parameter-free (freeform) block may omit `</function>` but must end with `</tool_call>`; parameter blocks keep the canonical close. Markup appended after prose, including a marker in a later delta of the same text block, is held as a tail that can never mint a call: possible trailing marker prefixes stay in the same byte-accounted probe across deltas and release as text on a mismatch, boundary or end; a same-content native call strips a completed envelope as an echo, and anything else releases as presentation text so quoted examples stay inert. A tail waits only while a native input it could echo is open, counting the first later input of its own tool, so it is released as soon as those close without a match. Native, reasoning, and other intervening events interrupt a still-probing block but leave a held block held in arrival order, and the queued byte bound still flushes an unresolved envelope as text. An envelope the strict parser rejects but that opens with `<tool_call>`, closes with `</tool_call>`, and names a declared function is dropped when a native call for that same function arrives and on a clean finish; markup that parses but fits no supported schema is still released as text. Regex patterns, other unsupported constraints, and abnormal finishes fail closed. `tests/providers/command-code-tool-text-prose-split.test.ts` covers the prose boundary, the interleaved-event hold, and both drop paths. |
 | `src/adapters/image.ts`, `src/adapters/anthropic-image-guard.ts`, `src/adapters/anthropic-image-normalize.ts`, `src/adapters/anthropic-image-codec.ts` | Image conversion for adapter ingress and Anthropic-specific normalization/limits. An image's ladder position is pinned to its own identity (content hash + media type), so appending a newer image cannot re-encode older ones and bust Anthropic's prompt prefix cache (#4532). |
 | `src/adapters/run-turn-queue.ts`, `src/adapters/tool-catalog-nudge.ts`, `src/adapters/identity.ts`, `src/adapters/upstream-http-error.ts` | Shared adapter execution support: turn queueing, tool-catalog nudging, client identity, upstream error normalization. |
+
+`src/adapters/devin/trajectory.ts` owns up to 256 process-local conversation trajectories, keyed by a digest of resolved credential identity, tenant host and named conversation. Own-thread identity takes precedence over session aliases. When a nonempty parent header accompanies an own-thread identity, the tagged parent/own pair identifies the conversation; standalone identities have a distinct tag, so a JSON-like caller string cannot alias a child tuple. Session-only keys retain their existing behavior, and a parent-only request does not borrow its parent's trajectory. Sequential turns reuse an inactive entry across request-scoped adapters; overlapping turns and a store full of active entries receive fresh unretained IDs. Only inactive entries are evicted, and a claim's idempotent release runs in the adapter's `finally` on success, error and cancellation. The optional trajectory travels through `src/adapters/devin/cloud-direct/chat.ts` to protobuf field #15.1; unnamed calls retain per-request allocation. A named claim remains held through the turn's existing reset/signature retries. This is identifier continuity, not proof of upstream cache hits.
 
 Devin pairs a late signature only with immediately preceding unsigned thinking in one assistant message; a call between them breaks the pair. While a signed attempt is held for an optional unsigned retry, a timer emits plain heartbeats even when the upstream stalls. The held queue is capped at 1,024 events or approximately 1 MiB of UTF-16 reasoning, signature, and signature-type payload; signature types are individually capped at 4 KiB before UTF-8 decoding, and crossing either queue cap releases the events and disables that retry. Held usage frames merge per cumulative field, and the refused attempt's usage is added to the retry. A signed `invalid_argument` refusal is offered the unsigned retry before the history-overflow classifier sees any final refusal. If the send budget withholds that retry, the original refusal reaches the classifier and the recovery is recorded as withheld.
 
@@ -265,9 +273,9 @@ and `skills`, and leaves existing `config` metadata unchanged without invoking
 `src/adapters/command-code-project-context.ts`. The loader reads only the proxy process
 working directory's `AGENTS.md`, `.commandcode/taste/taste.md`, and immediate child
 `SKILL.md` files under `.commandcode/skills`, `.agents/skills`, and `.pi/skills`.
-Asynchronous path checks share one deadline and use relative-path containment even at
-filesystem roots. On macOS/Linux a nonblocking, no-follow open is followed by file-inode
-comparison and fresh canonical containment checks before and after reading; an intermediate
+Asynchronous path checks share one deadline and require an exact, case-preserving canonical
+path prefix, including at filesystem roots. On macOS/Linux a nonblocking, no-follow open is
+followed by file-inode comparison and fresh canonical containment checks before and after reading; an intermediate
 directory replaced by an outside symlink cannot publish its file contents. Windows applies
 the path and identity checks as best effort. Every visited directory entry consumes the
 scan budget before filtering; at most 16 skills are selected. Individual files, aggregate skill reads, serialized XML, and the full
@@ -280,6 +288,16 @@ soft on further work. Timed-out or admission-degraded loads are not cached, so a
 healthy request can retry; stable missing files still cache as empty. Symlinked skill
 directories pass through canonical confinement: inside-cwd targets load, outside targets
 do not. The 30-second, 128-entry cache rechecks capacity at insertion time.
+
+## OpenGateway chat provider
+
+The `opengateway` key preset uses the OpenAI Chat adapter at
+`https://apis.opengateway.ai/v1`. Sionic AI operates the gateway. Registry-owned live
+discovery refreshes the public `/v1/models` catalog and retains active Chat Completions rows plus Responses-only rows that the registry pins to
+Responses (`openai/o3-pro`); public discovery does not establish key validity. Sionic-served
+`deepseek/deepseek-v4.1-flash-ultrafast` and `z-ai/glm-5.3-flash-ultrafast` are listed first. A custom model that replaces one of the discovered rows keeps
+that row's slot (`src/codex/catalog/routed-gather.ts`).
+Keys are created at `https://opengateway.ai/api-keys`.
 
 ## TokenLab chat provider
 
@@ -299,72 +317,12 @@ and the upstream URL through `handleResponses`.
 
 ## TypeSafe JEV decision provider
 
-`src/providers/registry/entries-extended.ts` owns the canonical `jev` key preset at
-`https://api.typesafe.ai/v1/systemone` with adapter `jev-decision`. It is a credential owner, not an
-inference route: the registry marks it `credentialOnly`, its adapter is deliberately absent from the
-routable adapter registry, live discovery is disabled, no default/static model is published, and
-key login returns unknown without probing a nonexistent model catalog. The normal `ocx login jev`
-flow and provider-workspace API-key panel both persist the same credential-only row. Combo validation
-rejects the decision provider as a target. `src/server/management/provider-routes.ts`
-special-cases its connection test through the same bounded decision client before the generic
-static-catalog branch. The test sends no user prompt and returns only sanitized health status.
+The JEV Combo decision contract (TypeSafe, self-hosted System One rows, and opencodex-model
+decision backends) lives in [JEV Decision Routing](providers/jev-decision.md).
 
-The request path consumes a configured literal/reference key only when the row still matches the
-canonical registry transport, with `TYPESAFE_API_KEY` and the standard provider-derived
-`JEV_API_KEY` as explicit environment fallbacks. A same-named custom destination cannot receive
-either credential through the JEV client. All automated coverage mocks TypeSafe; live-key behavior
-remains an operator smoke boundary.
+## Preset notes
 
-`src/combos/jev.ts` extracts bounded user-task, previous-assistant, and latest-tool-output text plus
-the tool name and boolean signals; raw image data, tool arguments, encrypted reasoning, headers, and
-the JEV credential are excluded. It owns the joint target/effort choice map, strict response
-validation, fixed `jev-latest` destination, four-second deadline, no-redirect policy, bounded response,
-and caller-cancellation propagation. Missing credentials or safe state, transport failures, and invalid
-answers fail open to the first eligible target; no response can escape the configured choice map.
-Telemetry never retains extracted state or credentials.
-
-The optional `targets[].modelProfile` note is validated at the Combo management input
-boundary to a non-empty string of at most 512 characters; tab, line feed and carriage
-return are allowed for multi-line notes, every other C0 control character and DEL is
-refused, and the value is stored sparsely.
-`src/combos/jev.ts` sends a configured target note as `state.operator_notes` on a
-JEV decision, keyed by target; built-in `instructions.model_profiles` and the
-target/effort allowlist stay authoritative. The note reaches TypeSafe with each
-applicable decision, so operators must keep secrets and private paths out of it.
-An absent note leaves the prior decision payload shape intact.
-
-`src/server/responses/core-combo.ts` computes current eligibility, asks JEV once for the initial pick,
-applies the validated effort, and removes caller `service_tier` for that child. A retryable child
-failure re-enters the ordinary Combo fallback loop from the untouched request without another JEV
-call. Each target may carry an optional non-empty `reasoningEfforts` allowlist. Omission keeps the
-backward-compatible all-advertised behavior; a present list is intersected with current capabilities,
-and an empty intersection removes that target from the JEV choice map rather than broadening it.
-Direct models and every other Combo strategy bypass this path. The shared Combo editor owns the GUI
-checkboxes and `Create JEV Auto` template; no second model picker or JEV-only editor exists.
-
-JEV setup stays inside those existing shells. A configured `jev-decision` provider Overview exposes
-**Create JEV Auto**, which navigates to the registered `models/combos/jev-auto` action hash.
-`gui/src/pages/Combos.tsx` owns that one-shot add intent and normalizes the hash when the modal
-closes; `ComboWorkspace` and `combo-workspace-add-modal.tsx` reuse the ordinary Combo form and target
-editor with a pure template from `combo-workspace-data.ts`. The template includes only currently
-available Astra/Sol/Luna rows, remains fully editable, marks the first eligible row as fail-open,
-and displays known effort ladders. The JEV provider is hidden from the target picker because it owns
-only the decision credential. Existing model rows, default selection, and direct picker behavior are
-unchanged; an existing `jev-auto` id or alias disables or reports the quick action.
-An existing JEV Combo adds a lazy **Stats** detail tab. It polls only while visible, uses the
-management API's JEV projection, and keeps decision-service tokens separate from physical model
-tokens. Config remains the ordinary editable Combo form, including per-target effort allowlists.
-
-`src/usage/jev-stats.ts` owns the parallel content-free JEV projection. Its retained accumulator is
-keyed by Combo and stable preset boundary, shares concurrent reads, verifies append identity and LF
-digest, clones before folding a suffix, and starts a fresh accumulator after a rebuild-required
-scan. It counts physical sends from `attempts[].sendCount`, ignores zero-send rows for fallback
-detection, and folds identities beyond 255 concrete rows into one explicit overflow row while
-preserving global totals. Up to four JEV projections participate in the same app-owned memory budget
-and eviction path as ordinary usage aggregates. Read failure returns HTTP 500 rather than a partial
-projection.
-
-The Crusoe preset uses that fixed-key path at `https://api.inference.crusoecloud.com/v1`. Its
+The Crusoe preset uses the fixed-key preset path at `https://api.inference.crusoecloud.com/v1`. Its
 registry-owned policy admits only public rows whose `architecture.modality` is `text` or
 `multimodal`, caps the response at 256 KiB and 256 raw rows, and leaves same-named custom
 destinations untouched. Five catalog ids carry explicit text-and-image input metadata;
@@ -413,10 +371,9 @@ axis that outranks every source here, so it is where a deliberate text-only over
 (`ocx provider edit <provider> --model <id> --text-only` writes it) and the one declaration a
 restart cannot take back.
 
-Roster additions share the blind spot when the vendor's `/models` omits the new id (MiniMax-M3.1-Flash-Preview):
-`src/providers/stale-model-roster-migration.ts` replaces a saved roster only while it is byte-for-byte the previous
-seed, filling the added id's window and default effort only inside records the row already has, in the same startup
-pass; `CALLABLE_CONFIGURED_COMPATIBILITY_MODELS` (`src/codex/catalog/model-hints.ts`) keeps it in the live catalog.
+When `/models` omits MiniMax-M3.1-Flash-Preview, `src/providers/stale-model-roster-migration.ts` replaces only a saved roster identical to the old seed and fills existing window and default-effort records during startup; `CALLABLE_CONFIGURED_COMPATIBILITY_MODELS` (`src/codex/catalog/model-hints.ts`) retains it in the live catalog.
+
+Both MiniMax Coding Plan presets declare `text` and `image` for M3 and M3.1 in `src/providers/registry/model-seeds.ts`; registry enrichment fills missing saved declarations, so id-only live rows enable the Combo image switch when every target supports images. Explicit overrides still win; video is outside Codex's catalog input enum.
 
 The BigModel Coding Plan Responses preset uses the separately documented
 `https://open.bigmodel.cn/api/v1` transport and a static catalog. Its provider row
@@ -596,5 +553,24 @@ runtime, so no boundary accepts a value another rejects.
 public request model. [Memory phase routing](transports/responses-failover.md#memory-phase-routing)
 owns the selection rule.
 
-Preflight heartbeat retention keeps `replayUnsafe` sticky in the replayed tail, so a second
-preflight cannot forget earlier side effects after the original marker is evicted.
+Preflight heartbeat retention keeps `replayUnsafe` sticky in the replayed tail, so a second preflight cannot forget earlier side effects after the original marker is evicted.
+
+## Antigravity effort families
+
+Antigravity discovery in `src/providers/antigravity-models.ts` collapses complete low/medium/high wire families without a version allowlist. Partial families retain exact wire IDs. The adapter sends the selected suffix without a second thinking level; saved suffix requests keep their tier. Existing Claude 4.6 single-wire thinking levels and Gemini irregular aliases keep their contracts. Grouped context is the minimum known across every tier; image support requires agreement, with an explicit negative taking precedence. Mappings are scoped to config home, normalized destination (including path case), and accepted cache generation. `src/providers/antigravity-wire-snapshot.ts` atomically saves bounded exact suffix maps before synthetic catalog rows are published. Hash-named files contain no destination URLs or credentials. First-use restoration after restart supplies routing aliases only; current live discovery replaces the snapshot, and invalidation tombstones prevent stale restoration. A failed snapshot write leaves the previous coherent discovery result.
+
+Antigravity catalog rows carry the observed complete effort map from `src/providers/antigravity-models.ts` through the in-memory cache. `src/providers/antigravity-effort-families.ts` uses that evidence to group public rows and project suffix allowlists into the base selection, including both final catalog merge callers. Internal retained suffix rows remain available to combo resolution. Authoritative new-model reconciliation normalizes both the prior baseline and policy input before detecting arrivals: an existing suffix family is not a new model. All-disabled tiers transfer a base disable once; a known base keeps the operator's later choice. Genuinely new families still follow new-model policy. Saved defaults, combo targets, suffix disables and provider selections remain unchanged. A discovered ladder advertises only its wire-backed efforts unless explicitly overridden; unknown single-wire models gain no invented ladder.
+
+Known Claude Sonnet and Opus 5.5 base and low/medium/high IDs share a deterministic usage identity in `src/providers/antigravity-models.ts`, independently of live discovery. This accounting map does not migrate saved routing selections; Claude 4.6 and unknown suffix identities remain unchanged.
+
+
+## Combo model refusal evidence
+
+`src/combos/failover.ts` recognizes a bounded, exact HTTP 400 plan/model refusal, not credential or entitlement evidence.
+`src/server/responses/core-combo-failure.ts` captures its finite classification before display truncation;
+`src/server/responses/combo-stream-preflight.ts` preserves it before rebuilding terminal SSE errors.
+`src/server/responses/core-options.ts` carries the value to the combo decision. An inspected non-match
+remains authoritative. No raw body is retained in that field, serialized into client errors, or logged.
+Presence of both `detail` and `error` across the original root and its own non-array `response` record is ambiguous, regardless of values; null counts and deeper quoted objects do not. This is checked before selecting an error carrier.
+For complete bounded HTTP errors, the text wrapper selects root `detail`/`error` when present; otherwise it selects the own `response` record for the same exact `detail` or `error.message` match. It never searches another carrier after a nonmatch or descends further. Policy-fallback and direct callers share this wrapper; SSE message parsing disables nested HTTP selection. The same bounded HTTP parser retains allowlisted dedicated `code` fields from root and response before display truncation; diagnostic `type` is never promoted, including when code is absent or malformed. Policy/direct classification inspects full text only without authoritative carrier metadata; SSE never borrows hard codes from quoted message JSON.
+Committed output, cancellation, hard policy refusals and resend limits remain stronger than model fallback.

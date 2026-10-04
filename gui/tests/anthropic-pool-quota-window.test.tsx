@@ -52,6 +52,7 @@ type PoolPayload = {
   strategy: string;
   stickyLimit: number;
   quotaWindow: string;
+  nativeMessages?: boolean;
 };
 
 /**
@@ -208,7 +209,7 @@ describe("Anthropic account pool quota window", () => {
     expect(windowTrigger(drainedHost).disabled).toBe(false);
   });
 
-  test("threshold zero says proactive switching is off, not all quota routing", async () => {
+  test("threshold zero says healthy sessions stay put, not that quota routing stops", async () => {
     stubPool({
       enabled: true,
       autoSwitchThreshold: 0,
@@ -218,9 +219,9 @@ describe("Anthropic account pool quota window", () => {
     });
     const host = await mountPool();
 
-    expect(host.textContent).toContain("Proactive usage-based switching is off");
-    // The stage that still runs must be named, and the window must still be identified.
-    expect(host.textContent).toContain("new-session selection");
+    expect(host.textContent).toContain("Usage thresholds do not move an existing healthy session or a healthy active account");
+    // The stages that still run must be named, along with the window that still governs them.
+    expect(host.textContent).toContain("during refusal recovery, the account with the lowest usage (Weekly bar) is chosen");
     // "429 recovery" is deliberately NOT named as a benefit of the enabled state any more:
     // reactive failover stopped being something this toggle controls, so advertising it here
     // would send an operator to the EXPERIMENTAL pool for something they already have
@@ -282,6 +283,44 @@ describe("Anthropic account pool quota window", () => {
       strategy: "quota",
       stickyLimit: 1,
       quotaWindow: "weekly",
+      nativeMessages: true,
     });
+  });
+
+  test("all pool controls retain a saved native opt-out", async () => {
+    const puts = stubPool({ enabled: true, autoSwitchThreshold: 80, strategy: "quota", stickyLimit: 1, quotaWindow: "five-hour", nativeMessages: false });
+    const host = await mountPool();
+    const choose = async (id: string, value: string) => {
+      await act(async () => { host.querySelector<HTMLButtonElement>(id)!.click(); await flush(); });
+      const option = Array.from(testWindow.document.querySelectorAll<HTMLButtonElement>('[role="option"]')).find(option => option.textContent === value)!;
+      expect(option).toBeDefined();
+      await act(async () => { option.click(); await flush(); });
+    };
+    // Drive the threshold's native input and blur handlers, then every other save path.
+    const threshold = host.querySelector<HTMLInputElement>('input[type="number"]')!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(testWindow.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(threshold, "73");
+      threshold.dispatchEvent(new testWindow.Event("input", { bubbles: true }) as unknown as Event);
+      threshold.dispatchEvent(new testWindow.Event("change", { bubbles: true }) as unknown as Event);
+      await flush();
+    });
+    await act(async () => { threshold.dispatchEvent(new testWindow.FocusEvent("focusout", { bubbles: true }) as unknown as Event); await flush(); });
+    expect(puts.at(-1)).toMatchObject({ autoSwitchThreshold: 73, nativeMessages: false });
+    await choose("#anthropic-pool-quota-window", "Weekly bar");
+    await choose("#anthropic-pool-strategy", "Round-robin");
+    const increment = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find(button => button.getAttribute("aria-label") === "Increase sticky limit")!;
+    expect(increment).toBeDefined();
+    await act(async () => { increment.click(); await flush(); });
+    const toggle = host.querySelector<HTMLButtonElement>('button[aria-pressed]')!;
+    await act(async () => { toggle.click(); await flush(); });
+    expect(puts).toHaveLength(5);
+    expect(puts.map(body => body.nativeMessages)).toEqual([false, false, false, false, false]);
+    expect(puts[0]).toMatchObject({ autoSwitchThreshold: 73 });
+    expect(puts[1]).toMatchObject({ quotaWindow: "weekly" });
+    expect(puts[2]).toMatchObject({ strategy: "round-robin" });
+    expect(puts[3]).toMatchObject({ stickyLimit: 2 });
+    expect(puts[4]).toMatchObject({ enabled: false });
+    expect(host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked).toBe(false);
   });
 });

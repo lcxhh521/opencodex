@@ -1,3 +1,4 @@
+import { getMainAccountExternalUsageWarning, type MainAccountExternalUsageWarning } from "../main-account-external-usage";
 import { codexCreditsDtoField, hasCodexCreditsObservation, pruneCodexCredits } from "../credits";
 import type { CodexCredits } from "../credits";
 import { getMainChatgptAccountId } from "../auth-collision";
@@ -8,14 +9,15 @@ import type { StoredAccountQuota } from "../quota";
 import { ConfigMutationLockError, mutatePersistedConfig } from "../../config";
 import { reconcileMainCodexAccountRuntimeState } from "../account-lifecycle";
 import { isCodexAccountPaused, setCodexAccountPaused } from "../account-pause";
+import { codexAccountUsesCreditsAfterLimit } from "../account-credit-use";
 import { getCodexAccountPriority } from "../account-priority";
 import { getCodexAccountAutoSwitchThresholdOverride } from "../account-auto-switch";
 import { clearThreadAccountMapForAccount, isCodexAccountPlanExcluded, reconcileCodexActiveAfterExclusion } from "../routing";
 import { codexPlanValue, isThirtyDayOnlyCodexPlan } from "../plan";
 import { isAccountNeedsReauth, markAccountNeedsReauth } from "../account-runtime-state";
-import { getValidMainAccountToken, MainAccountTokenRefreshError, MAIN_CODEX_ACCOUNT_ID } from "../main-account";
+import { getValidMainAccountToken, isMainAccountRefreshGrantRejected, MAIN_CODEX_ACCOUNT_ID } from "../main-account";
 import { captureConfigGeneration } from "../../lib/state-store-sweeper";
-import { captureMainAccountIdentityGeneration, getMainAccountCredentialPresence, getMainAccountInfoCache, isMainAccountIdentityGenerationLive } from "../main-account-cache";
+import { captureMainAccountIdentityGeneration, getMainAccountCredentialPresence, getMainAccountInfoCache, getObservedMainQuotaIdentityKey, isMainAccountIdentityGenerationLive } from "../main-account-cache";
 import type { CodexQuotaRefreshOutcome } from "../quota-refresh-outcome";
 import { getMainAccountHardLockStatus } from "../main-account-hard-lock";
 import type { MainAccountHardLockStatus } from "../main-account-hard-lock";
@@ -139,6 +141,7 @@ export function poolAccountDto(
     paused,
     priority,
     autoSwitchThresholdOverride: getCodexAccountAutoSwitchThresholdOverride(config, account.id),
+    creditsAfterLimit: codexAccountUsesCreditsAfterLimit(config, account.id),
     quota: quota ? { ...quota } : null,
     ...codexCreditsDtoField(config, account.id, poolQuotaHistoryIdentity(account.id) ?? null),
     needsReauth: needsReauth || health.status === "reauth_required",
@@ -165,6 +168,8 @@ export interface CodexAuthAccountDto {
   priority: number;
   /** Null inherits the global usage-switch threshold; 0 disables it for this account. */
   autoSwitchThresholdOverride: number | null;
+  /** False keeps the account out of selection while one of its usage windows is full. */
+  creditsAfterLimit?: boolean;
   quota: (StoredAccountQuota | (Omit<StoredAccountQuota, "updatedAt"> & { updatedAt: number })) | null;
   credits?: CodexCredits;
   needsReauth?: boolean;
@@ -183,7 +188,7 @@ export interface CodexAuthAccountDto {
   healthAction?: string;
   quotaProbeSkipped?: true;
   quotaRefresh?: CodexQuotaRefreshOutcome;
-  mainAccountHardLock?: MainAccountHardLockStatus;
+  mainAccountHardLock?: MainAccountHardLockStatus & { externalUsage?: MainAccountExternalUsageWarning };
 }
 
 export interface FreshPoolPlanUpdate {
@@ -337,58 +342,76 @@ export async function listCodexAuthAccountsSnapshot(
       maskEmails,
     )];
   });
-  const fetchedMainGeneration = mainResult.identityGeneration ?? captureMainAccountIdentityGeneration();
-  const mainSnapshotLive = isMainAccountIdentityGenerationLive(fetchedMainGeneration);
-  // An ordinary same-account return can be parsed after its credential was replaced.
-  // The card and hard-lock status must describe the same published quota snapshot.
-  const mainInfo = mainSnapshotLive
-    ? mainResult.infoUnpublished ? getMainAccountInfoCache() ?? EMPTY_MAIN_ACCOUNT_INFO : mainResult.info
-    : EMPTY_MAIN_ACCOUNT_INFO;
-  const hasMainCredential = mainSnapshotLive && mainResult.credentialChecked
-    ? mainResult.hasCredential
-    : getMainAccountCredentialPresence() ?? false;
-  const mainMissingCredential = mainSnapshotLive && mainResult.credentialChecked && !hasMainCredential;
-  const mainNeedsReauth = mainMissingCredential || isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
-  const mainHealth = projectCodexAccountHealth({
-    accountId: MAIN_CODEX_ACCOUNT_ID,
-    needsReauth: mainNeedsReauth,
-  });
-  // The main row carries the same attribution as a pool row. Reaching this point without
-  // `mainMissingCredential` means the runtime reauth flag is what set `mainNeedsReauth`, so the
-  // cause is a refresh that did not complete.
-  const mainReauthReason: CodexAccountReauthReason | undefined = mainMissingCredential
-    ? "missing_credential"
-    : mainNeedsReauth
-      ? "refresh_failed"
-      : mainHealth.status === "reauth_required" ? mainHealth.reason : undefined;
-  const main: CodexAuthAccountDto = {
-    id: MAIN_CODEX_ACCOUNT_ID,
-    email: projectEmail(mainInfo.email, maskEmails) ?? "Codex App login",
-    plan: mainInfo.plan,
-    ...(mainSnapshotLive && mainResult.quotaRefresh && mainResult.quotaRefreshGeneration !== undefined
+  const projectSnapshot = (mainRefreshRefused = false): CodexAuthAccountsSnapshot => {
+    const fetchedMainGeneration = mainResult.identityGeneration ?? captureMainAccountIdentityGeneration();
+    const mainSnapshotLive = isMainAccountIdentityGenerationLive(fetchedMainGeneration);
+    // An ordinary same-account return can be parsed after its credential was replaced.
+    // The card and hard-lock status must describe the same published quota snapshot.
+    const mainInfo = mainSnapshotLive
+      ? mainResult.infoUnpublished ? getMainAccountInfoCache() ?? EMPTY_MAIN_ACCOUNT_INFO : mainResult.info
+      : EMPTY_MAIN_ACCOUNT_INFO;
+    const hasMainCredential = mainSnapshotLive && mainResult.credentialChecked
+      ? mainResult.hasCredential
+      : getMainAccountCredentialPresence() ?? false;
+    const mainMissingCredential = mainSnapshotLive && mainResult.credentialChecked && !hasMainCredential;
+    const liveQuotaRefresh = mainSnapshotLive && mainResult.quotaRefreshGeneration !== undefined
       && isMainAccountIdentityGenerationLive(mainResult.quotaRefreshGeneration)
-      ? { quotaRefresh: mainResult.quotaRefresh } : {}),
-    logLabel: "main",
-    isMain: true,
-    paused: isCodexAccountPaused(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
-    mainAccountHardLock: getMainAccountHardLockStatus(runtimeConfig),
-    priority: getCodexAccountPriority(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
-    autoSwitchThresholdOverride: getCodexAccountAutoSwitchThresholdOverride(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
-    hasCredential: hasMainCredential,
-    needsReauth: mainNeedsReauth,
-    ...(mainReauthReason !== undefined ? { reauthReason: mainReauthReason } : {}),
-    quota: mainInfo.quota
-      ? quotaForPlan(mainQuotaWithCarriedResetCredits(mainInfo.quota), mainInfo.plan)
-      : null,
-    ...codexCreditsDtoField(runtimeConfig, MAIN_CODEX_ACCOUNT_ID, getMainChatgptAccountId()),
-    ...oauthAccountHealthFields("codex", MAIN_CODEX_ACCOUNT_ID, mainHealth),
+      ? mainResult.quotaRefresh : undefined;
+    const mainNeedsReauth = mainMissingCredential || mainRefreshRefused || isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
+    const mainHealth = projectCodexAccountHealth({
+      accountId: MAIN_CODEX_ACCOUNT_ID,
+      needsReauth: mainNeedsReauth,
+    });
+    // The main row carries the same attribution as a pool row. Reaching this point without
+    // Only a current terminal usage probe can attribute the reauth cause. A transient status
+    // never replaces a refresh failure, including a separately recorded refused grant.
+    const mainReauthReason: CodexAccountReauthReason | undefined = mainMissingCredential
+      ? "missing_credential"
+      : mainNeedsReauth
+        ? mainResult.terminalAuthFailure === true && liveQuotaRefresh?.status === "http_error"
+          ? "unauthorized" : "refresh_failed"
+        : mainHealth.status === "reauth_required" ? mainHealth.reason : undefined;
+    const main: CodexAuthAccountDto = {
+      id: MAIN_CODEX_ACCOUNT_ID,
+      email: projectEmail(mainInfo.email, maskEmails) ?? "Codex App login",
+      plan: mainInfo.plan,
+      ...(liveQuotaRefresh ? { quotaRefresh: liveQuotaRefresh } : {}),
+      logLabel: "main",
+      isMain: true,
+      paused: isCodexAccountPaused(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
+      mainAccountHardLock: { ...getMainAccountHardLockStatus(runtimeConfig),
+        externalUsage: getMainAccountExternalUsageWarning(getObservedMainQuotaIdentityKey()) },
+      priority: getCodexAccountPriority(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
+      autoSwitchThresholdOverride: getCodexAccountAutoSwitchThresholdOverride(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
+      creditsAfterLimit: codexAccountUsesCreditsAfterLimit(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
+      hasCredential: hasMainCredential,
+      needsReauth: mainNeedsReauth,
+      ...(mainReauthReason !== undefined ? { reauthReason: mainReauthReason } : {}),
+      quota: mainInfo.quota
+        ? quotaForPlan(mainQuotaWithCarriedResetCredits(mainInfo.quota), mainInfo.plan)
+        : null,
+      ...codexCreditsDtoField(runtimeConfig, MAIN_CODEX_ACCOUNT_ID, getMainChatgptAccountId()),
+      ...oauthAccountHealthFields("codex", MAIN_CODEX_ACCOUNT_ID, mainHealth),
+    };
+    return {
+      accounts: [main, ...withQuota],
+      mainIdentityGeneration: mainSnapshotLive
+        ? fetchedMainGeneration
+        : captureMainAccountIdentityGeneration(),
+    };
   };
-  return {
-    accounts: [main, ...withQuota],
-    mainIdentityGeneration: mainSnapshotLive
-      ? fetchedMainGeneration
-      : captureMainAccountIdentityGeneration(),
-  };
+  // Project the refusal and DTO in the same owned synchronous observation. A same-account grant
+  // replacement during earlier pool probes must not inherit the previous grant's refusal.
+  const projectionLease = tryAcquireNativeMainProfileClaim();
+  if (!projectionLease) return projectSnapshot();
+  try {
+    return await withNativeMainCredentialClaim(async () => projectSnapshot(isMainAccountRefreshGrantRejected()));
+  } catch (error) {
+    if (isNativeMainClaimUnavailable(error)) return projectSnapshot();
+    throw error;
+  } finally {
+    projectionLease.release();
+  }
 }
 
 /** One opted-in account's metadata; reuse the bounded WHAM 401 recovery and generation fence. */
@@ -399,16 +422,10 @@ export async function refreshCodexQuotaForActivation(config: OcxConfig, accountI
     try {
       reconcileMainCodexAccountRuntimeState();
       if (isAccountNeedsReauth(accountId)) return;
-      const identityGeneration = captureMainAccountIdentityGeneration();
-      const writerGeneration = captureConfigGeneration();
       try {
-        // Refresh may need an exclusive claim; prepare before WHAM takes its shared claim.
+        // Refresh owns credential-scoped refusal evidence; do not recreate a global quarantine.
         if (!await getValidMainAccountToken({ preserveReauth: true })) return;
-      } catch (error) {
-        if (error instanceof MainAccountTokenRefreshError && error.reason === "reauth"
-          && isMainAccountIdentityGenerationLive(identityGeneration)) {
-          markAccountNeedsReauth(accountId, writerGeneration);
-        }
+      } catch {
         return;
       }
       if (isAccountNeedsReauth(accountId)) return;
@@ -469,7 +486,7 @@ export async function pauseExhaustedCodexAccounts(
         }
         return {
           shouldPause: !isCodexAccountPaused(config, MAIN_CODEX_ACCOUNT_ID)
-            && isCodexQuotaExhausted(mainResult.freshQuota, mainResult.info.plan),
+            && isCodexQuotaExhausted(mainResult.freshQuota, mainResult.info.plan, codexAccountUsesCreditsAfterLimit(config, MAIN_CODEX_ACCOUNT_ID)),
           checkedAccountCount: 1,
           failedAccountCount: 0,
         };
@@ -504,7 +521,7 @@ export async function pauseExhaustedCodexAccounts(
           continue;
         }
         checkedAccountCount += 1;
-        if (!isCodexAccountPaused(config, account.id) && isCodexQuotaExhausted(quotaResult.freshQuota, plan)) {
+        if (!isCodexAccountPaused(config, account.id) && isCodexQuotaExhausted(quotaResult.freshQuota, plan, codexAccountUsesCreditsAfterLimit(config, account.id))) {
           exhaustedIds.push(account.id);
         }
       }

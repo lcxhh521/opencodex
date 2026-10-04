@@ -58,6 +58,8 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   "api.responsesEndpoint",
   // Provider proper nouns (Taiwan keeps the English brand; "火山方舟" is Mainland usage)
   "provider.name.volcengine",
+  // JEV decision method named after the TypeSafe product.
+  "cws.jev.backend.typesafe",
   // A literal filename, not prose: AGENTS.md is the file Codex reads from the
   // working directory, and Taiwan renders it the same way every other locale does.
   "codexSet.layer.agents-md",
@@ -329,6 +331,11 @@ const DSH_VISIBLE_COPY: Record<(typeof LOCALE_CODES)[number], readonly [string, 
     "DeepSeek Harness (DSH)",
     "DSH",
     "OpenCodex chỉ quản lý llm-pi-ai.providers.opencodex trong $DSH_HOME/settings.yaml. DSH sẽ hot reload provider này; model mặc định của bạn và deepseek-official không thay đổi. Hiện chỉ hỗ trợ loopback; không ghi credential thật nào.",
+  ],
+  pt: [
+    "DeepSeek Harness (DSH)",
+    "DSH",
+    "O OpenCodex gerencia apenas llm-pi-ai.providers.opencodex em $DSH_HOME/settings.yaml. O DSH recarrega esse provedor a quente; seu modelo padrão e o deepseek-official permanecem inalterados. Atualmente somente loopback; nenhuma credencial real é gravada.",
   ],
 };
 

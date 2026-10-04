@@ -53,6 +53,7 @@ import { clientWireLogOf, clientWireOf } from "./inference/client-wire";
 import { directEncodersApply } from "./inference/client-encoder-delivery";
 import { responseWithDeferredRequestLog } from "./relay";
 import { handleResponses } from "./responses";
+import { previewXaiOauthWireModel } from "./responses/core-normalize";
 import { providerConsumesCallerAuthorization } from "../providers/caller-authorization";
 import { captureExplicitOpenAiCallerAuth } from "../providers/openai-sidecar";
 import { captureCallerDirectAuth } from "../providers/caller-authorization";
@@ -85,6 +86,7 @@ import { parseRequestEffortRowId } from "./effort-row";
 import { parseSyntheticRowId } from "./fast-row";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
 import { CODEX_RESERVE_HELPER_UNSUPPORTED_MESSAGE, isCodexReserveHelperUnsupported } from "../codex/loopback-target";
+import { applyDroidReasoningDefault, droidReasoningDefault, DROID_DEFAULT_EFFORT_HEADER } from "./droid-reasoning-default";
 
 type Rec = Record<string, unknown>;
 
@@ -156,6 +158,9 @@ async function handleChatCompletionsWithBudget(
 
   const requestedModel = chatBody.model as string;
   const { fastRow, effortRow } = parseSyntheticRowId(requestedModel, config);
+  const droidDefaultEffort = effortRow
+    ? undefined
+    : droidReasoningDefault(req.headers.get(DROID_DEFAULT_EFFORT_HEADER), chatBody);
   if (effortRow) chatBody.model = effortRow.baseId;
   if (fastRow) {
     chatBody.model = fastRow.baseId;
@@ -177,22 +182,29 @@ async function handleChatCompletionsWithBudget(
   let nativeDecline: ProtocolReasonCode | undefined = "unknown-model";
   try {
     const route = routeModel(config, chatBody.model as string, evidenceFromBody(chatBody));
-    // The native Chat lane sends without re-entering the Responses path, so it
-    // has to apply the key's scope itself. Translated traffic is checked where
-    // every rewrite converges instead.
-    assertRouteAllowedByScope(resolveAdmissionModelScope(config, logIds?.admission), requestedModel, route);
     // Preserve the routed destination for Go recognition, then settle the wire before
     // deriving protocol-scoped affinity. Recognition must not inspect the flipped adapter.
     const routedProvider = route.provider;
     route.staticPolicy = captureRouteStaticPolicy(
       route.providerName, route.modelId, routedProvider, route.staticPolicy.effectiveAlias, "chat",
     );
+    // Native Chat must check its own destination; translated xAI OAuth turns
+    // preview the billed Fast lane before their final Responses scope check.
+    assertRouteAllowedByScope(resolveAdmissionModelScope(config, logIds?.admission), requestedModel, {
+      providerName: route.providerName,
+      modelId: previewXaiOauthWireModel({ options: {
+        serviceTier: typeof chatBody.service_tier === "string" ? chatBody.service_tier : undefined,
+      } }, route, config, "chat"),
+    });
     const wireProvider = resolveWireProtocolOverride(route.providerName, route.modelId, routedProvider, "chat", route.staticPolicy);
     route.provider = resolveOpenCodeGoTransport(
       wireProvider,
       getOrAllocateRequestSessionLane(req),
       routedProvider,
     );
+    if (!route.combo && route.routeKind !== "policy") {
+      applyDroidReasoningDefault(chatBody, droidDefaultEffort, { provider: route.provider, modelId: route.modelId });
+    }
     logCtx.model = route.modelId;
     logCtx.providerAdapter = route.provider.adapter;
     logCtx.requestedModel = requestedModel;
@@ -437,6 +449,9 @@ async function handleChatCompletionsWithBudget(
     abortSignal: req.signal,
     // Body is Responses-shaped by now, but the client spoke Chat Completions.
     inboundWire: "chat",
+    ...((settledRoute?.combo || settledRoute?.routeKind === "policy") && droidDefaultEffort
+      ? { droidDefaultEffort }
+      : {}),
     // PF-07: the combo sends eligible candidates natively from this envelope.
     ...(envelope && nativeChatCombos ? {
       protocolSource: createNativeChatComboSource({

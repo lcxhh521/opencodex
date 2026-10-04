@@ -159,14 +159,16 @@ function setPath(root: Record<string, unknown>, path: string, value: unknown, re
   else current[leaf] = value;
 }
 
+/** Interpret config-set input as JSON when valid, otherwise preserve it as a string. */
 function parseValue(raw: string): unknown {
   try { return JSON.parse(raw); }
   catch { return raw; }
 }
 
+/** Accept one UTF-8 BOM from Windows JSON files or piped input. */
 function loadInput(path: string): unknown {
   const raw = path === "-" ? readFileSync(0, "utf8") : readFileSync(path, "utf8");
-  try { return JSON.parse(raw); }
+  try { return JSON.parse(raw.replace(/^\uFEFF/, "")); }
   catch { throw new CliUsageError(`invalid JSON in ${path}`); }
 }
 
@@ -205,10 +207,12 @@ function validate(value: unknown): OcxConfig {
 export async function handleConfigCommand(argv: string[]): Promise<number> {
   return runCliAction(async () => {
     const args = [...argv];
-    const action = (args.shift() ?? "show").toLowerCase();
     const wantsJson = takeFlag(args, "--json");
+    const source = takeFlag(args, "--source");
+    if (args.includes("--json") || args.includes("--source")) throw new CliUsageError("config flags may only be specified once", USAGE);
+    const action = (args.shift() ?? "show").toLowerCase();
+    if (source && action !== "show") throw new CliUsageError("--source is only supported for config show", USAGE);
     if (action === "show") {
-      const source = takeFlag(args, "--source");
       rejectArgs(args, USAGE);
       const diagnostics = readConfigDiagnostics();
       const redacted = redact(diagnostics.config);

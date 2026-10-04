@@ -18,8 +18,13 @@ sticky session affinity 與依用量的新工作階段選擇。它**不**控制 
 `anthropicAccountPool.quotaWindow` 所設定的視窗挑選已知用量最低者（`five-hour` 為預設，亦可選
 `weekly` 或 `max-utilization`）；
 `round-robin` 平均分散（`stickyLimit`，預設 `1`）；`fill-first` 一直使用作用中帳號直到冷卻、重新認證
-或達到閾值，然後前進。它**預設關閉**、會在 GUI 顯示警告，而且尚未經過實戰驗證——Anthropic 可能
-限制看起來像自動輪換的帳號；輪換並不能保護你免受供應商執行機制的處置。
+或達到閾值，然後前進。它**預設關閉**，仍屬實驗性功能。
+
+儀表板會列出帳號池的適用條件：你本人擁有或獲授權使用的訂閱、官方 Claude Code 用戶端，以及有人看顧的工作階段。
+Anthropic 未認可自動帳號池；同一組織的帳號可能共用配額（新增帳號不一定能增加容量），切換帳號也無法避免供應商的
+執行處置。OpenCodex 不會傳送保溫（keep-warm）請求，預設也不會在背景更新 Claude 權杖或讀取用量：只有儀表板、選單列
+應用程式或 `ocx` 指令要求時才會讀取用量。門檻是選擇帳號的偏好，而非用量或計費上限。以上為產品說明，並非法律意見；
+請查閱 Anthropic 的現行條款。
 
 啟用時的營運契約：
 
@@ -642,3 +647,17 @@ Claude 模型時自動載入。對於原生透傳，這是正常現象；對於�
 ### `anthropicAccountPool.routes`
 
 帳戶池啟用時，`anthropicAccountPool.routes` 依模型第一個符合的規則，將首次選擇和 429 重試限制在已儲存帳戶內。沒有可用帳戶時會在本機拒絕；`fallback: true` 才允許使用一般帳戶池。規則不代表帳戶確實有模型權限。
+
+### Forced Claude Code subagent model
+
+The Subagents page offers **Force all subagents onto one model**, off by default. Select an exposed roster-style id, such as `combo/tev-auto`, then enable the switch. The roster is offered first; unavailable saved roster entries cannot be force targets.
+
+`ocx agent subagents force combo/tev-auto` sets `claudeCode.subagentModelForce`; `ocx agent subagents force -` clears it. `ocx agent status` reports the setting. `GET /api/subagent-models` returns `force`, `forceAvailable`, and `forceStatus`; `PUT` accepts `{ "force": "combo/tev-auto" }` or `{ "force": null }` without changing the roster. Omitting `force` leaves it unchanged. Invalid or unexposed targets are rejected on write; stale targets are reported and skipped at launch.
+
+This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` only for an authoritative million-token window; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
+
+Claude Code **2.1.257 or newer** is required for FORCE. Plugin and built-in agents (including Explore/Plan) and per-call model arguments are overridden. Forks and subagent skills with `model: inherit` keep the main conversation model. The main loop and Haiku/small-fast sidecars are unaffected. Existing roster files remain available.
+
+The dashboard warns about old or unknown CLI versions, unavailable targets, and either variable already present in `settings.json` → `env` (which overrides launch env). Detection is read-only and server-local: it cannot inspect another launch shell, another machine, or project-local settings. An unknown result is not proof of force support.
+
+Explicit gateway selectors on a generated agent request take precedence over its legacy `ocx-route` fallback, even if the saved force setting changes after launch. For shell or settings overrides of generated roster agents, use an explicit gateway alias; bare Claude ids retain the older-client fallback behavior. Native aliases restore their bare model before the existing credential and model-map checks. Connected launches validate force targets against a fresh authenticated gateway catalog; failed discovery skips automatic force injection, and cached context windows alone never prove availability.

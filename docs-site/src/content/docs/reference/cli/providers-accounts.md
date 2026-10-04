@@ -118,6 +118,10 @@ For Antigravity, an upstream `401` can refresh the rejected account’s OAuth cr
 retry the request once. The retry uses that credential’s Cloud Code Assist project. If refresh
 fails or no usable project is available, the request returns an authentication error; use the
 reauthentication flow above. A second `401` does not start another refresh/retry cycle.
+A `403` asking to verify the account quarantines that credential as `needs-reauth(verify)`;
+when account failover is enabled, the request can retry on another eligible account. Complete
+Google's account verification, then run `ocx login google-antigravity`. Silent token refresh
+does not clear this verification requirement. If OpenCodex cannot save the quarantine, this adapter exchange preserves the original `403` without another recovery send; the account has not been durably quarantined. If a sibling request cannot be built or admitted for sending, the exchange delivers the original `403` through normal error formatting. An enclosing combo or policy route can still apply its existing fallback rules.
 
 A proxy that is already running picks up the new credential without a restart: the CLI asks it to
 reload that one provider from disk, and the request carries no credential of its own. If the
@@ -137,9 +141,9 @@ Remove the stored OAuth credential for a provider.
 
 ## Accounts and key pools
 
-### Main-account 98% protection
+### Main-account quota protection
 
-In **Codex settings → Multi-auth → Advanced settings**, **Block main account at 98%**
+In **Codex settings → Multi-auth → Advanced settings**, **Block main account**
 is on by default beside Ultra Fast. Switching it off applies immediately; turning it back on first
 shows the consequences, and cancelling does not change the setting. The main-account card shows
 monitoring, unknown usage, or a current policy block even when Advanced settings is closed.
@@ -151,10 +155,23 @@ account usable ([#5694](https://github.com/lidge-jun/opencodex/issues/5694)). Th
 Reserve: while the block is in force, Reserve on that main account cannot activate. To let the main
 account run to exhaustion and hand over to Reserve, turn the switch off.
 
-The **5h window and the weekly window each block on their own**: either one reaching 98% blocks
+The **5h window and the weekly window each block on their own**: the 5h window reaching 90% or the weekly window reaching 98% blocks
 immediately, even while the other still has headroom. Monthly-only accounts use their monthly
 window. The block releases automatically, with the switch still on, once every blocking window
-reports a fresh reading below 98% (a 0% reset counts); the next 98% observation blocks again.
+reports a fresh reading below its threshold (a 0% reset counts); the next observation at the threshold blocks again.
+Configure `codexMainAccountHardLockThresholds` in `config.json` with optional `short` and `long`
+percentages, for example `{ "short": 90, "long": 98 }`. Both must be integers from 80 through 100,
+and `short` must not exceed `long`; omitted fields use the defaults. The settings API accepts the
+same object and returns the effective values in `mainAccountHardLock.thresholds`.
+
+The dashboard and `ocx status` show **possible usage outside opencodex** when fresh readings rise
+by at least one point in the same reset episode without recent main-account activity through this
+proxy. This is an advisory observation, not proof: a long-running turn can also cause it. The lock
+may not prevent exhaustion from outside traffic. The process-local notice clears on identity or
+reset changes and expires after six hours or at the observed reset, whichever comes first.
+`ocx status --json` exposes the state, effective thresholds, blocking window kind, and optional
+`externalUsage` warning under `mainAccountHardLock` when live management evidence is available.
+
 An unreadable 5h reading cannot hide a weekly block. Unknown usage does not fabricate a zero, and a missing reading does
 not erase an already measured blocking tuple. A predicted reset time alone does not unlock it.
 While blocked, the minute sweep waits for the latest known blocking reset, then checks owned usage.
@@ -168,7 +185,7 @@ its primary window explicitly lasts **at least 24 hours** and reports valid usag
 explicitly `null` and a measured secondary supplies the weekly usage. In either case, secondary/tertiary
 windows must be explicitly `null` or explicitly last at least 24 hours and report valid usage. This follows the parser's short/long boundary, so a
 one-day window qualifies as well as weekly/monthly windows. The current window still uses the same
-98% threshold. This relies on the single reported snapshot; repeated observations are not required.
+configured long-window threshold (98% by default). This relies on the single reported snapshot; repeated observations are not required.
 Any omitted window field, an unknown duration, or partial response headers cannot clear a previous block.
 All-null responses carrying only credits and supplementary monthly-only readings also cannot establish recovery.
 The proxy checks the stored credential again before applying a delayed response. An unreadable file
@@ -190,7 +207,7 @@ keyring credentials, and traffic outside the proxy can still spend quota. Added 
 providers remain available.
 
 With protection on, an owned startup restores the main credential's in-memory identity
-binding after native-profile recovery and cleanup, so a persisted 98% block survives a restart.
+binding after native-profile recovery and cleanup, so a persisted policy block survives a restart.
 Caller-owned Direct, exact-main, main-fallback, and main-pin requests can briefly receive 503
 while that binding is pending; healthy stored Pool accounts stay eligible throughout. No
 credential is read from a foreign or unconfirmed service home for this initialization.
@@ -224,7 +241,7 @@ Each compatibility request checks a credential-bound server authorization, cache
 requires ordinary usage to be disallowed, the Luna Reserve banner, and exactly one allowed Reserve
 bucket. Missing, denied, stale or mismatched evidence refuses the request; it does not switch accounts
 or silently use ordinary Luna. Passive usage can revoke authorization but cannot create it.
-Global cooldown, pause, reauthentication and the 98% hard lock still apply. Turn the hard lock off if
+Global cooldown, pause, reauthentication and the main-account hard lock still apply. Turn the hard lock off if
 you want to use Reserve on an exhausted main account; doing so does not grant server entitlement.
 This compatibility path supports conversation requests and compaction, not Reserve as a vision or
 web-search helper or a standalone search-relay model. Choose another model for those helpers.
@@ -485,6 +502,27 @@ Anthropic pause applies even when proactive pooling is disabled, including sessi
 429 successors. It survives restart and reauthentication, preserves credentials and health,
 and does not interrupt a turn already sent. Removing the account removes its pause state.
 Per-account Anthropic auto-switch thresholds are not part of this control.
+
+Anthropic's automatic pause fallback keeps account order, skips paused accounts and accounts
+requiring reauthentication, and excludes Claude Code imports expiring within 60 seconds.
+Legacy accounts without a recorded source remain eligible using only their own stored credentials
+and normal stored-token refresh; they never adopt CLI-disk credentials. A still-valid Claude Code import with more time remaining
+can be selected. Later automatic re-adoption accepts a shared, nonempty access or refresh token.
+If both tokens rotate, OpenCodex requires authenticated account UUID proof for both the stored
+and imported bearer. It saves that proof privately when available from login, refresh, or profile
+lookup; account labels, email, organization and credential-file location cannot substitute for it.
+
+When the old bearer has expired and no bound account proof was saved, automatic recovery may be
+impossible. An unavailable profile or unverified rotated pair leaves the stored account unchanged
+and does not replay a potentially consumed refresh token. Use explicit login to import the current
+Claude Code credential. Import preserves unrelated identityless slots and may create a separate
+account; select the intended account and remove obsolete slots only after checking them. A profile
+lookup failure can leave a new import identityless, with the same automatic-recovery limitation.
+
+If no permitted fallback remains, quota and live model discovery wait for a usable active account.
+You can explicitly select an existing unpaused legacy account with
+`ocx account use anthropic <account-id-or-alias>`; its own valid credential and normal stored-token
+refresh remain available even when its original credential source was not recorded.
 
 ```bash
 ocx account pause google-antigravity <account-id-or-alias>
@@ -782,6 +820,15 @@ Use `ocx provider add mine --adapter openai-chat --base-url https://example.com/
 
 ### Cached quota history
 
+Automatic OpenAI account exhaustion checks distinguish purchased usage credits from reset
+tickets. Spending remains off by default: enable **Use credits** for that account (stored in
+`creditCodexAccountIds`). Only that opt-in together with a fresh positive spendable balance or
+unlimited credits can keep an account eligible after included usage reaches 100%; an upstream refusal or overage limit still
+blocks that evidence. Credit evidence expires after five minutes, and usage headers do not
+renew its clock. `pause-exhausted` uses this rule. Reset tickets alone never grant automatic
+headroom, and a credits-only response cannot clear a request cooldown. The default-on main-account
+hard lock remains a separate local policy and is not lifted by the credits switch.
+
 `ocx account history openai <pool-account-id> [--limit 1-200] [--json]` reads stored observations without contacting the provider. The output separates actual observation time, WHAM or response-header source, window family and usage percentage. At most 200 observations per account are retained for 30 days, with global storage bounds.
 
 Ordinary token refresh preserves history. Reauthentication, removal or account replacement retires the old publication. Native main and probes performed before a login is published are not included. Missing history means insufficient observations, not zero usage. This command does not spend quota. Effective estimates, when supported by observations, carry the limitations below.
@@ -799,3 +846,6 @@ ocx account routes anthropic --clear
 ```
 
 The file is limited to 64 KiB. The server validates each route and stores it under `anthropicAccountPool.routes`; writes require the running proxy. Use stored account IDs from `ocx account list anthropic --json`. Rules only affect the enabled pool and never claim that an account is entitled to a model. Request logs identify a matched rule as `route:#<n>` (1-based list position), without its operator name.
+
+Vision and web-search helpers match their own model independently and can fail locally when their
+strict route has no eligible account. See [Anthropic helper account routing](/reference/configuration/providers/#anthropicaccountpool-experimental).

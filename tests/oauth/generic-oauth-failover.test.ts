@@ -23,7 +23,12 @@ import { clearAccountQuotaCache, setCachedProviderAccountQuotaForTests } from ".
 import { subscribeAccountSelections } from "../../src/lib/account-selection-events";
 import { resolveCopilotApiBaseUrl } from "../../src/oauth/github-copilot";
 import { resolveProviderTransport } from "../../src/providers/xai-transport";
-import type { OcxConfig, OcxProviderConfig } from "../../src/types";
+import { bindRouteReasoningReplayScope } from "../../src/server/responses/core-replay";
+import {
+  clearReasoningReplayCacheForTests,
+  commitReasoningReplayServingIdentity,
+} from "../../src/responses/reasoning-replay-cache";
+import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoPath } from "../helpers/repo-root";
 
@@ -421,9 +426,11 @@ describe("sidecar on429 wiring", () => {
     // bearer by hand would reintroduce the mixed-identity bug this helper exists to prevent.
     const snapshotUses = coreSource.match(/failoverAccountSnapshot\(/g) ?? [];
     const helperUses = coreSource.match(/applyFailoverSnapshot\(snapshot(?:, (?:next|retry)Parsed)?\)/g) ?? [];
-    // Eight includes Antigravity auth rotation, Kiro branches and native passthrough.
+    // Nine includes Antigravity auth rotation, Kiro branches, native passthrough, plus
+    // the Antigravity 403 verify-account arm, which replays through the same snapshot
+    // helper so the rotated bearer keeps its account-matched project.
     // The explicit count keeps a newly added rotation site from skipping identity pairing.
-    expect(snapshotUses.length).toBe(8);
+    expect(snapshotUses.length).toBe(9);
     expect(helperUses.length).toBe(snapshotUses.length);
     // The bearer is written in exactly one place — inside the helper. Any other occurrence is a
     // rotation site that skipped the pairing rules.
@@ -452,6 +459,84 @@ describe("sidecar on429 wiring", () => {
     expect(arm.match(/oauthCredentialSnapshot: transportState\.replayOAuthCredentialSnapshot/g)).toHaveLength(4);
   });
 
+  test("Kiro refusal rotation rebinds continuation ownership before replay", () => {
+    const refusalStart = coreSource.indexOf("// Generic OAuth account failover (#2568)");
+    const armStart = coreSource.indexOf('if (route.providerName === "kiro")', refusalStart);
+    const armEnd = coreSource.indexOf("} else {", armStart);
+    const arm = coreSource.slice(armStart, armEnd);
+    const applied = arm.indexOf("applyFailoverSnapshot(snapshot)");
+    const rebound = arm.indexOf("bindRouteReasoningReplayScope({", applied);
+    const replayed = arm.indexOf('rebuildAndRefetch("oauth-account-429"', rebound);
+
+    expect(applied).toBeGreaterThan(-1);
+    expect(rebound).toBeGreaterThan(applied);
+    expect(replayed).toBeGreaterThan(rebound);
+    expect(arm.slice(rebound, replayed)).toContain(
+      "oauthCredentialSnapshot: transportState.replayOAuthCredentialSnapshot",
+    );
+  });
+
+  test("generic OAuth 429 rotation rebinds continuation ownership before replay", () => {
+    // The non-Kiro arm rotates through the same applyFailoverSnapshot; without a rebind the
+    // replay would carry the 429'd account's continuation and encrypted reasoning.
+    const refusalStart = coreSource.indexOf("// Generic OAuth account failover (#2568)");
+    const kiroArm = coreSource.indexOf('if (route.providerName === "kiro")', refusalStart);
+    const armStart = coreSource.indexOf("} else {", kiroArm);
+    const armEnd = coreSource.indexOf('rebuildAndRefetch("oauth-account-429"', armStart);
+    const arm = coreSource.slice(armStart, armEnd);
+    const applied = arm.indexOf("applyFailoverSnapshot(snapshot)");
+    const rebound = arm.indexOf("bindRouteReasoningReplayScope({", applied);
+
+    expect(armStart).toBeGreaterThan(kiroArm);
+    expect(armEnd).toBeGreaterThan(armStart);
+    expect(applied).toBeGreaterThan(-1);
+    expect(rebound).toBeGreaterThan(applied);
+    expect(arm.slice(rebound)).toContain(
+      "oauthCredentialSnapshot: transportState.replayOAuthCredentialSnapshot",
+    );
+  });
+
+  test("a failover rebind discards the previous account's continuation scope", () => {
+    // The source-order test above proves the arm binds before replay; this one proves the bind
+    // itself retires the old account's replay state. The arm hands the NEW snapshot to
+    // bindRouteReasoningReplayScope, so a continuation served under account-old and retried under
+    // account-new must strip the old store's encrypted blobs and foreign reasoning item ids.
+    clearReasoningReplayCacheForTests();
+    const parsed = {
+      modelId: "claude-sonnet-4.5",
+      context: { messages: [] },
+      stream: false,
+      options: {},
+      _reasoningReplayScope: { clientThreadId: "thread-failover-rebind" },
+    } as unknown as OcxParsedRequest;
+    const provider = {
+      adapter: "kiro",
+      baseUrl: "https://q.us-east-1.amazonaws.com",
+      authMode: "oauth",
+    } as unknown as OcxProviderConfig;
+    const bind = (accountId: string) =>
+      bindRouteReasoningReplayScope({
+        parsed,
+        providerName: "kiro",
+        provider,
+        adapterName: "kiro",
+        oauthCredentialSnapshot: { accountId, generation: "1" },
+      });
+
+    bind("account-old");
+    commitReasoningReplayServingIdentity(parsed._reasoningReplayScope);
+    const servedIdentity = parsed._reasoningReplayScope?.current?.credentialIdentity;
+    expect(servedIdentity).toBeTruthy();
+    expect(parsed._stripReasoningEncryptedContent).toBeUndefined();
+
+    bind("account-new");
+
+    expect(parsed._reasoningReplayScope?.current?.credentialIdentity).not.toBe(servedIdentity);
+    expect(parsed._stripReasoningEncryptedContent).toBe(true);
+    expect(parsed._dropForeignReasoningItemIds).toBe(true);
+    clearReasoningReplayCacheForTests();
+  });
+
   test("every 429 recovery loop carries all three rotators (#3495 follow-up)", () => {
     // This unit found the same defect twice: the streaming loop grew generic OAuth rotation and
     // the continuation loop did not, and the sidecar hook grew generic rotation while Anthropic
@@ -474,8 +559,12 @@ describe("sidecar on429 wiring", () => {
     // statement about which providers can recover where:
     //
     //   generic  = 5: streaming loop, continuation loop, sidecar hook, runTurn preflight,
-    //                native Responses passthrough. The new default only moves OAuth traffic;
-    //                key-auth defaults and Anthropic's own wire/pool remain unchanged.
+    //                native Responses passthrough. The Antigravity 403 verify-account
+    //                arm deliberately does NOT use this rotator: a verification refusal
+    //                must not record rate-limit cooldown semantics, so it moves via
+    //                rotateAntigravityAccountOnAuthRefusal instead. The new default
+    //                only moves OAuth traffic; key-auth defaults and Anthropic's own
+    //                wire/pool remain unchanged.
     //   anthropic = 3: the same, MINUS runTurn -- that path is Cursor-only (cursor.ts is the
     //                  sole adapter implementing runTurn), so Anthropic cannot reach it.
     //   key       = 3: hasKeyPoolFailover guards the two 429 response loops plus the
@@ -483,11 +572,34 @@ describe("sidecar on429 wiring", () => {
     //                  failing the request); the sidecar reaches the key pool through
     //                  rotateProviderTransportOn429 instead.
     //
-    // Adding a fifth recovery site means deciding, deliberately, which rotators it needs and
+    // Adding a recovery site means deciding, deliberately, which rotators it needs and
     // updating the matching number. That decision is the thing this test exists to force.
     expect(counts.generic).toBe(5);
     expect(counts.anthropic).toBe(3);
     expect(counts.key).toBe(3);
+  });
+
+  test("the verify-account arm moves via auth-refusal rotation, never rate-limit", () => {
+    // A verification refusal must not record rate-limit cooldown semantics: after
+    // reauthentication the account would otherwise stay excluded until a
+    // Retry-After or derived reset expires. The arm text is the contract.
+    const armStart = coreSource.indexOf("// Antigravity verify-account quarantine");
+    expect(armStart).toBeGreaterThan(-1);
+    const armEnd = coreSource.indexOf("// Unknown provenance", armStart);
+    expect(armEnd).toBeGreaterThan(armStart);
+    const arm = coreSource.slice(armStart, armEnd);
+    expect(arm).toContain("rotateAntigravityAccountOnAuthRefusal(");
+    expect(arm).not.toContain("rotateGenericOAuthAccountOn429(");
+    // Marking stays generation-fenced: no unfenced fallback may re-quarantine a
+    // credential that rotated after the 403 was sent.
+    expect(arm).toContain("markAccountNeedsReauthIfGeneration(");
+    expect(arm).not.toMatch(/await markAccountNeedsReauth\(route\.providerName/);
+    // Cross-account thought signatures are not a source-text claim. The dispatch
+    // test in server-google-antigravity-oauth-401-replay proves account A's
+    // durable signature is absent from the sibling replay.
+    // Recovery accounting stays truthful: this is the verify 403 path, not a rate limit.
+    expect(arm).toContain('rebuildAndRefetch("oauth-account-403"');
+    expect(arm).not.toContain('rebuildAndRefetch("oauth-account-429"');
   });
 
   test("the helper fails closed rather than pairing a new bearer with an old identity", () => {
@@ -892,5 +1004,25 @@ describe("Antigravity authentication refusal selection", () => {
     } as never);
     expect(rotateAntigravityAccountOnAuthRefusal(true, a!, old, null)).toBe(b);
     expect(eligibleFailoverAccounts("google-antigravity")).toContain(a!);
+  });
+
+  test("re-login retires only superseded auth evidence, preserving rate cooldowns", async () => {
+    const [a, b] = await seedProvider("google-antigravity", 2);
+    const cfg = { providers: { "google-antigravity": { authMode: "oauth" } } } as unknown as OcxConfig;
+    // Unrelated rate evidence on A (cla family and family-less default) plus auth
+    // evidence on A (gem family).
+    expect(rotateGenericOAuthAccountOn429(cfg, "google-antigravity", a!, "120", Date.now(), "claude-sonnet-4-6")).toBe(b);
+    expect(rotateGenericOAuthAccountOn429(cfg, "google-antigravity", a!, null, Date.now(), null)).toBe(b);
+    const generation = credentialGeneration(getAccountSet("google-antigravity")!.accounts[0]!.credential);
+    rotateAntigravityAccountOnAuthRefusal(true, a!, generation, "gemini-3.8-flash");
+    expect(eligibleFailoverAccounts("google-antigravity", Date.now(), "gem")).not.toContain(a!);
+    // Explicit re-login with fresh tokens retires the superseded auth entry only.
+    await saveCredential("google-antigravity", {
+      access: "access-new", refresh: "refresh-new", expires: Date.now() + 3_600_000,
+      accountId: "uuid-0",
+    } as never);
+    expect(eligibleFailoverAccounts("google-antigravity", Date.now(), "gem")).toContain(a!);
+    expect(eligibleFailoverAccounts("google-antigravity", Date.now(), "cla")).not.toContain(a!);
+    expect(eligibleFailoverAccounts("google-antigravity")).toEqual([b!]);
   });
 });

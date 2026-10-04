@@ -1,3 +1,4 @@
+import { createChatgptUnblockLifecycle } from "./chatgpt-unblock-lifecycle";
 import { serviceApiTokenFingerprint } from "../../lib/service-secrets";
 import type { Server } from "bun";
 import type { OcxConfig } from "../../types";
@@ -5,7 +6,6 @@ import {
   createClaudeInterceptLifecycle,
   type ClaudeInterceptLifecycle,
 } from "./claude-intercept-lifecycle";
-import { createChatgptUnblockLifecycle, type ChatgptUnblockLifecycle } from "./chatgpt-unblock-lifecycle";
 import {
   createLinkListenerLifecycle,
   linkListenerOwnsTarget,
@@ -29,6 +29,8 @@ export interface OptionalListenerStartContext<T> {
 }
 
 export interface OptionalListenerSet<T> {
+  ensureClaudeIntercept(): ReturnType<ClaudeInterceptLifecycle<T>["ensure"]>;
+  claudeInterceptOutcome(): ReturnType<ClaudeInterceptLifecycle<T>["lastOutcome"]>;
   ingressOf(server: Server<T>): ServerIngress | undefined;
   linkRouteAllowed(url: URL, req: Request): boolean;
   linkAdmissionKeyIds(): ReadonlySet<string>;
@@ -46,9 +48,7 @@ export interface OptionalListenerSet<T> {
 
 export function createOptionalListenerSet<T>(linkDeps: LinkListenerDeps = {}): OptionalListenerSet<T> {
   const claudeIntercept: ClaudeInterceptLifecycle<T> = createClaudeInterceptLifecycle<T>();
-  // Opt-in ChatGPT desktop send-unblock listener; like the Claude intercept it binds its own
-  // loopback port, starts fire-and-forget and degrades to a warning.
-  const chatgptUnblock: ChatgptUnblockLifecycle = createChatgptUnblockLifecycle<T>();
+  const chatgptUnblock = createChatgptUnblockLifecycle<T>();
   const linkListener: LinkListenerLifecycle<T> = createLinkListenerLifecycle<T>(linkDeps);
   let activeConfig: OcxConfig | undefined;
   const supervisor = createLinkSupervisor({
@@ -72,6 +72,8 @@ export function createOptionalListenerSet<T>(linkDeps: LinkListenerDeps = {}): O
   let supervisorStop: (() => Promise<void>) | undefined;
 
   return {
+    ensureClaudeIntercept: () => claudeIntercept.ensure(),
+    claudeInterceptOutcome: () => claudeIntercept.lastOutcome(),
     ingressOf(server) {
       if (linkListener.ownsListener(server)) return "hub-link";
       if (claudeIntercept.ownsListener(server)) return "claude-intercept";

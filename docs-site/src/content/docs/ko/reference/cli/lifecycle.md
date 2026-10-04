@@ -351,6 +351,15 @@ Windows에서 Task Scheduler 항목을 만들려면 권한 상승이 필요합�
 작업이나 외부 연산은 자동 권한 상승 표시를 절대 내지 못합니다. 대시보드 UAC 프롬프트를 승인하거나
 상승된 PowerShell 창에서 `ocx service install`을 다시 실행해 주세요.
 
+If startup reports `another process owns the runtime mutation lease` or `ocx service status` shows
+`Runtime mutation lease busy`, the lease is blocking startup or service changes even if the
+proxy is not running. The message includes the lock path, recorded PID, current liveness,
+executable name when available, and lease age. The process identity is unverified: the PID
+may have been reused, so liveness and executable name describe whichever process occupies
+that PID now. Wait for the operation to finish and retry; do not delete the lock or stop a
+process based only on this PID. A later mutation attempt can reclaim a stale lease once its
+age exceeds 30 seconds and the recorded PID is no longer alive; status only inspects it.
+
 ### `ocx codex-shim <install|status|uninstall|remove>`
 
 PATH 위의 스크립트 기반 `codex` 런처를 가벼운 자동 시작 스크립트로 감쌉니다. 정확한 실행 파일
@@ -457,3 +466,7 @@ npm에 게시하면 사용할 수 있게 됩니다.
 ## Remote Hub 클라이언트 라이프사이클
 
 `ocx connect <url> --pairing-code-stdin`, `ocx connect status`, `ocx sync`, `ocx connect rotate --pairing-code-stdin`을 사용합니다. `ocx disconnect`는 오프라인에서도 로컬 상태를 복원하지만 허브 키는 폐기하지 않습니다. 연결 중에는 `ocx connect revoke --admin-token-stdin`으로 저장된 `apiKeyId`를 폐기할 수 있고, 연결을 끊은 뒤에는 허브의 **Integrations → API Keys**를 사용해야 합니다. 비밀값은 stdin으로만 전달하고 argv에 넣지 마세요.
+
+## Setup port validation
+
+`ocx init`의 포트는 1–65535 범위의 십진 정수입니다. Enter만 누르면 10100을 사용합니다. `0`, `10100oops`, `1.5` 같은 잘못된 값은 임의로 바꾸거나 자르지 않고, 오류를 알린 뒤 포트를 다시 묻습니다.

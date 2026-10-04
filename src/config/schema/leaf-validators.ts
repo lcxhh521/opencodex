@@ -41,7 +41,11 @@ import {
   isHostedToolUnsupportedForModel,
 } from "../../responses/hosted-tool-policy";
 import { getConfigDir } from "../paths";
-import { COMPACTION_TRIGGERS } from "./compaction-triggers";
+import { COMPACTION_TRIGGERS, validCompactionSourceModels } from "./compaction-triggers";
+
+// The chatgptDesktop leaf lives in its own zod-only module so the `ocx chatgpt` command can explain
+// a dropped block without loading this file's provider and account validators.
+export { chatgptDesktopConfigIssue, chatgptDesktopSchema } from "./chatgpt-desktop";
 
 /** One definition of "usable secret", shared by the schema and the warnings. */
 export function isUsableApiKeySecret(value: unknown): value is string {
@@ -50,6 +54,8 @@ export function isUsableApiKeySecret(value: unknown): value is string {
 
 export const compactionRoutingSchema = z.object({
   model: z.string().trim().min(1),
+  sourceModels: z.array(z.string()).refine(validCompactionSourceModels,
+    "sourceModels requires unique exact selectors or provider/* patterns").optional(),
   reasoningEffort: z.string().refine(value => pinnedReasoningEffortConfigError(value) === null).optional(),
   triggers: z.array(z.enum(COMPACTION_TRIGGERS)).nonempty()
     .refine(values => new Set(values).size === values.length, "triggers must not repeat a value")
@@ -294,6 +300,7 @@ export const providerConfigSchema = z.object({
   autoReviewModelOverrides: autoReviewModelOverridesSchema.optional(),
   adapter: z.string().min(1),
   baseUrl: z.string().min(1),
+  tlsProfile: z.literal("antigravity-browser").optional(),
   alias: z.string().optional(),
   modelAliases: z.record(z.string(), z.string()).optional(),
   modelDisplayNames: modelDisplayNamesSchema.optional(),
@@ -323,6 +330,8 @@ export const providerConfigSchema = z.object({
   modelSupportsServiceTier: z.record(z.string().min(1), z.boolean()).optional(),
   modelSuppressSyntheticMax: z.record(z.string().min(1), z.boolean()).optional(),
   preserveResponsesReasoningContent: z.boolean().optional(),
+  preserveResponsesInputItemIds: z.boolean().optional(),
+  preserveResponsesMessageMetadata: z.boolean().optional(),
   dropResponsesReasoningItems: z.boolean().optional(),
   modelReasoningEffortsAuthoritative: z.boolean().optional(),
   decodesNativeCompactionBlobs: z.boolean().optional(),
@@ -1073,19 +1082,6 @@ export const quotaResetNotifySchema = z.object({
 export const catalogAutoRefreshSchema = z.object({
   enabled: z.boolean().optional(),
   intervalMinutes: z.number().int().min(0).max(1440).optional(),
-}).strict();
-
-/**
- * ChatGPT desktop send-unblock settings. Exported so the write-boundary check in
- * diagnostics.ts rejects what the read path's `.catch(undefined)` would silently drop:
- * a live save of `{ unblockSend: true, port: 65536 }` must fail loudly, not report
- * success with the whole block gone and the feature quietly off.
- */
-export const chatgptDesktopSchema = z.object({
-  unblockSend: z.boolean().optional(),
-  pacFallback: z.boolean().optional(),
-  appServerShim: z.boolean().optional(),
-  port: z.number().int().min(1).max(65535).optional(),
 }).strict();
 
 /**

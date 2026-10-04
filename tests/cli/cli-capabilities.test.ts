@@ -240,7 +240,6 @@ const UNDECLARED_ROUTES_2026_08_28: readonly string[] = [
   "GET /api/diagnostics/project-config",
   "GET /api/effort-caps",
   "GET /api/grok",
-  "GET /api/injection-model",
   "GET /api/keys",
   "GET /api/model-discovery",
   "GET /api/model-presets",
@@ -263,7 +262,6 @@ const UNDECLARED_ROUTES_2026_08_28: readonly string[] = [
   "GET /api/startup-health",
   "GET /api/storage/codex-logs",
   "GET /api/subagent-model-fallback",
-  "GET /api/subagent-models",
   "GET /api/system/health",
   "GET /api/system/memory",
   "GET /api/system/windows-replace-retries",
@@ -326,7 +324,6 @@ const UNDECLARED_ROUTES_2026_08_28: readonly string[] = [
   "PUT /api/disabled-models",
   "PUT /api/effort-caps",
   "PUT /api/grok/selection",
-  "PUT /api/injection-model",
   "PUT /api/model-discovery",
   "PUT /api/model-presets",
   "PUT /api/model-visibility",
@@ -343,7 +340,6 @@ const UNDECLARED_ROUTES_2026_08_28: readonly string[] = [
   "PUT /api/shadow-call-settings",
   "PUT /api/sidecar-settings",
   "PUT /api/subagent-model-fallback",
-  "PUT /api/subagent-models",
   "PUT /api/v2",
 ];
 

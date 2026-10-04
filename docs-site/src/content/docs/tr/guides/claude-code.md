@@ -23,9 +23,16 @@ seçim yapar: `quota` (varsayılan), `autoSwitchThreshold` üzerinde olduğunda
 seçer (`five-hour` varsayılandır; `weekly` ve `max-utilization` da kullanılabilir); `round-robin` eşit olarak dağıtır
 (`stickyLimit`, varsayılan `1`); `fill-first`, bekleme süresi, yeniden kimlik
 doğrulama veya eşiğe kadar aktif hesabı tüketir, ardından ilerler. **Varsayılan
-olarak kapalıdır**, bir GUI uyarısı gösterir ve sahada kapsamlı olarak test
-edilmemiştir — Anthropic otomatik rotasyona benzeyen hesapları kısıtlayabilir;
-rotasyon sağlayıcı yaptırımlarına karşı koruma sağlamaz.
+olarak kapalıdır** ve deneyseldir.
+
+Pano, havuzun hangi koşullar için tasarlandığını gösterir: size ait olan veya kullanma yetkiniz bulunan
+abonelikler, gerçek Claude Code istemcisi ve oturumu gözeten bir kişi. Anthropic otomatik hesap havuzunu
+onaylamamıştır; aynı kuruluştaki hesaplar kotayı paylaşabilir (yeni hesap kapasite eklemeyebilir) ve hesap
+değiştirmek sağlayıcı yaptırımlarına karşı koruma sağlamaz. OpenCodex hesapları sıcak tutmak için (keep-warm)
+istek göndermez ve varsayılan olarak Claude jetonlarını arka planda yenilemez ya da kullanımı arka planda
+okumaz: kullanım, pano, menü çubuğu uygulaması veya bir `ocx` komutu istediğinde okunur. Eşikler hesap
+seçimi için tercihtir; kullanım veya faturalandırma sınırı değildir. Bu bir ürün açıklamasıdır, hukuki
+tavsiye değildir; Anthropic'in güncel koşullarını kontrol edin.
 
 Etkinleştirildiğinde operasyonel sözleşme:
 
@@ -853,3 +860,17 @@ Dönüştürülen tüm Chat rotalarında zaman çizelgesi hatırlatmaları, bekl
 ### `anthropicAccountPool.routes`
 
 Havuz açıkken `anthropicAccountPool.routes` kuralları ilk eşleşen model için ilk seçimi ve 429 yeniden denemelerini kayıtlı hesaplarla sınırlar. Uygun hesap yoksa istek yerel olarak reddedilir; `fallback: true` normal havuza izin verir. Kurallar model erişimini kanıtlamaz.
+
+### Forced Claude Code subagent model
+
+The Subagents page offers **Force all subagents onto one model**, off by default. Select an exposed roster-style id, such as `combo/tev-auto`, then enable the switch. The roster is offered first; unavailable saved roster entries cannot be force targets.
+
+`ocx agent subagents force combo/tev-auto` sets `claudeCode.subagentModelForce`; `ocx agent subagents force -` clears it. `ocx agent status` reports the setting. `GET /api/subagent-models` returns `force`, `forceAvailable`, and `forceStatus`; `PUT` accepts `{ "force": "combo/tev-auto" }` or `{ "force": null }` without changing the roster. Omitting `force` leaves it unchanged. Invalid or unexposed targets are rejected on write; stale targets are reported and skipped at launch.
+
+This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` only for an authoritative million-token window; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
+
+Claude Code **2.1.257 or newer** is required for FORCE. Plugin and built-in agents (including Explore/Plan) and per-call model arguments are overridden. Forks and subagent skills with `model: inherit` keep the main conversation model. The main loop and Haiku/small-fast sidecars are unaffected. Existing roster files remain available.
+
+The dashboard warns about old or unknown CLI versions, unavailable targets, and either variable already present in `settings.json` → `env` (which overrides launch env). Detection is read-only and server-local: it cannot inspect another launch shell, another machine, or project-local settings. An unknown result is not proof of force support.
+
+Explicit gateway selectors on a generated agent request take precedence over its legacy `ocx-route` fallback, even if the saved force setting changes after launch. For shell or settings overrides of generated roster agents, use an explicit gateway alias; bare Claude ids retain the older-client fallback behavior. Native aliases restore their bare model before the existing credential and model-map checks. Connected launches validate force targets against a fresh authenticated gateway catalog; failed discovery skips automatic force injection, and cached context windows alone never prove availability.

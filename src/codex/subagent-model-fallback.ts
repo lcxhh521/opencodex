@@ -1,3 +1,4 @@
+import { codexAccountUsesCreditsAfterLimit } from "./account-credit-use";
 /**
  * Quota-aware subagent model fallback (issue #374).
  *
@@ -233,7 +234,7 @@ export function isNativeModelQuotaExhausted(
   // Subagent fallback reads the same score, so a stale terminal reading would push
   // subagents off a native model whose window has already reset. Thread the caller's clock
   // rather than letting the scorer read wall time - the two would silently diverge.
-  const usage = computeCodexUsageScore(quota, getPoolAccountPlan(config, resolvedAccountId), now);
+  const usage = computeCodexUsageScore(quota, getPoolAccountPlan(config, resolvedAccountId), now, codexAccountUsesCreditsAfterLimit(config, resolvedAccountId));
   if (usage >= CODEX_UNKNOWN_USAGE_SCORE) return false;
   return usage >= quotaThreshold(config, resolvedAccountId);
 }
@@ -948,6 +949,15 @@ export interface TomlModelKeyLocation {
  * role's model, so the line the writer edits is the line the reader reports.
  */
 export function locateTomlModelKey(content: string): TomlModelKeyLocation | null {
+  return locateTomlStringKey(content, "model");
+}
+
+/** The same scan for a role's root model_reasoning_effort, which the dashboard edits beside the pin. */
+export function locateTomlReasoningEffortKey(content: string): TomlModelKeyLocation | null {
+  return locateTomlStringKey(content, "model_reasoning_effort");
+}
+
+function locateTomlStringKey(content: string, keyName: string): TomlModelKeyLocation | null {
   const lines = content.split(/\r?\n/);
   const state: TomlScanState = { inMultilineString: null, arrayDepth: 0 };
   let inRootTable = true;
@@ -966,7 +976,7 @@ export function locateTomlModelKey(content: string): TomlModelKeyLocation | null
       const key = line.match(TOML_ROOT_KEY);
       const name = key ? tomlKeyName(key) : null;
       if (key && name === undefined && inRootTable) undecodedRootKeyLine ??= i;
-      if (key && name === "model") {
+      if (key && name === keyName) {
         const rest = `${line.slice(key[0].length)}\n${lines.slice(i + 1).join("\n")}`;
         let at = 0;
         while (at < rest.length && (rest[at] === " " || rest[at] === "\t")) at += 1;
@@ -984,7 +994,7 @@ export function locateTomlModelKey(content: string): TomlModelKeyLocation | null
     }
     scanTomlLine(line, state);
   }
-  // A root key that might spell model cannot be ruled out, so a writer must not add a second one.
+  // A root key that might spell the wanted key cannot be ruled out, so a writer must not add a second one.
   return undecodedRootKeyLine === null ? null : { line: undecodedRootKeyLine, inRootTable: true, span: null, value: null };
 }
 

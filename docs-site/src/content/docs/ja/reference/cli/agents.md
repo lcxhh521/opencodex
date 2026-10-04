@@ -226,6 +226,20 @@ ocx system codex-cli-update attest --candidate <absolute-path> --npm-prefix <abs
 
 識別値やダイジェストは観測時点のファイルを表し、持続的な更新許可ではありません。選択されたランタイム、過去のインストーラー、実効 npm 設定、ツールの真正性は証明しません。指定した Node も観測するだけで、ランチャーが選ぶ Node だとは証明しません。対象の実行、レジストリ要求、インストール、設定の書き込み、プロセス制御は行いません。既存の Windows `check` は引き続き候補・設定のファイルシステム I/O を行いません。
 
-### `ocx config <show|get|set|unset|validate|export|import> ...`
+### `ocx config [show|get|set|unset|validate|export|import] ...`
+
+`ocx config [show] [--json] [--source]` は、プロキシを起動せずにローカル設定を表示します。`show` を省略しても、どちらかのフラグ、または両方を任意の順序で指定できます。`--source` は診断のソース、エラー、警告を含め、表示時のみ使用できます。`--json` は明示的な操作の前にも指定でき、実行する操作を変更しません。`--json` または `--source` の重複と不明な引数は拒否されます。
 
 検証された OpenCodex 設定を検査し、安全に変更します。 `show` および `get` はシークレットをマスクします。インポートは書き込む前に検証され、`--yes` が必要です。
+
+### Forced Claude Code subagent model
+
+The Subagents page offers **Force all subagents onto one model**, off by default. Select an exposed roster-style id, such as `combo/tev-auto`, then enable the switch. The roster is offered first; unavailable saved roster entries cannot be force targets.
+
+`ocx agent subagents force combo/tev-auto` sets `claudeCode.subagentModelForce`; `ocx agent subagents force -` clears it. `ocx agent status` reports the setting. `GET /api/subagent-models` returns `force`, `forceAvailable`, and `forceStatus`; `PUT` accepts `{ "force": "combo/tev-auto" }` or `{ "force": null }` without changing the roster. Omitting `force` leaves it unchanged. Invalid or unexposed targets are rejected on write; stale targets are reported and skipped at launch.
+
+This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` only for an authoritative million-token window; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
+
+Claude Code **2.1.257 or newer** is required for FORCE. Plugin and built-in agents (including Explore/Plan) and per-call model arguments are overridden. Forks and subagent skills with `model: inherit` keep the main conversation model. The main loop and Haiku/small-fast sidecars are unaffected. Existing roster files remain available.
+
+The dashboard warns about old or unknown CLI versions, unavailable targets, and either variable already present in `settings.json` → `env` (which overrides launch env). Detection is read-only and server-local: it cannot inspect another launch shell, another machine, or project-local settings. An unknown result is not proof of force support.

@@ -149,6 +149,10 @@ current port holder and retry the restart after the conflict is resolved.
 Idempotently ensure a background proxy is running, then sync its live model catalog. If
 `codexAutoStart` is `false`, it prints that autostart is disabled and does nothing.
 
+With a validated connected-client configuration, `ensure` succeeds without starting a local
+provider proxy after reconciling the client journal. This does not probe or certify the remote
+hub's availability. Invalid or mismatched client state still fails.
+
 ### `ocx restore [back]` · `ocx eject [back]`
 
 Restore native Codex **without** stopping the proxy — strips the injected config lines and routed
@@ -230,6 +234,10 @@ service and shim diagnostics. `ocx doctor` uses the same live-first rule for its
 section, so the two commands should agree on restart protection. If you are diagnosing a discrepancy,
 compare the reported live startup verdict with the local service details rather than treating the shell
 probe as more authoritative.
+
+The `clients=pending-restart(...)` diagnostic lists Codex CLI clients that predate the routing
+injection. On macOS, Electron renderer, utility, and crashpad helpers under Codex.app's framework
+are excluded from that client list, including helpers whose executable paths contain spaces.
 
 Human output also includes an **OAuth health** block after the OAuth logins summary: `OAuth health:
 ok` when every known account is healthy, or `OAuth health: warning` with one redacted line per
@@ -408,6 +416,23 @@ same stale-`app-server` warning and optional restart flags as `ocx sync` apply.
 
 If the derived cache already has identical bytes, the command succeeds without rewriting it or restarting Codex. With `--json`, this is reported as `ok: true`, `wrote: false`, `skipped: true`, and `skippedReason: "unchanged"`; an invalid catalog or failed cache write still exits nonzero.
 
+### Catalog write diagnostics
+
+Catalog write auditing records bounded diagnostics in `opencodex-catalog-audit.jsonl` under
+`CODEX_HOME`. An unchanged catalog or cache produces no event; an audit failure does not fail
+catalog publication.
+
+On Windows, **at most the successful new-file creation event is recorded**. The file is created
+empty and hardened before diagnostic data is written. All later events skip the existing file,
+both in the same process and after restart. A hardening failure may leave an empty file, which
+later events also skip. Existing files and their ACLs are not changed for auditing, including
+when another OpenCodex home owns the catalog. This is a privacy-first fallback, not a complete
+Windows audit stream; native NTFS behavior for this audit path has not yet been validated.
+
+POSIX auditing continues to append and retain bounded records. The Windows limitation does not
+disable catalog protection or owner healing. Audit files in a separate `CODEX_HOME` remain
+cleanup residuals because the config uninstall manifest cannot claim paths outside its own root.
+
 ### `ocx catalog pull <https-url> [--auth-env <NAME>] [--json] [--restart-codex] [--restart-app-server-only]`
 
 Install a complete catalog served by another OpenCodex instance's `/v1/catalog` endpoint, then
@@ -496,6 +521,10 @@ priority (`7`, also the scheduler default when omitted) can delay the proxy's he
 CPU contention, making the tray report Offline even while the process is alive. After upgrading,
 run `ocx service repair` to migrate that registered priority and restart the service. This migration
 may request UAC approval; a priority already set to normal or high does not itself trigger replacement.
+
+The Windows wrapper supports locale dates containing parentheses, including Korean and Japanese
+date formats. After upgrading, run `ocx service repair` to replace an older generated wrapper
+that exits before launching Bun on those locales.
 
 The Windows wrapper verifies its baked Bun runtime and CLI entry before every start attempt. If an
 interrupted package update removed either file, it logs one `installation is incomplete` message and
@@ -665,7 +694,9 @@ clears the stale job.
 
 On Windows, `ocx service status` reports Task Scheduler registration separately from
 identity-verified OpenCodex proxy reachability. It does not print the localized `schtasks` table,
-so the summary remains readable across Windows code pages.
+so the summary remains readable across Windows code pages. Transactional-backup recovery
+logs a fixed success message rather than the backup directory name; backup names containing
+shell metacharacters do not become commands in that log message.
 
 On Windows, creating the Task Scheduler entry requires elevation. Recognized localized
 access-denied text keeps the existing guidance path. If that text is unreadable, the fallback
@@ -686,6 +717,15 @@ or failing to claim a new root safely, therefore leaves the working proxy and it
 place. Existing or conflicting scheduler registrations continue to fail closed rather than being
 deleted as an unsafe best-effort rollback.
 
+If startup reports `another process owns the runtime mutation lease` or `ocx service status` shows
+`Runtime mutation lease busy`, the lease is blocking startup or service changes even if the
+proxy is not running. The message includes the lock path, recorded PID, current liveness,
+executable name when available, and lease age. The process identity is unverified: the PID
+may have been reused, so liveness and executable name describe whichever process occupies
+that PID now. Wait for the operation to finish and retry; do not delete the lock or stop a
+process based only on this PID. A later mutation attempt can reclaim a stale lease once its
+age exceeds 30 seconds and the recorded PID is no longer alive; status only inspects it.
+
 ### `ocx codex-shim <install|status|uninstall|remove>`
 
 Wrap a script-based `codex` launcher on PATH with a lightweight autostart script. Real `codex.exe`
@@ -693,6 +733,18 @@ targets are left untouched to avoid breaking exact executable invocations.
 If installation is refused or the resulting shim is unhealthy, the command exits nonzero and
 the dashboard reports the failure reason. A healthy existing shim still counts as success.
 For Windows installations that expose only `codex.exe`, use `ocx service install` for autostart.
+
+For fnm-managed Codex, installation resolves the temporary multishell directory to the durable
+Node installation while preserving the launcher filename. If that directory cannot be resolved,
+installation refuses instead of wrapping a temporary path. When Codex is selected, `ocx connect`
+also reports shim readiness. This readiness check skips special-file PATH entries and, on macOS
+and Linux, files without execute permission, including symlink targets. It preserves the order of
+regular executable launchers, including npm and fnm symlinks. Windows keeps its PATHEXT lookup.
+If a different PATH wrapper hides a healthy shim, fix PATH order;
+reinstalling the same shim does not change which command your shell finds first. If the tracked shim
+is healthy but no `codex` command is found, connect reports it as inactive and asks you to add its
+directory to PATH. A failed PATH inspection reports activation as unverified instead of claiming
+that no command exists. These warnings do not change the connect command's exit status.
 
 Before an install or repair is committed, OpenCodex runs the saved launcher with `--version` while
 service startup is bypassed. It refuses the change and rolls back when the launcher resolves
@@ -827,6 +879,18 @@ Unix-only check. A failure aborts while the tray and proxy are still running. A 
 then stopped before files are replaced; an installed service is rebuilt and started automatically,
 while a foreground installation prints `ocx start` as the next step. Dashboard update records
 redact profile/cache paths and UID/GID values before they are persisted.
+When a stopped listener's literal IP address drops the liveness dial instead of refusing it
+(for example on a tailnet), the updater briefly tries binding that same address and port.
+A successful bind confirms absence at that instant; a failed bind or an inconclusive hostname
+probe still prevents the update.
+
+On Windows, Scoop's default `nodejs` and `nodejs-lts` `npm` installations can be used
+from the user home directory when their `current` junction stays inside the Node app
+directory; the default persistent `bin` directory is also supported. Running inside
+that installation (including its resolved version directory or persistent `bin`),
+project-local `npm`, `NO_JUNCTION` version-directory entries, and custom Scoop roots
+under the home remain excluded.
+
 If the install step fails, the previous version stays installed and its service is restarted; the
 terminal output names the next step, and [Update Failed on Windows](/troubleshooting/update-failed/)
 covers finishing the update and the folders a failed attempt can leave behind.
@@ -842,3 +906,7 @@ publishes them to npm.
 ## Remote Hub client lifecycle
 
 Use `ocx connect <url> --pairing-code-stdin`, `ocx connect status`, `ocx sync`, and `ocx connect rotate --pairing-code-stdin`. The initial catalog download fails after five seconds without incoming bytes, but active transfers may run longer; use `--catalog-timeout <seconds>` (1–120) to override that inactivity window. `ocx disconnect` restores local state offline and does not revoke the hub key. While connected only, `ocx connect revoke --admin-token-stdin` revokes the persisted `apiKeyId`; after disconnect use the hub's **Integrations → API Keys** page. Secrets are stdin-only and never belong in argv.
+
+## Setup port validation
+
+`ocx init` accepts TCP ports 1–65535 as decimal whole numbers. Press Enter to use 10100. Invalid input such as `0`, `10100oops` or `1.5` is never silently replaced or truncated; setup reports it and asks for the port again.

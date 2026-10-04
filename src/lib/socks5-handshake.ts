@@ -45,10 +45,6 @@ export function socks5Credentials(proxy: URL): Socks5Credentials {
   if (usernameBytes.byteLength > 255 || passwordBytes.byteLength > 255) {
     throw new Socks5HandshakeError("SOCKS5 proxy credentials must each fit in 255 UTF-8 bytes");
   }
-  // RFC 1929 needs both fields, each 1-255 bytes; `user@` or `:pass@` would send a zero length.
-  if (usernameBytes.byteLength === 0 || passwordBytes.byteLength === 0) {
-    throw new Socks5HandshakeError("SOCKS5 proxy credentials need both a username and a password");
-  }
   return { username: usernameBytes, password: passwordBytes };
 }
 

@@ -9,6 +9,9 @@ Native steering follows [the shared WebSocket contract](transports/streaming-hea
 
 Encrypted-task and fallback request handling follow the Responses
 [core module ownership](transports/responses.md#core-module-ownership). This surface retains its existing behavior.
+For policy-selected turns, both subagent selection and the post-recovery selection retain the
+[original policy authorization](transports/policy-fallback.md);
+ordinary subagent fallback configuration does not authorize a destination outside that evaluation.
 
 Catalog HTTP acquisition follows the [proxy-routing contract](catalog.md#remote-catalog-http-proxy-routing).
 
@@ -344,6 +347,55 @@ catalog path calls it, and opencodex never creates, repairs, or removes a role f
 
 Sibling instances refuse the write, because it reaches the shared `CODEX_HOME`.
 
+### Role model auto-assign
+
+`POST /api/codex-agent-roles/auto-assign` (dashboard Auto-assign, `ocx agent roles suggest`) proposes a
+model for every role and writes nothing. It belongs to omo (Codex / LazyCodex): without
+`detectLazyCodex()` it answers 409 `lazycodex_not_detected` before reading the body or calling a model,
+the same refusal as the PUT. Applying a proposal is the ordinary
+`PUT /api/codex-agent-roles/{role}`, now with an optional `effort`. The work splits in two on purpose:
+
+- **Sizing is one model call.** `src/codex/role-sizing.ts` holds the rubric (ported from the MIT-licensed
+  modelchk skill, cited in the file) as the system prompt, the neutral vocabulary
+  (`fast|standard|frontier`, `glance|measured|thorough|exhaustive`), and the validator. Each role sends its
+  name and the first 1500 characters of `description` plus `developer_instructions`; a role with neither
+  is not sent. The call goes through the proxy's own `/v1/chat/completions` via
+  `postLocalChatCompletion` (`src/lib/local-chat-completion.ts`, shared with the routed vision describer), on
+  the root `model` of Codex `config.toml` unless the caller names one. An answer that is not the strict JSON
+  shape, a missing role, or a field outside the vocabulary leaves that role **unsized** with the reason;
+  nothing is guessed. Keys beyond the five answer fields are ignored, and all five stay required. The
+  sizing model never names a model.
+- **Mapping is deterministic code.** `src/codex/role-auto-assign.ts` draws candidates from
+  `subagentSelectableModels` (the same list the role picker renders) and tiers them: `codexRoleTiers` in the
+  opencodex config first, then price rank (input plus output per 1M tokens). Three or more priced models
+  split evenly across the three tiers. Fewer are anchored at the top, the dearest frontier and each cheaper
+  one a tier lower, so one is frontier and two are standard and frontier; fast is the tier left empty,
+  which keeps a standard role on the cheaper model. Unpriced, unmapped models are never proposed. A role
+  gets the lowest sufficient tier, then the lowest price. Effort binds to ladder positions of the chosen
+  model (floor, default or middle, the rung above, ceiling), collapsing inside the range; it is proposed
+  only for a role whose file already sets `model_reasoning_effort`, and written by the same span-preserving
+  editor as `model`, located by the same TOML-aware scan.
+
+The sizing call is injectable (`completeCodexRoleSizing` on the management deps), so route tests answer it
+without a provider. Sibling instances refuse the preview too: it sits under the refused
+`/api/codex-agent-roles` prefix, and its proposals could not be applied there anyway.
+
+### Delegation model suggest
+
+`POST /api/injection-model/suggest` (Subagents page **Suggest**, `ocx agent injection suggest`) applies the
+same sizing to the delegation default. The caller describes the work Codex usually hands off (nonblank, at
+most 1500 characters, the role excerpt limit); `proposeDelegationModel` in
+`src/server/management/codex-role-auto-assign.ts` sends it as one role named `delegated-work` with the same
+parser and the role rubric followed by a short addendum (`DELEGATED_WORK_SIZING_SYSTEM_PROMPT`) that has the
+sizer size the described one-shot work rather than a standing role; the role rubric's own text is unchanged.
+It maps the answer with the same `buildRoleProposals`. Two things differ from roles in the mapping,
+both at the call site: candidates are the `available` list `GET /api/injection-model` offers (one helper
+builds both), with effort ladders cut to the Codex levels `PUT /api/injection-model` accepts, and
+`alwaysProposeEffort` proposes an effort even when none is set, because the delegation effort is a
+picker of its own. The route writes nothing; the page shows tier, effort, rationale and move triggers,
+and **Use this** goes through the page's ordinary `PUT /api/injection-model` save. It is not
+sibling-refused, like the `PUT` it feeds, since both touch only this instance's config.
+
 `injectionModel` and `injectionEffort` are shared selections with two independent consumers.
 `multiAgentGuidanceEnabled` controls only OpenCodex-authored delegation guidance.
 `syncCodexSubagentDefaults` is a separate, default-off opt-in that applies the selected values to
@@ -486,3 +538,11 @@ Dashboard Fast-row persistence and client refresh follow the [Fast selector rows
 The [compaction routing override](transports/responses-failover.md#compaction-routing-overrides) uses explicit request-kind and trigger metadata, independently of spawned-child markers.
 
 Ongoing priority failback keeps model-detour and independent-quota affinity isolated; preview remains read-only and no child changes an unrelated shared cursor. The routing details live in [OpenAI account operations](providers/openai-accounts.md#ongoing-priority-failback).
+
+Automatic account exhaustion and recovery use the [spendable Codex credit evidence contract](providers/openai-tiers.md#spendable-codex-credits), including independent freshness, upstream refusal, and reset-ticket separation.
+
+### Forced Claude Code subagent model
+
+`src/claude/subagent-model.ts` shares the roster alias and authoritative context-marker resolver with routed launch force. `claudeCode.subagentModelForce` is opt-in and default-off. Force availability excludes retained unavailable roster entries. Caller-added `[1m]` suffixes require finite authoritative million-token capacity or an exact advertised marked identity; exact upstream ids remain literal, while legacy roster marker handling is unchanged. The generated-agent legacy directive cannot replace a wire selector matching the configured forced alias. `src/claude/subagent-force-status.ts` performs bounded, read-only server-local version and settings-key inspection; unknown is not supported.
+
+Explicit gateway selectors outrank generated-agent `ocx-route` fallback independently of saved force state. `src/claude/inbound-model-options.ts` shares this precedence across Messages and count-tokens; bare Claude fallback and requests without directives retain their existing behavior. Native Claude force targets use reversible native aliases, restored before existing credential/model-map checks. Connected launch exposure comes from fresh authenticated gateway rows, not cached context-window keys; acquisition is independent of cache-write success.

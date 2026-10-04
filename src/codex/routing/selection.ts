@@ -1,4 +1,5 @@
 import { getEffectiveCodexAutoSwitchThreshold } from "../account-auto-switch";
+import { codexAccountUsesCreditsAfterLimit, isCodexAccountHeldForCredits } from "../account-credit-use";
 import { isCodexAccountPaused } from "../account-pause";
 import { codexAccountPriorityLookup, pinnedCodexAccountId } from "../account-priority";
 import { isSelectableCodexPoolAccount } from "../account-id";
@@ -15,7 +16,7 @@ import {
 } from "../pool-rotation";
 import { CODEX_UNKNOWN_USAGE_SCORE, getAccountQuota, resetAtToMs } from "../quota";
 import { codexPlanKey } from "../plan";
-import { MAIN_CODEX_ACCOUNT_ID, getMainAccountPlan, hasMainAccountRefreshGrant } from "../main-account";
+import { MAIN_CODEX_ACCOUNT_ID, getMainAccountPlan } from "../main-account";
 import type { OcxConfig } from "../../types";
 import { CODEX_FAILURE_WINDOW_MS, computeCodexUsageScore } from "./cooldown-math";
 import {
@@ -82,6 +83,37 @@ export function isCodexAccountPlanExcluded(
   return plan !== undefined && excluded.has(plan);
 }
 
+/**
+ * Whether the operator turned credits off for this account and one of its usage windows is full
+ * now (#6334). Checked wherever plan exclusion is checked, for the reason given there: an account
+ * that is already active or bound is served without passing through the eligible list.
+ */
+export function isCodexAccountHeldAtUsageLimit(
+  config: OcxConfig,
+  accountId: string,
+  now: number,
+  selectionOptions?: CodexAccountUsabilityOptions,
+): boolean {
+  return isCodexAccountHeldForCredits(
+    config,
+    accountId,
+    getAccountQuota(accountId),
+    getPoolAccountPlanForSelection(config, accountId, selectionOptions),
+    now,
+  );
+}
+
+/** The automatic-rotation policies that also bind the legacy keep-the-active-account fallback. */
+export function isCodexAccountRotationExcluded(
+  config: OcxConfig,
+  accountId: string,
+  now: number,
+  selectionOptions?: CodexAccountUsabilityOptions,
+): boolean {
+  return isCodexAccountPlanExcluded(config, accountId)
+    || isCodexAccountHeldAtUsageLimit(config, accountId, now, selectionOptions);
+}
+
 export function isCodexAccountSelectable(
   config: OcxConfig,
   accountId: string,
@@ -91,6 +123,7 @@ export function isCodexAccountSelectable(
 ): boolean {
   return !isCodexAccountPaused(config, accountId)
     && !isCodexAccountPlanExcluded(config, accountId)
+    && !isCodexAccountHeldAtUsageLimit(config, accountId, now, selectionOptions)
     && getCodexQuotaHealthSnapshot(accountId, quotaScope, now) === null
     && !isCodexQuotaAvoided(accountId, quotaScope, now)
     && !isCodexAccountSoftAvoided(accountId, now)
@@ -117,6 +150,7 @@ export function codexAccountBlockReason(
 ): CodexAffinityReason | undefined {
   if (isCodexAccountPaused(config, accountId)) return "paused";
   if (isCodexAccountPlanExcluded(config, accountId)) return "plan_excluded";
+  if (isCodexAccountHeldAtUsageLimit(config, accountId, now, selectionOptions)) return "credits_off";
   if (getCodexQuotaHealthSnapshot(accountId, quotaScope, now) !== null) return "cooldown";
   if (isCodexQuotaAvoided(accountId, quotaScope, now)) return "quota_avoided";
   if (isCodexAccountSoftAvoided(accountId, now)) return "transient";
@@ -172,6 +206,7 @@ export function getEligiblePoolAccounts(
       && account.id !== excludeId
       && !isCodexAccountPaused(config, account.id)
       && !isCodexAccountPlanExcluded(config, account.id, excludedPlans)
+      && !isCodexAccountHeldAtUsageLimit(config, account.id, now, selectionOptions)
       && !isAccountNeedsReauth(account.id)
       && (!skipFailoverReadyCandidates || !shouldFailover(config, account.id, now)))
     .filter(account => getCodexQuotaHealthSnapshot(account.id, quotaScope, now) === null)
@@ -185,7 +220,6 @@ export function getEligiblePoolAccounts(
   if (
     excludeId !== MAIN_CODEX_ACCOUNT_ID
     && !isCodexAccountPaused(config, MAIN_CODEX_ACCOUNT_ID)
-    && (!isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID) || hasMainAccountRefreshGrant())
     && getCodexQuotaHealthSnapshot(MAIN_CODEX_ACCOUNT_ID, quotaScope, now) === null
     && !isCodexAccountSoftAvoided(MAIN_CODEX_ACCOUNT_ID, now)
     // The main login is not in `config.codexAccounts`, so it never passes through the
@@ -195,6 +229,7 @@ export function getEligiblePoolAccounts(
     // in between the main account returns as a first-class candidate.
     && !isCodexQuotaAvoided(MAIN_CODEX_ACCOUNT_ID, quotaScope, now)
     && !isCodexPoolRefreshCooling(MAIN_CODEX_ACCOUNT_ID, now)
+    && !isCodexAccountHeldAtUsageLimit(config, MAIN_CODEX_ACCOUNT_ID, now, selectionOptions)
     && (!skipFailoverReadyCandidates || !shouldFailover(config, MAIN_CODEX_ACCOUNT_ID, now))
     && isCodexAccountUsable(config, MAIN_CODEX_ACCOUNT_ID, selectionOptions)
   ) {
@@ -257,6 +292,7 @@ export function hasCodexQuotaHeadroom(
     getAccountQuota(accountId),
     getPoolAccountPlanForSelection(config, accountId, selectionOptions),
     now,
+    codexAccountUsesCreditsAfterLimit(config, accountId),
   );
   if (isUnknownUsage(usage)) return true;
   return usage < threshold;
@@ -308,6 +344,7 @@ export function hasCodexSharedStateQuotaHeadroom(
     getAccountQuota(accountId),
     getPoolAccountPlanForSelection(config, accountId, selectionOptions),
     now,
+    codexAccountUsesCreditsAfterLimit(config, accountId),
   );
   return isUnknownUsage(usage) || usage < 100;
 }
@@ -501,7 +538,7 @@ export function sharedStateSelectionOptions(
   selectionOptions?: CodexAccountUsabilityOptions,
 ): Pick<
   CodexAccountUsabilityOptions,
-  "nativeMainSelectionOnly" | "isMainAccountTokenLive"
+  "nativeMainSelectionOnly" | "isMainAccountTokenLive" | "requestOwnedMainCredential"
 > | undefined {
   if (!selectionOptions) return undefined;
   return {
@@ -510,6 +547,9 @@ export function sharedStateSelectionOptions(
       : {}),
     ...(selectionOptions.isMainAccountTokenLive
       ? { isMainAccountTokenLive: selectionOptions.isMainAccountTokenLive }
+      : {}),
+    ...(selectionOptions.requestOwnedMainCredential !== undefined
+      ? { requestOwnedMainCredential: selectionOptions.requestOwnedMainCredential }
       : {}),
   };
 }
@@ -549,6 +589,7 @@ export function pickLowerUsageAccount(
       getAccountQuota(id),
       getPoolAccountPlanForSelection(config, id, selectionOptions),
       now,
+      codexAccountUsesCreditsAfterLimit(config, id),
     );
     if (usage < bestUsage) {
       best = id;
@@ -572,6 +613,7 @@ export function pickLowestUsageAmong(
       getAccountQuota(id),
       getPoolAccountPlanForSelection(config, id, selectionOptions),
       now,
+      codexAccountUsesCreditsAfterLimit(config, id),
     );
     if (usage < bestUsage) {
       best = id;
@@ -749,6 +791,7 @@ export function applyQuotaAutoSwitch(
     quota,
     getPoolAccountPlanForSelection(config, active, selectionOptions),
     now,
+    codexAccountUsesCreditsAfterLimit(config, active),
   );
   // Unknown usage is not evidence that a user's explicit selection crossed the
   // threshold. Wait for quota priming instead of rotating among guesses.

@@ -7,6 +7,7 @@ import Subagents from "./pages/Subagents";
 import Logs from "./pages/Logs";
 import Usage from "./pages/Usage";
 import Storage from "./pages/Storage";
+import Claude from "./pages/Claude";
 import CodexSet from "./pages/CodexSet";
 import Integrations from "./pages/Integrations";
 import Startup from "./pages/Startup";
@@ -16,7 +17,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import QuotaSummaryBar from "./components/quota-summary-bar/QuotaSummaryBar";
 import { SidebarGithubRow } from "./components/sidebar-github-row";
 import { DesktopStarOnboarding } from "./components/desktop-star-onboarding";
-import { IconGrid, IconServer, IconBoxes, IconBot, IconList, IconActivity, IconHardDrive, IconCodex, IconMenu, IconSun, IconMoon, IconMonitor, IconGlobe, IconPower, IconX, IconRefresh} from "./icons";
+import { IconGrid, IconServer, IconBoxes, IconBot, IconList, IconActivity, IconHardDrive, IconCodex, IconClaude, IconMenu, IconMonitor, IconGlobe, IconPower, IconX, IconRefresh} from "./icons";
 import { useI18n, useT, LOCALES, localeDisplayName, type Locale, type TKey } from "./i18n/shared";
 import { Notice, Select, ToastNotice, type NoticeTone } from "./ui";
 import { configureApiTargets, hasApiSession, installApiAuthFetch, installApiSessionFromHtml, logoutApiSession, SESSION_UNAVAILABLE_EVENT } from "./api";
@@ -29,11 +30,15 @@ import { requestProxyStop } from "./stop-proxy";
 import { useCodexRestart } from "./use-codex-restart";
 import { confirmAction } from "./action-dialogs";
 import { hostOs, isDesktopShell, isExternalLink, openDesktopUpdatePage } from "./lib/desktop-shell";
+import { zoomManagedOn } from "./lib/desktop-zoom";
 import { useSidebarCollapse } from "./use-sidebar-collapse";
+import { useDesktopZoom } from "./use-desktop-zoom";
+import { DesktopZoomControl } from "./components/desktop-zoom-control";
+import { ThemeSwitch, type ThemeMode } from "./components/theme-switch";
 import { MainTopStrip, SidebarTopStrip } from "./components/app-titlebar";
 import { watchMacTitlebarMetrics, windowChromeHandlers } from "./lib/window-chrome";
 
-type Theme = "light" | "dark" | "system";
+type Theme = ThemeMode;
 
 const PAGE_TKEY: Record<Page, TKey> = {
   dashboard: "nav.dashboard",
@@ -48,6 +53,7 @@ const PAGE_TKEY: Record<Page, TKey> = {
   "remote-workspace": "nav.remoteWorkspace",
   "codex-set": "nav.codexSet",
   integrations: "nav.integrations",
+  claude: "nav.claude",
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
@@ -56,14 +62,7 @@ configureApiTargets(INITIAL_TARGETS);
 installApiAuthFetch();
 const THEME_KEY = "ocx-theme";
 
-/**
- * Every sidebar row maps one-to-one onto a page again.
- *
- * The Claude row was the exception: a second entry pointing at a tab of Integrations,
- * which needed `subPath`, `activeHashes`, and an `isNavEntryActive` helper whose only
- * job was stopping the sidebar from lighting two rows and claiming the user was in two
- * places. Removing the duplicate removed all four.
- */
+/** Every sidebar row maps to its own page. */
 type NavEntry = {
   id: Page;
   tkey: TKey;
@@ -73,6 +72,7 @@ type NavEntry = {
 const NAV: NavEntry[] = [
   { id: "dashboard", tkey: "nav.dashboard", Icon: IconGrid },
   { id: "codex-set", tkey: "nav.codexSet", Icon: IconCodex },
+  { id: "claude", tkey: "nav.claude", Icon: IconClaude },
   { id: "providers", tkey: "nav.providers", Icon: IconServer },
   { id: "models", tkey: "nav.models", Icon: IconBoxes },
   { id: "subagents", tkey: "nav.subagents", Icon: IconBot },
@@ -84,8 +84,6 @@ const NAV: NavEntry[] = [
   { id: "integrations", tkey: "nav.integrations", Icon: IconGlobe },
 ];
 
-const THEME_ICON = { light: IconSun, dark: IconMoon, system: IconMonitor } as const;
-const THEME_TKEY: Record<Theme, TKey> = { light: "theme.light", dark: "theme.dark", system: "theme.system" };
 
 export interface RemoteWorkspaceRouteProps {
   available: boolean;
@@ -216,6 +214,8 @@ export default function App() {
   const desktopShell = isDesktopShell();
   const { collapsed: navCollapsed, toggle: toggleNavCollapse } = useSidebarCollapse({ shortcut: desktopShell });
   const desktopMac = desktopShell && hostOs() === "macos";
+  const zoomManaged = desktopShell && zoomManagedOn(hostOs());
+  const desktopZoom = useDesktopZoom({ managed: zoomManaged });
   const appRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (desktopMac && appRef.current) return watchMacTitlebarMetrics(appRef.current);
@@ -277,8 +277,7 @@ export default function App() {
     { pollMs: 30_000, enabled: targetsSettled },
   );
 
-  const cycleTheme = () => setTheme(t => (t === "light" ? "dark" : t === "dark" ? "system" : "light"));
-  const ThemeIcon = THEME_ICON[theme];
+  const themeSwitch = <ThemeSwitch theme={theme} onChange={setTheme} />;
   const displayedVersion: string = healthPoll.data ?? __APP_VERSION__;
 
   const [stopping, setStopping] = useState(false);
@@ -484,10 +483,18 @@ export default function App() {
               style={{ flex: 1, minWidth: 0, width: "100%" }}
             />
           </div>
-          <button type="button" className="theme-toggle" onClick={cycleTheme}
-            aria-label={`${t("theme.label")}: ${t(THEME_TKEY[theme])}`} title={`${t("theme.label")}: ${t(THEME_TKEY[theme])}`}>
-            <ThemeIcon /> <span className="mode">{t(THEME_TKEY[theme])}</span>
-          </button>
+          {zoomManaged ? (
+            <div className="sidebar-display-row">
+              {themeSwitch}
+              <DesktopZoomControl percent={desktopZoom.percent} canZoomIn={desktopZoom.canZoomIn}
+                canZoomOut={desktopZoom.canZoomOut} onStep={desktopZoom.step} />
+            </div>
+          ) : (
+            <div className="sidebar-action-row sidebar-action-row--theme">
+              <span className="sidebar-action-label">{t("theme.label")}</span>
+              {themeSwitch}
+            </div>
+          )}
           <div className="sidebar-action-row">
             <span className="sidebar-action-label">{t("dash.actions")}</span>
             <div className="sidebar-action-orbs">
@@ -576,6 +583,7 @@ export default function App() {
                 {page === "remote" && !remotePairingRequired && <RemoteLink apiBase={sharedBase} sessionReady={sharedSessionReady} workspaceAvailable={remoteWorkspaceAvailable} onOpenWorkspace={() => navigateToPage("remote-workspace")} />}
                 {page === "remote-workspace" && <RemoteWorkspaceRoute available={remoteWorkspaceAvailable} apiBase={sharedBase} hubOrigin={targets.shared.serverOrigin} onOpenRemoteLink={() => navigateToPage("remote")} />}
                 {page === "codex-set" && <CodexSet apiBase={sharedBase} />}
+                {page === "claude" && <Claude apiBase={sharedBase} />}
                 {page === "integrations" && <Integrations apiBase={sharedBase} machineApiBase={machineBase} connected={targets.connected} />}
               </>
             )}

@@ -346,12 +346,16 @@ JEV 只用於 `jev-auto`，且每次邏輯模型呼叫只諮詢一次。缺少�
 到目前第一個可用目標；呼叫端取消仍會取消請求。自動化測試使用模擬的 TypeSafe 端點，
 不驗證真實的 JEV 帳戶。
 
+JEV Combo 也可以改用自架的決策模型，例如無需金鑰的 Ollama `tev1`：新增一個 `baseUrl` 為完整
+`/v1/systemone` 端點的 `jev-decision` 供應商，並將其設為 Combo 的 `decisionProvider`。TypeSafe 憑證
+絕不會傳送到該端點。詳見[自架決策模型](https://opencodex.me/zh-tw/guides/combos/)。
+
 ## 供應商與 adapter
 
 <!-- sponsors:main-first-mention -->
 OpenAI（ChatGPT 登入或 API key）、Anthropic、Google Gemini、xAI、Kimi、Azure OpenAI、Ollama
 （本機 + Cloud）、Cursor（實驗性），以及所有 OpenAI 相容端點——再加上 DeepSeek、
-Groq、OpenRouter、Together、Fireworks、Cerebras、Mistral、Hugging Face、NVIDIA NIM、MiniMax、
+Groq、OpenRouter、OpenGateway、Together、Fireworks、Cerebras、Mistral、Hugging Face、NVIDIA NIM、MiniMax、
 Qwen Cloud、Qoder Global 與 CN（官方 PAT + CLI）、SiliconFlow 等等。完整清單：`ocx init` 或
 [供應商文件](https://opencodex.me/zh-tw/guides/providers/)。
 

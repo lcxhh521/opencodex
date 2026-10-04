@@ -25,6 +25,13 @@ A helper recovery's prepaid hop remains part of the full leg attempt allowance. 
 pending hop reconciles the actual target synchronously: a regional endpoint change refunds the old
 reservation and re-reserves the new transition, so the transition cap is enforced without charging
 or sending twice. Diagnostic key changes alone are not transitions; a real destination change is.
+One exception: a rebuild that the caller itself performed mid-flight — Kiro's reset-triggered
+credential rebuild retargeting the request to another region's canonical host — marks its admission
+`rebasedTarget`. The physical destination is still recorded, but the move consumes neither the
+single target transition nor the alternate-target allowance: it was authorized work, not a failover
+decision, and the endpoint fallback keeps ownership of the one transition it may still need.
+Admission, reservation and refund use the same alternate-target charging predicate. A validated
+rebase remains eligible after that allowance is spent, while replay safety and the total-send cap still apply.
 
 The hop pays for a replay that some *other* layer dispatches, so which layer settles the
 reservation follows the dispatcher, not the ladder. A helper-routed replay reports the same
@@ -123,6 +130,14 @@ so a second restart has nothing to redo.
 booking, the settlement split, the refund, a ceiling that refuses a dispatch rather than
 describing it afterwards, and the restart.
 
+The request tracker checks the current policy against the exact root, identity and pool scopes
+on each charge. With an applicable ceiling, any refused booking prevents a new dispatch,
+including full tracking capacity or a duplicate send id; the log uses the existing specific
+workflow refusal reason. Requests without an applicable ceiling remain observe-only. Reports
+of sends that already left stay permissive and do not count as local refusals; this guard does
+not promise complete accounting when those post-dispatch bookings fail.
+`tests/responses/responses-spend-capacity-guard.test.ts` covers these boundaries.
+
 The default policy still sets no token ceiling on any scope, so an unconfigured install accounts
 and reports without refusing. An operator turns enforcement on with the `spend` section in
 config.json, which `src/lib/spend-reservation-ledger.ts` resolves through
@@ -147,6 +162,20 @@ may have made. File-backed journal and salt writers are owner-bound at construct
 directory entry that is a link -- including one whose target does not exist -- is refused instead
 of followed. A separate process may use a separate directory. SQLite crash release permits the
 next owner without stale-PID or TTL reclamation.
+
+Every file check admits a ledger file only when it is a regular file, not a link, with exactly
+one directory entry, owned by the process user. A refusal raises `SpendLedgerFileRefusedError`, a
+`SPEND_LEDGER_OWNER_UNAVAILABLE` owner error. The error carries the file role (`journal`,
+`journal-compaction`, `salt`) and the failed condition (`not-regular-file`, `symbolic-link`,
+`extra-hard-link`, `foreign-owner`, `invalid-salt`), and never the path, salt, alias or request
+content (#6314). Before this, one sentence covered five conditions and two files. A macOS sync
+daemon briefly holding a second link to a journal inside a synced folder could then only be
+diagnosed from an instrumented build. The guard is unchanged.
+`src/lib/synced-state-location.ts` is the advisory half. `acquireSpendLedgerServerLifecycle`
+warns once at startup when the state directory resolves inside iCloud Drive, a File Provider
+folder, or Desktop/Documents with iCloud Desktop & Documents sync detected, and it refuses
+nothing on that basis. `tests/lib/spend-ledger-file-journal.test.ts` pins the refusal shape, and
+`tests/lib/synced-state-location.test.ts` pins the classification.
 
 The journal survives an ordinary process restart once its writes reached the filesystem. It does
 not claim host power-loss durability: the append path does not fsync each record, so power loss can

@@ -30,6 +30,8 @@ export const PROVIDER_MODEL_RENAME_ROLES = {
   fastEnabled: "none",
   modelSupportsServiceTier: "record",
   preserveResponsesReasoningContent: "none",
+  preserveResponsesInputItemIds: "none",
+  preserveResponsesMessageMetadata: "none",
   modelReasoningEffortsAuthoritative: "none",
   dropResponsesReasoningItems: "none",
   decodesNativeCompactionBlobs: "none",
@@ -69,6 +71,7 @@ export const PROVIDER_MODEL_RENAME_ROLES = {
   autoReviewModel: "none",
   autoReviewModelOverrides: "record",
   headers: "none",
+  forwardClientHeaders: "none",
   openRouterRouting: "none",
   modelOpenRouterRouting: "record",
   vercelGatewayRouting: "none",
@@ -142,6 +145,7 @@ export const PROVIDER_MODEL_RENAME_ROLES = {
   desktopExecutor: "none",
   unsafeAllowNativeLocalExec: "none",
   nativeLocalExec: "none",
+  tlsProfile: "none",
 } as const satisfies Record<keyof OcxProviderConfig, ModelRenameRole>;
 
 function fieldsWithRole(role: ModelRenameRole): string[] {

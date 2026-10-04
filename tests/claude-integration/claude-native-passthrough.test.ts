@@ -79,6 +79,7 @@ const OAUTH_HEADERS = {
   "authorization": "Bearer sk-ant-oat01-tst",
   "user-agent": "claude-cli/2.1.200",
   "x-app": "cli",
+  "x-claude-code-session-id": "44444444-4444-4444-8444-444444444444",
 };
 
 function claudeBody(): Record<string, unknown> {
@@ -121,6 +122,7 @@ test("unmapped claude model + sk-ant credential passes through verbatim", async 
     expect(hit.headers.get("anthropic-beta")).toBe(OAUTH_HEADERS["anthropic-beta"]);
     expect(hit.headers.get("user-agent")).toBe("claude-cli/2.1.200");
     expect(hit.headers.get("x-app")).toBe("cli");
+    expect(hit.headers.get("x-claude-code-session-id")).toBe(OAUTH_HEADERS["x-claude-code-session-id"]);
     // Body untouched: thinking signature, cache_control, max_tokens all intact.
     expect(hit.body).toEqual(claudeBody());
 
@@ -215,18 +217,21 @@ test("count_tokens passes through with native credentials", async () => {
 
 // The legacy claude-ocx spelling is what a picker saved before the ocx-claude aliases.
 test.each([
-  "ocx-claude-native--claude-fable-5-1",
-  "claude-ocx-native--claude-fable-5-1",
-])("Fable 1M picker alias %s preserves native passthrough on both Messages endpoints", async pickerModel => {
+  ["ocx-claude-native--claude-fable-5-1", "claude-fable-5-1"],
+  ["claude-ocx-native--claude-fable-5-1", "claude-fable-5-1"],
+  ["ocx-claude-native--claude-sonnet-5", "claude-sonnet-5"],
+  ["claude-ocx-native--claude-sonnet-5", "claude-sonnet-5"],
+])("Native force/picker alias %s preserves native passthrough on both Messages endpoints", async (pickerModel, nativeModel) => {
   const captured: Captured[] = [];
   const upstream = mockAnthropicUpstream(captured);
-  saveConfig(cfg(upstream.url.toString().replace(/\/$/, "")));
+  saveConfig(cfg(upstream.url.toString().replace(/\/$/, ""), { subagentModelForce: "combo/changed-after-launch" }));
+  const system = "<!-- ocx-route: ocx-claude-mock--test-model -->";
   const server = startServer(0);
   try {
     const messagesWithoutMarker = await fetch(new URL("/v1/messages", server.url), {
       method: "POST",
       headers: OAUTH_HEADERS,
-      body: JSON.stringify({ ...claudeBody(), model: pickerModel }),
+      body: JSON.stringify({ ...claudeBody(), system, model: pickerModel }),
     });
     expect(messagesWithoutMarker.status).toBe(200);
     await messagesWithoutMarker.text();
@@ -234,7 +239,7 @@ test.each([
     const messagesWithMarker = await fetch(new URL("/v1/messages", server.url), {
       method: "POST",
       headers: OAUTH_HEADERS,
-      body: JSON.stringify({ ...claudeBody(), model: `${pickerModel}[1m]` }),
+      body: JSON.stringify({ ...claudeBody(), system, model: `${pickerModel}[1m]` }),
     });
     expect(messagesWithMarker.status).toBe(200);
     await messagesWithMarker.text();
@@ -242,15 +247,15 @@ test.each([
     const countTokens = await fetch(new URL("/v1/messages/count_tokens", server.url), {
       method: "POST",
       headers: OAUTH_HEADERS,
-      body: JSON.stringify({ model: `${pickerModel}[1m]`, messages: [{ role: "user", content: "hi" }] }),
+      body: JSON.stringify({ system, model: `${pickerModel}[1m]`, messages: [{ role: "user", content: "hi" }] }),
     });
     expect(countTokens.status).toBe(200);
     expect(await countTokens.json()).toEqual({ input_tokens: 4242 });
 
     expect(captured).toHaveLength(3);
-    expect(captured[0]!.body.model).toBe("claude-fable-5-1");
-    expect(captured[1]!.body.model).toBe("claude-fable-5-1");
-    expect(captured[2]!.body.model).toBe("claude-fable-5-1");
+    expect(captured[0]!.body.model).toBe(nativeModel);
+    expect(captured[1]!.body.model).toBe(nativeModel);
+    expect(captured[2]!.body.model).toBe(nativeModel);
   } finally {
     await server.stop(true);
     upstream.stop(true);
@@ -1280,5 +1285,163 @@ test("a client that leaves while a non-stream body is pending logs the cancel as
   } finally {
     await server.stop(true);
     upstream.stop();
+  }
+});
+
+// --- A stalled or over-cap stream is a visible incomplete turn, in the row and in usage.jsonl ---
+
+async function stalledStreamRow(upstream: { url: URL }, extraClaude: Record<string, unknown>) {
+  const { clearRequestLogsForTests } = await import("../../src/server/request-log");
+  clearRequestLogsForTests();
+  saveConfig(cfg(upstream.url.toString().replace(/\/$/, ""), extraClaude));
+  const server = startServer(0);
+  try {
+    const res = await fetch(new URL("/v1/messages?beta=true", server.url), {
+      method: "POST",
+      headers: OAUTH_HEADERS,
+      body: JSON.stringify(claudeBody()),
+    });
+    const text = await res.text();
+    const logs = logsFromApiBody<{ status?: number; terminalStatus?: string; closeReason?: string; upstreamError?: string }>(
+      await (await fetch(new URL("/api/logs?tail=1", server.url))).json(),
+    );
+    expect(logs).toHaveLength(1);
+    return { res, text, row: logs[0]!, usage: readRecentUsageEntries(1)[0] };
+  } finally {
+    await server.stop(true);
+  }
+}
+
+test("a stalled native stream logs a 502 incomplete row and keeps its diagnostics in usage.jsonl", async () => {
+  const upstream = Bun.serve({ port: 0, fetch: () => new Response(new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new TextEncoder().encode(PARTIAL_TURN_SSE)); /* then silence */ },
+  }), { headers: { "content-type": "text/event-stream" } }) });
+  try {
+    const { res, text, row, usage } = await stalledStreamRow(upstream, { bodyStallSec: 1 });
+    expect(res.status).toBe(200);
+    expect(text).toContain('"type":"timeout_error"');
+    // Same row the Responses relay writes for a stall-timeout incomplete (httpStatusForRequestLogTerminal).
+    expect(row).toMatchObject({ status: 502, terminalStatus: "incomplete", closeReason: "body_stall" });
+    expect(row.upstreamError).toBe("anthropic passthrough body stalled: no upstream bytes for 1s");
+    // usage.jsonl keeps failure diagnostics only for failed or non-completed rows; a 200 row dropped them.
+    expect(usage).toMatchObject({ status: 502, terminalStatus: "incomplete", closeReason: "body_stall" });
+  } finally {
+    upstream.stop(true);
+  }
+});
+
+test("a native stream over the byte cap logs a 502 incomplete row and keeps its diagnostics in usage.jsonl", async () => {
+  const upstream = Bun.serve({ port: 0, fetch: () => new Response(PARTIAL_TURN_SSE, { headers: { "content-type": "text/event-stream" } }) });
+  try {
+    const { text, row, usage } = await stalledStreamRow(upstream, { bodyMaxBytes: 64 });
+    expect(text).toContain("exceeded 64 bytes");
+    expect(row).toMatchObject({ status: 502, terminalStatus: "incomplete", closeReason: "body_overflow" });
+    expect(row.upstreamError).toBe("anthropic passthrough body exceeded 64 bytes");
+    expect(usage).toMatchObject({ status: 502, terminalStatus: "incomplete", closeReason: "body_overflow" });
+  } finally {
+    upstream.stop(true);
+  }
+});
+
+test("a turn that sent message_stop and then stalls is finished: 200 terminal, no error frame", async () => {
+  const source = new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new TextEncoder().encode(COMPLETE_TURN_SSE)); /* never closes */ },
+  });
+  const calls: unknown[] = [];
+  const logCtx: RequestLogContext = { model: "claude-fable-5", provider: "anthropic-native" };
+  const tapped = tapAnthropicSseForLog(source, logCtx, (status, meta) => calls.push({ status, ...meta }), { stallMs: 30, maxBytes: 0 });
+  const text = await new Response(tapped).text();
+  expect(text).toBe(COMPLETE_TURN_SSE);
+  expect(calls).toEqual([{ status: 200, closeReason: "terminal" }]);
+  expect(logCtx.upstreamError).toBeUndefined();
+});
+
+test("bytes past the cap after message_stop do not turn a finished turn into a failure", async () => {
+  let sent = false;
+  const source = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (!sent) { sent = true; controller.enqueue(new TextEncoder().encode(COMPLETE_TURN_SSE)); return; }
+      controller.enqueue(new TextEncoder().encode(": keepalive padding ".repeat(64)));
+    },
+  });
+  const calls: unknown[] = [];
+  const logCtx: RequestLogContext = { model: "claude-fable-5", provider: "anthropic-native" };
+  const cap = new TextEncoder().encode(COMPLETE_TURN_SSE).byteLength + 16;
+  const tapped = tapAnthropicSseForLog(source, logCtx, (status, meta) => calls.push({ status, ...meta }), { stallMs: 0, maxBytes: cap });
+  const text = await new Response(tapped).text();
+  expect(text).toStartWith(COMPLETE_TURN_SSE);
+  expect(text).not.toContain("event: error");
+  expect(calls).toEqual([{ status: 200, closeReason: "terminal" }]);
+});
+
+// SSE lines may end in CRLF, LF or CR. The tap forwards bytes untouched but must still see the frames.
+function tapWithChunks(chunks: string[], guard: { stallMs: number; maxBytes: number }) {
+  let index = 0;
+  const source = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (index < chunks.length) controller.enqueue(new TextEncoder().encode(chunks[index++]!));
+      // then silence (stall) or more bytes, per the test
+    },
+  });
+  const calls: unknown[] = [];
+  const logCtx: RequestLogContext = { model: "claude-fable-5", provider: "anthropic-native" };
+  const tapped = tapAnthropicSseForLog(source, logCtx, (status, meta) => calls.push({ status, ...meta }), guard);
+  return { tapped, calls, logCtx };
+}
+
+for (const [label, eol] of [["CRLF", "\r\n"], ["CR", "\r"]] as const) {
+  test(`a ${label}-delimited turn that then stalls is finished, and its usage is read`, async () => {
+    const turn = COMPLETE_TURN_SSE.replace(/\n/g, eol);
+    const { tapped, calls, logCtx } = tapWithChunks([turn], { stallMs: 30, maxBytes: 0 });
+    const text = await new Response(tapped).text();
+    expect(text).toBe(turn);
+    expect(calls).toEqual([{ status: 200, closeReason: "terminal" }]);
+    expect(logCtx.usage).toEqual(expect.objectContaining({ inputTokens: 12, outputTokens: 5 }));
+  });
+}
+
+test("a CRLF delimiter split across chunks is one delimiter, not a frame boundary", async () => {
+  const turn = COMPLETE_TURN_SSE.replace(/\n/g, "\r\n");
+  // Cut every frame between its CR and LF so each chunk ends in a lone CR.
+  const chunks = turn.split("\r\n").map((part, i, all) => (i < all.length - 1 ? `${part}\r` : part)).map((part, i) => (i === 0 ? part : `\n${part}`));
+  expect(chunks.join("")).toBe(turn);
+  const { tapped, calls, logCtx } = tapWithChunks(chunks, { stallMs: 30, maxBytes: 0 });
+  await new Response(tapped).text();
+  expect(calls).toEqual([{ status: 200, closeReason: "terminal" }]);
+  expect(logCtx.usage).toEqual(expect.objectContaining({ inputTokens: 12, outputTokens: 5 }));
+});
+
+test("a CRLF turn followed by bytes past the cap is finished, not a failure", async () => {
+  const turn = COMPLETE_TURN_SSE.replace(/\n/g, "\r\n");
+  const cap = new TextEncoder().encode(turn).byteLength + 16;
+  const { tapped, calls } = tapWithChunks([turn, ": padding ".repeat(64)], { stallMs: 0, maxBytes: cap });
+  const text = await new Response(tapped).text();
+  expect(text).not.toContain("event: error");
+  expect(calls).toEqual([{ status: 200, closeReason: "terminal" }]);
+});
+
+
+test.each(["missing-credential", "disabled", "provider-alias", "model-map"])("native force alias keeps %s boundary on both endpoints", async scenario => {
+  const captured: Captured[] = [];
+  const upstream = mockAnthropicUpstream(captured);
+  const extra = scenario === "disabled" ? { nativePassthrough: false }
+    : scenario === "model-map" ? { modelMap: { "claude-sonnet-5": "mock/test-model" } } : {};
+  saveConfig(cfg(upstream.url.toString().replace(/\/$/, ""), extra));
+  const server = startServer(0);
+  try {
+    for (const path of ["/v1/messages", "/v1/messages/count_tokens"]) {
+      const response = await fetch(new URL(path, server.url), {
+        method: "POST",
+        headers: scenario === "missing-credential" ? { "content-type": "application/json" } : OAUTH_HEADERS,
+        body: JSON.stringify({ ...claudeBody(), stream: false,
+          model: scenario === "provider-alias" ? "ocx-claude-anthropic--claude-sonnet-5" : "ocx-claude-native--claude-sonnet-5",
+          system: "<!-- ocx-route: ocx-claude-mock--test-model -->" }),
+      });
+      await response.text();
+    }
+    expect(captured).toHaveLength(0);
+  } finally {
+    await server.stop(true);
+    upstream.stop(true);
   }
 });

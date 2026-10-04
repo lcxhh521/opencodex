@@ -38,7 +38,27 @@ import { isInjectionDebugEnabled } from "../../lib/debug-settings";
 import { injectionDebugLog } from "../../lib/injection-debug-log";
 import { recordAttemptRequestedEffort } from "../request-log";
 import type { ResolvedFastPolicy } from "../../providers/fastwire";
-import { applyXaiOauthFastModel } from "../../providers/xai-fast-model";
+import { applyDroidResponsesReasoningDefault } from "../droid-reasoning-default";
+import { applyXaiOauthFastModel, xaiOauthFastModelForDecision } from "../../providers/xai-fast-model";
+
+/** Preview the billed xAI lane without mutating request state or resolving credentials. */
+export function previewXaiOauthWireModel(
+  parsed: { options: Pick<OcxParsedRequest["options"], "serviceTier"> },
+  route: RouteResult,
+  config: OcxConfig,
+  inboundWire: InboundWire,
+): string {
+  if (route.providerName !== "xai" || route.provider.authMode !== "oauth") return route.modelId;
+  const provider = resolveWireProtocolOverride(
+    route.providerName, route.modelId, route.provider, inboundWire, route.staticPolicy,
+  );
+  const policy = fastPolicyForModel(
+    provider, route.modelId, route.providerName, inboundWire, config.providers[route.providerName],
+  );
+  return xaiOauthFastModelForDecision(
+    { ...route, provider }, decideTier(policy, config.fastMode, parsed.options.serviceTier),
+  ) ?? route.modelId;
+}
 
 export const MAX_FAST_WIRE_CAPABILITY_WARNINGS = 256;
 
@@ -121,9 +141,15 @@ export async function applyFinalRouteRequestNormalization(args: {
   inboundWire: InboundWire;
   inboundTransport?: "websocket";
   claudeGoAffinity?: HandleResponsesOptions["claudeGoAffinity"];
+  droidDefaultEffort?: HandleResponsesOptions["droidDefaultEffort"];
 }): Promise<void> {
   const { parsed, route, config, req, logCtx, inboundWire, inboundTransport } = args;
   const effortSelector = prepareEffortNormalization(parsed, route);
+  if (applyDroidResponsesReasoningDefault(
+    parsed._rawBody,
+    args.droidDefaultEffort,
+    { provider: route.provider, modelId: route.modelId },
+  )) parsed.options.reasoning = args.droidDefaultEffort;
 
   // Only Anthropic message routes retain the Codex-facing selector. Other providers must keep
   // their existing response.model contract even when their public and wire model ids differ.
@@ -186,6 +212,7 @@ export async function applyFinalRouteRequestNormalization(args: {
   logCtx.provider = route.providerName;
   logCtx.providerAdapter = route.provider.adapter;
   logCtx.routeDecision = route.routeDecision;
+  logCtx.policyEligibility = route.policyEligibility;
   if (route.routeReason === "model-alias" || route.modelId !== responseModelId && responseModelId.includes("/")) logCtx.requestedAlias = responseModelId;
 
   if (responsesUpstreamStreaming === false && route.provider.adapter === "openai-responses") {
