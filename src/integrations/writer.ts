@@ -48,7 +48,7 @@ import type { IntegrationState } from "./state";
 import { serializeDocument, UnserializableValueError } from "./serialize";
 import { ClientPathError } from "../clients/config-export";
 import { matchesOperationResult, newOpId, type JournalEntry } from "./journal";
-import { observeIntegration, type IntegrationWriteInput, type RefusalReason } from "./mutation-plan";
+import { observeIntegration, restoreStoreDirectoryRefusal, type IntegrationWriteInput, type RefusalReason } from "./mutation-plan";
 import { createIntegrationStateStore, type IntegrationStateStore } from "./store";
 import {
   patchYamlFragmentSource,
@@ -658,6 +658,10 @@ export function restoreIntegration(input: IntegrationRestoreInput): WriteOutcome
   if (rowTarget === null) {
     return refuse(clientId, "conflict", "conflict",
       `that operation was recorded for ${configPath}, which this client no longer writes; it now resolves to ${resolvedPath}`);
+  }
+  const directoryRefusal = restoreStoreDirectoryRefusal(input, configPath, io);
+  if (directoryRefusal !== null) {
+    return refuse(clientId, "unsafe", "unsafe", directoryRefusal);
   }
   /*
    * Preview refuses this in observeRestore. Refusing here too is what keeps an

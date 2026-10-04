@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { DSH_PROFILE_PROVIDER_PATH, type ExportModel } from "../../src/clients/config-export";
 import { INTEGRATION_CLIENTS } from "../../src/integrations/registry";
 import { defaultIntegrationIO } from "../../src/integrations/config-io";
+import { previewIntegration } from "../../src/integrations/mutation-plan";
 import { readIntegrationState, readPath } from "../../src/integrations/state";
 import { createIntegrationStateStore, type IntegrationStateStore } from "../../src/integrations/store";
 import {
@@ -350,6 +351,32 @@ describe("DSH Desktop profile patch", () => {
       if (code === "EEXIST") expect(readFileSync(profileLock, "utf8")).toBe("another writer\n");
     });
   }
+
+  test("restore refuses a removed profile directory in preview and mutation", async () => {
+    installDesktop(TEMPLATE);
+    const options = { lockSeams: realLocks() };
+    expect((await applyIntegrationCoordinated(lockedInput(), options)).ok).toBe(true);
+    const disabled = await disableIntegrationCoordinated(lockedInput(), options);
+    if (!disabled.ok || !disabled.opId) throw new Error("missing disable operation");
+    const profileDir = dirname(storePath());
+    removeTreeWithRetry(profileDir);
+    expect(existsSync(spec().detectDir(TEST_ENV, home))).toBe(true);
+    const operations = store.listOperations("dsh").length;
+    const request = { operation: "restore", opId: disabled.opId, confirmDrift: true } as const;
+    expect(previewIntegration(input(), request)).toMatchObject({
+      canApply: false, refusalReason: "unsafe", state: "unsafe",
+    });
+    expect(existsSync(profileDir)).toBe(false);
+    for (const revalidate of [undefined, async () => null]) {
+      const restored = await restoreIntegrationCoordinated({ ...input(), ...request }, { ...options, revalidate });
+      expect(restored).toMatchObject({ ok: false, reason: "unsafe", state: "unsafe" });
+      if (!restored.ok) expect(restored.message).toContain("store directory is missing; restore will not create it");
+      expect(existsSync(profileDir)).toBe(false);
+      expect(existsSync(`${settingsPath()}.lock`)).toBe(false);
+      expect(store.listOperations("dsh")).toHaveLength(operations);
+      expect(store.readRecords().dsh).toBeUndefined();
+    }
+  });
 
   test("disable and restore both hold the profile lock through their writes", async () => {
     installDesktop(TEMPLATE);

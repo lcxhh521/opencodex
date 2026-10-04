@@ -434,8 +434,9 @@ as the block map it holds and puts its `- ` and two-space indent back byte for b
 `[]` is the only flow form adopted (and what a disable that empties the list writes back). A row we
 created and pruned down to its selector field is our residue and is removed with it.
 `IntegrationTarget` carries its own `sourcePreservingYaml`, so the legacy file and the store are each
-patched along their own path, and a coordinated write also holds DSH's config-editor lock, the
-profile's `package.json.lock`, after `settings.yaml.lock` whenever the profile directory exists.
+patched along their own path. A coordinated write holds DSH's `settings.yaml.lock`, then the profile's
+`package.json.lock`, probing for the profile again after each revalidation await; refresh keeps the
+selected row in place, and restore refuses rather than recreate a missing profile directory unlocked.
 
 ## Verification
 
