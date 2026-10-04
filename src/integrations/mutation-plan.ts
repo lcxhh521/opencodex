@@ -14,6 +14,7 @@
  * preview route.
  */
 import { createHash } from "node:crypto";
+import { dirname } from "node:path";
 import { canonicalContribution, fingerprint, type OwnershipRecord } from "./ownership";
 import { ClientPathError, EXPORT_CLIENTS, type ExportModel, type ManagedContribution } from "../clients/config-export";
 import { OPENCODE_PROVIDER_ID } from "../clients/config-export/constants";
@@ -36,7 +37,7 @@ import {
 } from "./registry";
 import { declaredIntegrationTarget, resolveIntegrationTarget, type IntegrationTarget } from "./target";
 import { shouldInjectApiAuthHeader } from "../codex/inject";
-import { classifyIntegration, exportContextOf, readPath, type IntegrationState, type StateReason } from "./state";
+import { buildIntegrationContribution, classifyIntegration, exportContextOf, readPath, type IntegrationState, type StateReason } from "./state";
 import { inspectKiloCandidates } from "./kilo-candidates";
 import { InvalidSelectorError } from "./merge";
 import { createIntegrationStateStore, type IntegrationStateStore } from "./store";
@@ -531,6 +532,25 @@ function unboundPlan(
   });
 }
 
+/** A restore must not recreate a declared store without its client's lock. */
+export function restoreStoreDirectoryRefusal(
+  input: IntegrationWriteInput,
+  configPath: string,
+  io: IntegrationIO,
+): string | null {
+  const declared = INTEGRATION_CLIENTS[input.clientId].currentStore;
+  if (!declared?.lockFile) return null;
+  let storePath: string;
+  try {
+    storePath = declared.path(input.env, input.home);
+  } catch (error) {
+    if (error instanceof ClientPathError) return null;
+    throw error;
+  }
+  return configPath === storePath && io.statKind(dirname(storePath)) !== "dir"
+    ? "the client store directory is missing; restore will not create it" : null;
+}
+
 /**
  * Restore reads a different specification, so it gets its own observation.
  *
@@ -591,6 +611,10 @@ export function observeRestore(
     return {
       failed: observationFailure("conflict", "conflict", "that operation was recorded for a different location"),
     } as const;
+  }
+  const directoryRefusal = restoreStoreDirectoryRefusal(input, configPath, io);
+  if (directoryRefusal !== null) {
+    return { failed: observationFailure("unsafe", "unsafe", directoryRefusal) } as const;
   }
   /*
    * A legal historical path is not enough. Another candidate can already own
@@ -791,6 +815,8 @@ export interface IntegrationWriteInput {
   models: readonly ExportModel[];
   config: OcxConfig;
   port: number;
+  /** Explicit Droid-only defaults; omitted means retain matching owned rows. */
+  droidReasoningDefaults?: Record<string, string>;
   env?: NodeJS.ProcessEnv;
   home?: string;
   store?: IntegrationStateStore;
@@ -936,13 +962,13 @@ export function observeIntegration(
    * reads a different document there, and a write in the config file's shape
    * would be as unread as a write to the config file itself.
    */
-  const contribution = effective.buildContribution(exportContextOf(input));
   // A record proves ownership of the file it was written FOR. Matching only by
   // client id let a record for one home authorize a write to another whose
   // bytes happened to hash the same — which deleted a config we never touched.
   const record = stored && stored.clientId === clientId && stored.configPath === configPath
     ? stored
     : null;
+  const contribution = buildIntegrationContribution(input, effective, parsed, record);
   if (clientId === "droid" && input.models.length > 0 && contribution.fragments.length === 0 && !record) {
     return { failed: observationFailure("unsafe", "unsafe", "Factory Droid has no addressable models in the selected catalog") } as const;
   }

@@ -1,4 +1,6 @@
+import { projectAntigravitySelectedModels } from "../providers/antigravity-effort-families";
 import { join } from "node:path";
+import { sameCatalogHealPath } from "./catalog/heal-observation";
 
 import { getConfigDir, saveConfigPreservingClaudeCode, websocketsEnabled, withExpectedConfigGenerationSync } from "../config";
 import { reconcileSuccessfulModelDiscoveries } from "../providers/new-model-policy";
@@ -83,6 +85,8 @@ import {
 } from "./model-entitlements";
 import { resolveAdmittedCodexModelEntitlements } from "./model-entitlement-admission";
 import {
+  FOREIGN_CODEX_HOME_OWNER_MESSAGE,
+  UNKNOWN_CODEX_HOME_OWNER_MESSAGE,
   routedRemovalBackedByConfigFile,
   unbackedRoutedRemovalMessage,
   unconfiguredRoutedRemoval,
@@ -128,7 +132,7 @@ export type CodexCatalogCommitResult =
    * clears every routed row while config.json is unreadable. `foreign-owner`: this Codex home is
    * bound to another OPENCODEX_HOME (#6529).
    */
-  | { readonly kind: "refused"; readonly reason: "source-unreadable" | "source-ambiguous" | "target-unsafe" | "unbacked-routed-removal" | "foreign-owner" }
+  | { readonly kind: "refused"; readonly reason: "source-unreadable" | "source-ambiguous" | "target-unsafe" | "unbacked-routed-removal" | "foreign-owner" | "owner-unknown" }
   | { readonly kind: "failed"; readonly surface: "disk"; readonly writes: CatalogWriteReceipt };
 
 declare const catalogCandidateBrand: unique symbol;
@@ -152,7 +156,6 @@ interface CandidateState {
   readonly cache: PreparedCatalogFileWrite;
   readonly keyedBackup?: PreparedCatalogFileWrite;
   readonly legacyBackup?: PreparedCatalogFileWrite;
-  readonly changed: boolean;
   readonly notices: readonly CatalogNotice[];
   readonly modelEntitlements: CodexModelEntitlementSnapshot;
   readonly discoveryConfig?: OcxConfig;
@@ -362,7 +365,7 @@ function prepareCatalog(
   const selectedModelsByProvider = new Map<string, ReadonlySet<string>>(
     enabledProviders.flatMap(([name, provider]) => (
       Array.isArray(provider.selectedModels) && provider.selectedModels.length > 0
-        ? [[name, new Set(provider.selectedModels)] as const]
+        ? [[name, new Set(projectAntigravitySelectedModels(name, provider.selectedModels, routedModels))] as const]
         : []
     )),
   );
@@ -551,8 +554,6 @@ export async function gatherCodexCatalogCandidate(
       ...(pristineBytes ? { keyedBackup: { path: paths.keyedBackup, content: pristineBytes } } : {}),
       ...(pristineBytes && paths.legacyBackup
         ? { legacyBackup: { path: paths.legacyBackup, content: pristineBytes } } : {}),
-      changed: Buffer.from(activeBytes ?? []).toString("utf8") !== preparedCatalogBytes
-        || Buffer.from(cacheBytes ?? []).toString("utf8") !== preparedCacheBytes,
       notices: Object.freeze([...notices]),
       modelEntitlements,
       ...(discoveryChanged ? { discoveryConfig } : {}),
@@ -648,7 +649,7 @@ function fixedCommit(state: CandidateState, permit: Parameters<typeof replaceAct
     if (catalog.kind === "refused") return { kind: "refused", reason: "unbacked-routed-removal" };
     writes = { ...writes, catalog: catalog.kind };
     writes = { ...writes, cache: replaceCodexModelsCache(permit, state.home, state.cache).kind };
-    return { kind: "committed", changed: state.changed, writes };
+    return { kind: "committed", changed: writes.catalog === "written" || writes.cache === "written", writes };
   } catch {
     return { kind: "failed", surface: "disk", writes };
   }
@@ -657,6 +658,7 @@ function fixedCommit(state: CandidateState, permit: Parameters<typeof replaceAct
 export async function commitCodexCatalogCandidate(
   candidate: CodexCatalogCandidate,
   deadlineMs: number,
+  lifecycle: Readonly<{ beforeCommit?: () => boolean; expectedCatalogPath?: string }> = {},
 ): Promise<CommitAttempt> {
   const state = candidateStates.get(candidate as object);
   if (!state) return { kind: "refused", reason: "source-ambiguous" };
@@ -668,12 +670,16 @@ export async function commitCodexCatalogCandidate(
       const guarded = withExpectedConfigGenerationSync(state.generation, () => {
         const invalid = revalidateCandidate(state);
         if (invalid) return invalid;
+        if (lifecycle.expectedCatalogPath !== undefined && !sameCatalogHealPath(state.catalog.path, lifecycle.expectedCatalogPath)) {
+          return { kind: "stale", reason: "target-identity" } as const;
+        }
+        if (lifecycle.beforeCommit && lifecycle.beforeCommit() !== true) return { kind: "stale", reason: "process-local" } as const;
         // A refresh may empty a routed namespace only when config.json on disk agrees it is gone.
         // Read under K, so a config that fell back to defaults during a transient read failure,
         // or that belongs to another OPENCODEX_HOME, cannot publish a native-only catalog (#6529).
         if (state.routedRemoval !== null && !routedRemovalBackedByConfigFile(state.routedRemoval)) {
-          console.warn(`[opencodex] ${unbackedRoutedRemovalMessage(state.routedRemoval.namespaces.length)}`);
           auditRefusedCatalogReplacement(permit, state.home, state.catalog, "unbacked-routed-removal");
+          console.warn(`[opencodex] ${unbackedRoutedRemovalMessage(state.routedRemoval.namespaces.length)}`);
           return { kind: "refused", reason: "unbacked-routed-removal" } as const;
         }
         return fixedCommit(state, permit);
@@ -683,10 +689,12 @@ export async function commitCodexCatalogCandidate(
       return guarded.value;
     }, { intent: "refresh", writer: "convergence" });
     if (acquired.kind === "completed") return acquired.value;
-    if (acquired.reason === "foreign-owner") {
+    if (acquired.reason === "foreign-owner" || acquired.reason === "owner-unknown") {
       // Not retryable: another OPENCODEX_HOME owns this Codex home until it restores (#6529).
       state.consumed = true;
-      return { kind: "refused", reason: "foreign-owner" };
+      console.warn(`[opencodex] ${acquired.reason === "foreign-owner"
+        ? FOREIGN_CODEX_HOME_OWNER_MESSAGE : UNKNOWN_CODEX_HOME_OWNER_MESSAGE}`);
+      return { kind: "refused", reason: acquired.reason };
     }
     if (acquired.reason !== "busy" || Date.now() >= deadline) return { kind: "busy" };
     await Bun.sleep(Math.min(10, Math.max(1, deadline - Date.now())));
@@ -708,7 +716,7 @@ function projectCommit(result: CommitAttempt, notices: readonly CatalogNotice[])
 export async function convergeCodexCatalog(
   snapshot: CatalogAdmissionSnapshot,
   request: ConvergeRequest,
-  lifecycle: Readonly<{ onCommitBegin?: () => void }> = {},
+  lifecycle: Readonly<{ onCommitBegin?: () => void; beforeCommit?: () => boolean; expectedCatalogPath?: string }> = {},
 ): Promise<Readonly<{ changed: boolean; catalogRefresh: CatalogDisposition }>> {
   if (request.scope !== "catalog" || request.action !== "converge") {
     return {
@@ -720,7 +728,7 @@ export async function convergeCodexCatalog(
   if (gathered.kind === "disposition") return { changed: false, catalogRefresh: gathered.disposition };
   const state = candidateStates.get(gathered.candidate as object)!;
   lifecycle.onCommitBegin?.();
-  const committed = await commitCodexCatalogCandidate(gathered.candidate, request.deadlineMs);
+  const committed = await commitCodexCatalogCandidate(gathered.candidate, request.deadlineMs, lifecycle);
   if (committed.kind === "committed" && state.discoveryConfig) {
     const mutable = snapshot.config as OcxConfig;
     mutable.modelDiscovery = state.discoveryConfig.modelDiscovery;

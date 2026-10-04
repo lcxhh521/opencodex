@@ -62,6 +62,8 @@ export type OAuthCredentials = {
   email?: string;
   accountId?: string;
   source?: OAuthCredentialSource;
+  /** Private authenticated account proof; never projected into account summaries. */
+  anthropicIdentity?: { v: 1; accountUuid: string; bearerSha256: string };
   /** Google Antigravity (Cloud Code Assist) discovered project id; injected into the CCA envelope. */
   projectId?: string;
   /**
@@ -92,6 +94,13 @@ export interface ProviderAccount {
   paused?: boolean;
   /** Anthropic-only usage-switch override; absent inherits its pool default, zero disables it. */
   autoSwitchThresholdOverride?: number;
+  /**
+   * Why the account needs reauthentication. `verify_account` means the grant is
+   * alive but the provider blocks the account until the human verifies it
+   * (Antigravity 403 PERMISSION_DENIED) — a plain re-login without that
+   * verification will not help. Absent means an ordinary credential failure.
+   */
+  needsReauthReason?: "verify_account";
   addedAt?: number;
 }
 

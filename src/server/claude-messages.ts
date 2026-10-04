@@ -61,6 +61,7 @@ import { resolveWireProtocolOverride } from "./adapter-resolve";
 import type { OcxConfig } from "../types";
 import { readJsonRequestBody, resolveInboundBodyLimitBytes } from "./request-decompress";
 import { addFinalRequestLog, httpStatusForRequestLogTerminal, recordFirstOutput, type RequestLogContext } from "./request-log";
+import { recordGenerationEvent } from "./request-log-generation-window";
 import { createFinalRequestLog } from "./inference/final-log";
 import {
   conversationIdFromClaudeMetadata,
@@ -79,12 +80,13 @@ import { upstreamWireForAdapter } from "../protocols/contract";
 import { createProtocolEnvelope, type ProtocolEnvelope } from "../protocols/envelope";
 import { featuresFromMessagesBody, type ProtocolFeature } from "../protocols/features";
 import { credentialDomainFor, messagesBodyHasOpaqueState } from "../protocols/opaque-state";
-import { hasAnthropicFailoverQuorum } from "../oauth/anthropic-routing";
+import { hasAnthropicFailoverQuorum, anthropicSessionKeyFromParts } from "../oauth/anthropic-routing";
 import { checkRepresentable, unrepresentableMessage } from "../protocols/guard";
 import { requestPathForLane } from "../protocols/path";
 import { resolveApiSurfaceSettings, resolveProtocolSettings } from "../protocols/settings";
 import { markProtocolBlocked, markProtocolEntry } from "../protocols/trace";
 import { recordProtocolShadowPlan } from "../protocols/shadow-plan";
+import { captureAnthropicClientIdentity } from "../adapters/anthropic/client-identity";
 import { nativeMessagesDeclineReason, type NativeMessagesSelector } from "./messages-native-eligibility";
 import {
   isApiAuthRequired,
@@ -142,10 +144,10 @@ function decodeClaudeFastSelector(raw: string, cc?: OcxConfig["claudeCode"]): st
   return decodedBase === bare ? exact : `${decodedBase}--fast`;
 }
 
-/** Restore the reversible Fable picker alias before Anthropic passthrough checks. */
-function decodeFablePickerAlias(raw: string, cc?: OcxConfig["claudeCode"]): string {
+/** Restore reversible native Claude picker aliases before Anthropic passthrough checks. */
+function decodeNativeClaudePickerAlias(raw: string, cc?: OcxConfig["claudeCode"]): string {
   const decoded = resolveInboundModel(raw, cc);
-  if (!decoded.startsWith("claude-fable-")) return raw;
+  if (!decoded.startsWith("claude-")) return raw;
   // A picker value saved before the ocx-claude spelling keeps the native passthrough too.
   return claudeCodeNativeAlias(decoded) === raw || legacyAliasForNative(decoded) === raw ? decoded : raw;
 }
@@ -333,6 +335,7 @@ export function tapAnthropicSseForLog(
     let data: unknown;
     try { data = JSON.parse(dataLine); } catch { return; }
     if (!isRec(data)) return;
+    recordGenerationEvent(logCtx, data.type);
     if (data.type === "message_start" && isRec(data.message) && isRec(data.message.usage)) {
       usageAcc = { ...usageAcc, ...data.message.usage };
     } else if (data.type === "message_delta" && isRec(data.usage)) {
@@ -893,7 +896,7 @@ async function handleClaudeMessagesWithBudget(
       }
     }
     if (isRec(anthropicBody) && typeof anthropicBody.model === "string") {
-      anthropicBody.model = decodeFablePickerAlias(anthropicBody.model, cc);
+      anthropicBody.model = decodeNativeClaudePickerAlias(anthropicBody.model, cc);
     }
     if (isRec(anthropicBody) && typeof anthropicBody.model === "string") {
       requestedModel = anthropicBody.model;
@@ -1202,8 +1205,16 @@ async function handleClaudeMessagesWithBudget(
     return await handleNativeMessages({
       req, config, logCtx, ...(logIds ? { logIds } : {}),
       route: nativeMessagesRoute, body: nativeBody, requestedModel, translatorBudget, selector: nativeSelector,
-      // The one caller header the native lane is given; the builder allowlists it.
+      // Compatibility identity is an opaque request-local handle, separate from credentials.
+      clientIdentity: captureAnthropicClientIdentity(req.headers),
       callerAnthropicBeta: req.headers.get("anthropic-beta"),
+      sessionKey: anthropicSessionKeyFromParts({
+        sessionIdHeader: req.headers.get("session_id")?.trim() || req.headers.get("x-claude-code-session-id"),
+        threadIdHeader: req.headers.get("thread_id"),
+        clientThreadId: conversationIdFromClaudeMetadata(isRec(nativeBody.metadata) ? nativeBody.metadata : undefined),
+        promptCacheKey: typeof internalBody.prompt_cache_key === "string" ? internalBody.prompt_cache_key : null,
+        promptCacheKeyIsSharedCohort: cacheKeySource === "system",
+      }),
     });
   }
 
@@ -1311,10 +1322,12 @@ async function handleClaudeMessagesWithBudget(
     const replayRefusal = isReplayRefusalResponse(response);
     // Re-shape the OpenAI-style error envelope into the Anthropic one, preserving status.
     let message = `upstream error (${response.status})`;
+    let contextError = false;
     try {
       const text = await response.text();
       try {
-        const parsed = JSON.parse(text) as { error?: { message?: string; type?: string } | string; message?: string };
+        const parsed = JSON.parse(text) as { error?: { message?: string; type?: string; code?: unknown } | string; message?: string };
+        contextError = typeof parsed?.error === "object" && parsed.error?.code === "context_length_exceeded";
         const nested = typeof parsed?.error === "object" && parsed.error ? parsed.error.message : undefined;
         const flat = typeof parsed?.error === "string" ? parsed.error : parsed?.message;
         message = nested || flat || (text ? `upstream error (${response.status}): ${text.slice(0, 400)}` : message);
@@ -1323,7 +1336,7 @@ async function handleClaudeMessagesWithBudget(
       }
     } catch { /* keep fallback message */ }
     const upstreamRetryAfter = response.headers.get("retry-after");
-    const retryAfter = replayRefusal
+    const retryAfter = replayRefusal || contextError
       ? undefined
       : resolveClientRetryAfter({
           status: response.status,
@@ -1343,10 +1356,10 @@ async function handleClaudeMessagesWithBudget(
     const nativeMainFence = response.status === 503
       && upstreamRetryAfter?.trim() === "1"
       && message === CODEX_MAIN_PROFILE_MAINTENANCE_MESSAGE;
-    const transient = !replayRefusal && !nativeMainFence && isTransientUpstreamStatus(response.status);
+    const transient = !replayRefusal && !nativeMainFence && !contextError && isTransientUpstreamStatus(response.status);
     const outStatus = replayRefusal
       ? REPLAY_REFUSED_STATUS
-      : nativeMainFence ? 503 : transient ? 529 : response.status;
+      : nativeMainFence ? 503 : contextError ? 400 : transient ? 529 : response.status;
     const outHeaders = new Headers({ "Content-Type": "application/json" });
     if (retryAfter) outHeaders.set("Retry-After", retryAfter);
     else if (transient) outHeaders.set("Retry-After", "2");
@@ -1355,7 +1368,7 @@ async function handleClaudeMessagesWithBudget(
       outStatus,
       message,
       undefined,
-      replayRefusal ? UPSTREAM_RESET_REPLAY_REFUSED_CODE : undefined,
+      replayRefusal ? UPSTREAM_RESET_REPLAY_REFUSED_CODE : contextError ? "context_length_exceeded" : undefined,
     )), {
       status: outStatus,
       headers: outHeaders,
@@ -1406,7 +1419,7 @@ async function handleClaudeMessagesWithBudget(
       );
     }
     return new Response(JSON.stringify(message), {
-      status: isError ? 502 : 200,
+      status: isError ? (translatedError?.code === "context_length_exceeded" ? 400 : 502) : 200,
       headers: { "Content-Type": "application/json" },
     });
   }
@@ -1428,6 +1441,9 @@ async function handleClaudeMessagesWithBudget(
         "request_too_large",
         "translation_buffer_limit",
       );
+    }
+    if (error?.code === "context_length_exceeded") {
+      return anthropicErrorResponse(400, error.message ?? "upstream context limit exceeded", "invalid_request_error", error.code);
     }
     return anthropicErrorResponse(502, error?.message ?? "upstream request failed", "api_error");
   }
@@ -1657,7 +1673,7 @@ export async function handleClaudeCountTokens(
       model = stripOneMillionMarker(countRoute);
       raw.model = model;
     }
-    model = decodeFablePickerAlias(model, cc);
+    model = decodeNativeClaudePickerAlias(model, cc);
     raw.model = model;
     // Fast-only: count_tokens never parsed an effort row, so it must not start. It returns a
     // token estimate and sends no tier, so only the IDENTITY is corrected - without this the
@@ -1676,9 +1692,9 @@ export async function handleClaudeCountTokens(
     // A thread delta would undercount; refuse it exactly as the translated Messages path does.
     if (carriesMessageThread(raw)) return messageThreadUnsupportedResponse();
     // PF-08: an eligible managed-key route counts the body the native lane would send.
-    const nativeCountBody = resolveProtocolSettings(config).rollout.managedMessagesNative
-      ? (await import("./messages-native")).nativeMessagesCountBody(config, cc, raw, { fastRow: countFastRow !== null })
-      : undefined;
+    const nativeCountBody = (await import("./messages-native")).nativeMessagesCountBody(
+      config, cc, raw, { fastRow: countFastRow !== null }, captureAnthropicClientIdentity(req.headers),
+    );
     // A count answers for the prompt a real turn from this model would forward, so it projects
     // the same unserialized content that turn's `message_start` floor does. Counting the raw
     // caller body instead reported replayed thinking this route never sends (#4857 family).

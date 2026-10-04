@@ -37,6 +37,7 @@ import {
   resolveEffectiveUserIdentity,
 } from "../../src/codex/user-identity";
 import { saveConfig } from "../../src/config";
+import { readConfigAdmissionSnapshot } from "../../src/config/diagnostics";
 import { handleManagementAPI } from "../../src/server/management-api";
 import type { OcxConfig } from "../../src/types";
 import { ManagementRequest } from "../helpers/management-auth";
@@ -155,6 +156,17 @@ test("generation drift rejects before every catalog target write", async () => {
   expect(manifest(codexHome)).toEqual(before);
 });
 
+test("a fresh identical candidate reports unchanged receipts and preserves artifacts", async () => {
+  expect((await commitCodexCatalogCandidate(await candidate(), 1_000)).kind).toBe("committed");
+  const gathered = await candidate();
+  const before = manifest(codexHome);
+  expect(await commitCodexCatalogCandidate(gathered, 1_000)).toEqual({
+    kind: "committed", changed: false,
+    writes: { keyedBackup: "preserved", legacyBackup: "preserved", catalog: "unchanged", cache: "unchanged" },
+  });
+  expect(manifest(codexHome)).toEqual(before);
+});
+
 test("home-selection drift rejects before every catalog target write", async () => {
   const gathered = await candidate();
   const other = join(root, "other-codex");
@@ -261,6 +273,70 @@ test("a commit that empties a provider while config.json is missing is refused (
     .toEqual({ kind: "refused", reason: "unbacked-routed-removal" });
   expect(readFileSync(path, "utf8")).toBe(catalogWithRoutedArk());
 });
+
+for (const state of ["enabled", "missing", "unreadable", "salvaged"] as const) {
+  test(`a refused ${state} config leaves seeded catalog and cache bytes unchanged (#6529)`, async () => {
+    const path = join(codexHome, "opencodex-catalog.json");
+    const cachePath = join(codexHome, "models_cache.json");
+    const cacheBytes = `${JSON.stringify({
+      fetched_at: "2026-01-01T00:00:00Z",
+      client_version: "fixture-cache-version",
+      models: JSON.parse(catalogWithRoutedArk()).models,
+    }, null, 2)}\n`;
+    writeFileSync(path, catalogWithRoutedArk());
+    writeFileSync(cachePath, cacheBytes);
+    const configPath = join(opencodexHome, "config.json");
+    if (state === "enabled") saveConfig({ ...config(), providers: {
+      ark: { adapter: "openai-chat", baseUrl: "https://api.example.test/v1", liveModels: false, models: ["glm-5.3"] },
+    } });
+    else {
+      rmSync(configPath);
+      if (state === "unreadable") mkdirSync(configPath);
+      if (state === "salvaged") writeFileSync(configPath, '{"providers":');
+    }
+    const gathered = await candidate();
+    expect(await commitCodexCatalogCandidate(gathered, 1_000))
+      .toEqual({ kind: "refused", reason: "unbacked-routed-removal" });
+    expect(readFileSync(path, "utf8")).toBe(catalogWithRoutedArk());
+    expect(readFileSync(cachePath, "utf8")).toBe(cacheBytes);
+  });
+}
+
+for (const slug of ["fast-chat", "vendor/flash"]) {
+  for (const state of ["saved", "missing", "deleted"] as const) {
+    test(`combo alias ${slug} convergence ${state} config protects exact catalog/cache bytes`, async () => {
+      const path = join(codexHome, "opencodex-catalog.json");
+      const cachePath = join(codexHome, "models_cache.json");
+      const parsed = JSON.parse(sourceCatalog());
+      parsed.models.push({ ...parsed.models[0], slug, owned_by: "combo",
+        description: "Routed via opencodex → combo (combo)." });
+      const catalogBytes = `${JSON.stringify(parsed, null, 2)}\n`;
+      const cacheBytes = `${JSON.stringify({ fetched_at: "2026-01-01T00:00:00Z",
+        client_version: "fixture-cache-version", models: parsed.models }, null, 2)}\n`;
+      writeFileSync(path, catalogBytes);
+      writeFileSync(cachePath, cacheBytes);
+      if (state === "saved") {
+        saveConfig({ ...config(), defaultProvider: "ark", providers: { ark: {
+          adapter: "openai-chat", baseUrl: "https://api.example.test/v1", liveModels: false, models: ["a"],
+        } }, combos: { fast: { alias: slug, targets: [{ provider: "ark", model: "a" }] } } });
+        expect(readConfigAdmissionSnapshot().diagnostics.source).toBe("file");
+      }
+      if (state === "missing") rmSync(join(opencodexHome, "config.json"));
+      const result = await commitCodexCatalogCandidate(await candidate(), 1_000);
+      if (state === "deleted") {
+        expect(result.kind).toBe("committed");
+        for (const target of [path, cachePath]) {
+          expect(JSON.parse(readFileSync(target, "utf8")).models.some((row: { slug: string }) => row.slug === slug))
+            .toBe(false);
+        }
+      } else {
+        expect(result).toEqual({ kind: "refused", reason: "unbacked-routed-removal" });
+        expect(readFileSync(path, "utf8")).toBe(catalogBytes);
+        expect(readFileSync(cachePath, "utf8")).toBe(cacheBytes);
+      }
+    });
+  }
+}
 
 test("a commit drops a provider's routed rows once config.json agrees it is gone (#6529)", async () => {
   const path = join(codexHome, "opencodex-catalog.json");
@@ -421,12 +497,13 @@ test("a failure cause never carries message text, paths or identifiers (#1784)",
   expect(body).not.toContain("failed writing");
 });
 
-test("the route inventory contains exactly the specified 8 + 15 + 2 + 2 convergence paths", () => {
+test("the route inventory retains every convergence path after separating subagent routes", () => {
   const counts = Object.fromEntries([
     ["provider-routes.ts", 8],
     ["model-routes.ts", 15],
     ["combo-routes.ts", 2],
-    ["agent-settings-routes.ts", 2],
+    ["agent-settings-routes.ts", 1],
+    ["subagent-model-routes.ts", 1],
   ].map(([file, expected]) => {
     const source = readFileSync(repoPath("src", "server", "management", file as string), "utf8");
     const direct = source.match(/await convergeCodexCatalog\(\)/g)?.length ?? 0;
@@ -445,7 +522,8 @@ test("the route inventory contains exactly the specified 8 + 15 + 2 + 2 converge
     "provider-routes.ts": 8,
     "model-routes.ts": 15,
     "combo-routes.ts": 2,
-    "agent-settings-routes.ts": 2,
+    "agent-settings-routes.ts": 1,
+    "subagent-model-routes.ts": 1,
   });
 });
 

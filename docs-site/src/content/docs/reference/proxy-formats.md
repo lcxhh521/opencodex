@@ -170,6 +170,24 @@ for final text and `session.updated` with `session.status="closed"`.
 This is the native opencodex data-plane shape. The request body must be a JSON object with a
 non-empty `model`. `input` may be a string or an array of Responses items.
 
+### Caller conversation header
+
+For HTTP `POST /v1/responses` and `POST /v1/messages`, a client can send a stable
+`x-session-id` for each conversation. When no `session_id`, `session-id`, or `thread-id`
+header is present, opencodex promotes the marker to `session_id`. Managed Grok identity
+on Responses takes precedence too. Even an empty explicit header suppresses promotion.
+
+Use 1–128 ASCII letters, digits, `.`, `_`, `:`, or `-`, starting with a letter or digit.
+Surrounding whitespace is trimmed; missing or invalid markers are ignored. Loopback
+admission preserves the marker. Authenticated admission derives an opaque identifier
+from the marker and the admitted credential principal, so different credentials do not
+share a newly promoted identifier. Rotation changes this identifier; authenticated
+requests without a trusted principal are left unchanged.
+
+Use distinct markers for distinct conversations. This preserves conversation continuity
+for downstream consumers, but does not guarantee an upstream cache hit or measured savings.
+Chat Completions, WebSocket frames, compact, and count_tokens do not use this promotion.
+
 ### Accepted request fields
 
 | Area | Accepted shape |
@@ -247,6 +265,10 @@ If native passthrough rewriting fails, including when it exceeds the translation
 buffer budget, the relay reports the failure without waiting for upstream inspection
 to finish. It cancels the upstream work and emits `response.failed` followed by
 `data: [DONE]`; a budget overflow uses the `translation_buffer_limit` error code.
+
+Responses SSE accepts CR, LF and CRLF line endings, including mixed endings and CRLF split across
+network chunks. Tool validation, Chat translation, terminal inspection and WebSocket projection
+use the same event boundaries. A CR-only completion does not wait for the upstream connection to close.
 
 Client-facing Responses SSE frames are limited to 4 MiB per frame, measured in raw bytes before the
 SSE block delimiter. On HTTP, an unterminated upstream frame that exceeds the limit fails closed

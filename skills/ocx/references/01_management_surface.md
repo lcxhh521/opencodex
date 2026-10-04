@@ -532,13 +532,13 @@ Each of these writes. Check the flags column before running one unattended.
 
 ### `ocx chatgpt`
 
-ChatGPT desktop send-unblock intercept and experimental app-server shim (macOS only).
+Experimental ChatGPT shim/intercept: launch, restore, status and watcher management (macOS only).
 
 Drives no management route.
 
 JSON mode: `none`.
 
-- Default off; launch needs chatgptDesktop.unblockSend and/or appServerShim. Restore removes the generated shim launcher.
+- Default off; launch requires chatgptDesktop.appServerShim or unblockSend. Intercept needs the running proxy and manual CA trust. Watcher manages intercept launches only; restore removes the shim launcher.
 
 ### `ocx link issue`
 
@@ -1062,6 +1062,20 @@ JSON mode: `payload`.
 
 - `status` reads the route; `set` writes only submitted fields. Enabling first-party requires a running Claude intercept.
 
+### `ocx claude intercept start`
+
+Start the local Claude interception pair on demand.
+
+| Method | Route |
+|---|---|
+| POST | `/api/claude-intercept/start` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--json` | boolean | Emit the management response as JSON. |
+
+JSON mode: `payload`.
+
 ### `ocx claude desktop bind`
 
 First-party: serve a Claude Desktop Code tab picker model with an opencodex route.
@@ -1194,6 +1208,23 @@ JSON mode: `none`.
 
 - The Aside refresh uses the live server; other catalog synchronization also performs local work.
 
+### `ocx agent subagents force`
+
+Force Claude Code subagents onto one exposed model at the next routed launch; - clears.
+
+| Method | Route |
+|---|---|
+| GET | `/api/subagent-models` |
+| PUT | `/api/subagent-models` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--json` | boolean | Emit the saved force setting. |
+
+JSON mode: `payload`.
+
+- Requires Claude Code 2.1.257+. Plain claude, forks, inherit skills, the main model and small-fast sidecars are unaffected.
+
 ### `ocx agent request-user-input`
 
 Show or set whether default mode may ask the operator a question mid-task.
@@ -1301,6 +1332,6 @@ JSON mode: `payload`.
 
 ## Counts
 
-- declared capabilities: 72
-- of those, state-changing: 41
+- declared capabilities: 74
+- of those, state-changing: 43
 - head-resolved invocations: 2

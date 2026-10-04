@@ -97,10 +97,10 @@ export const HEAD_CAPABILITIES: readonly HeadCapability[] = [
 export const CAPABILITIES: readonly Capability[] = [
   {
     command: ["chatgpt"],
-    summary: "ChatGPT desktop send-unblock intercept and experimental app-server shim (macOS only).",
+    summary: "Experimental ChatGPT shim/intercept: launch, restore, status and watcher management (macOS only).",
     routes: [], flags: [], mutates: true, json: "none",
-    bannerLines: ["ocx chatgpt <sub>           ChatGPT desktop send-unblock and app-server shim (status|install-watcher|uninstall-watcher|launch|restore)"],
-    details: ["Default off; launch needs chatgptDesktop.unblockSend and/or appServerShim. Restore removes the generated shim launcher."],
+    bannerLines: ["ocx chatgpt <sub>          Experimental shim/intercept: launch|restore|status|install-watcher|uninstall-watcher (macOS)"],
+    details: ["Default off; launch requires chatgptDesktop.appServerShim or unblockSend. Intercept needs the running proxy and manual CA trust. Watcher manages intercept launches only; restore removes the shim launcher."],
   },
   {
     command: ["link", "port"],
@@ -916,6 +916,14 @@ export const CAPABILITIES: readonly Capability[] = [
     details: ["`status` reads the route; `set` writes only submitted fields. Enabling first-party requires a running Claude intercept."],
   },
   {
+    command: ["claude", "intercept", "start"],
+    summary: "Start the local Claude interception pair on demand.",
+    routes: [{ method: "POST", path: "/api/claude-intercept/start" }],
+    flags: [{ name: "--json", value: "boolean", summary: "Emit the management response as JSON." }],
+    mutates: true,
+    json: "payload",
+  },
+  {
     command: ["claude", "desktop", "status"],
     summary: "Applied-vs-desired Claude Desktop state, including staleness, drift, and health.",
     routes: [{ method: "GET", path: "/api/claude-desktop/status" }],
@@ -1054,6 +1062,15 @@ export const CAPABILITIES: readonly Capability[] = [
     mutates: true,
     json: "none",
     details: ["The Aside refresh uses the live server; other catalog synchronization also performs local work."],
+  },
+  {
+    command: ["agent", "subagents", "force"],
+    summary: "Force Claude Code subagents onto one exposed model at the next routed launch; - clears.",
+    routes: [{ method: "GET", path: "/api/subagent-models" }, { method: "PUT", path: "/api/subagent-models" }],
+    flags: [{ name: "--json", value: "boolean", summary: "Emit the saved force setting." }],
+    mutates: true,
+    json: "payload",
+    details: ["Requires Claude Code 2.1.257+. Plain claude, forks, inherit skills, the main model and small-fast sidecars are unaffected."],
   },
   {
     command: ["agent", "request-user-input"],

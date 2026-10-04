@@ -2,6 +2,7 @@ import { readUsageResponseJson, usageSummary30dResourceKey } from "../usage-summ
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ProviderWorkspaceShell, { type AddProviderIntent } from "../components/provider-workspace/ProviderWorkspaceShell";
 import ProviderDetails from "../components/provider-workspace/ProviderDetails";
+import type { ProviderAuthHandlers } from "../components/provider-workspace/types";
 import { matchingWorkspacePreset, type CatalogPreset } from "../components/provider-catalog/provider-presets";
 import { isAccountProvider, type WorkspaceProvider } from "../provider-workspace/catalog";
 import { ensureOpenAiProvider, openAiAccountProviderState, OpenAiEnableError } from "../provider-payload";
@@ -578,6 +579,25 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     revealProviderAccounts(provider);
   };
 
+  const authHandlers: ProviderAuthHandlers = {
+    onLogin: requestLoginOAuth,
+    onNativeLoginSettled,
+    onCancelLogin: cancelLoginOAuth,
+    onLogout: logoutOAuth,
+    onReauth: (provider, accountId) => requestLoginOAuth(provider, true, accountId),
+    onSwitchAccount: switchAccount,
+    onPauseAccount: pauseAccount,
+    onAccountPoolThreshold: setAccountPoolThreshold,
+    onAccountThreshold: setAccountThreshold,
+    onRemoveAccount: removeAccount,
+    onRetryAccounts: async provider => { await fetchAccountSets([provider]); },
+    onAddApiKey: addApiKeyValue,
+    onSwitchApiKey: switchApiKey,
+    onRemoveApiKey: removeApiKey,
+    onEditAlias: editCredentialAlias,
+    onRefreshQuota: refreshProviderQuota,
+  };
+
   return (
     <>
       <div className="page-head">
@@ -653,24 +673,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
             pausingAccountId={pausingAccount?.provider === item.name ? pausingAccount.accountId : null}
             busyProvider={busy}
             loginHint={loginInfo}
-            authHandlers={{
-              onLogin: requestLoginOAuth,
-              onNativeLoginSettled,
-              onCancelLogin: cancelLoginOAuth,
-              onLogout: logoutOAuth,
-              onReauth: (provider, accountId) => requestLoginOAuth(provider, true, accountId),
-              onSwitchAccount: switchAccount,
-              onPauseAccount: pauseAccount,
-              onAccountPoolThreshold: setAccountPoolThreshold,
-              onAccountThreshold: setAccountThreshold,
-              onRemoveAccount: removeAccount,
-              onRetryAccounts: async provider => { await fetchAccountSets([provider]); },
-              onAddApiKey: addApiKeyValue,
-              onSwitchApiKey: switchApiKey,
-              onRemoveApiKey: removeApiKey,
-              onEditAlias: editCredentialAlias,
-              onRefreshQuota: refreshProviderQuota,
-            }}
+            authHandlers={authHandlers}
             onRefreshQuota={() => refreshProviderQuota(item.name)}
             isDefault={item.name === config.defaultProvider}
             onRemoveProvider={removeProvider}

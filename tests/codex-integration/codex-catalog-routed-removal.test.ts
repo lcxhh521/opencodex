@@ -77,6 +77,27 @@ describe("routed namespaces a refresh would empty (#6529)", () => {
     const withCombos = config({ combos: { other: { models: ["ark/a"] } } as unknown as OcxConfig["combos"] });
     expect(unconfiguredRoutedRemoval({ models: [alias] }, { models: [] }, withCombos)).toBeNull();
   });
+
+  for (const slug of ["fast-chat", "vendor/flash"]) {
+    test(`combo-owned alias ${slug} uses combo backing before generic slug classification`, () => {
+      const alias = { ...routed(slug), owned_by: "combo" };
+      const active = { models: [alias] };
+      const removal = unconfiguredRoutedRemoval(active, { models: [] }, config());
+      expect(removal).toEqual({ namespaces: ["combo"] });
+      const combos = { fast: { alias: slug, targets: [{ provider: "ark", model: "a" }] } };
+      expect(unconfiguredRoutedRemoval(active, { models: [] }, config({ combos }))).toBeNull();
+      expect(routedRemovalBackedByConfigFile(removal!, onDisk({ combos }))).toBe(false);
+      expect(routedRemovalBackedByConfigFile(removal!, onDisk({ combos: {} }))).toBe(true);
+      expect(unconfiguredRoutedRemoval({ models: [{ ...foreign(slug), owned_by: "combo" }] },
+        { models: [] }, config())).toBeNull();
+    });
+  }
+
+  test("trusted account-native classification wins even over combo ownership and authored description", () => {
+    const account = { ...routed("desktop/gpt-5.5"), owned_by: "combo",
+      opencodex_catalog_kind: CODEX_ACCOUNT_BOUND_CATALOG_KIND };
+    expect(unconfiguredRoutedRemoval({ models: [account] }, { models: [] }, config())).toBeNull();
+  });
 });
 
 describe("config.json backing for a routed removal (#6529)", () => {

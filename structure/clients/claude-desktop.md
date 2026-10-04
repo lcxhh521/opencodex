@@ -80,6 +80,8 @@ only while CLI first-party intent is off. An owned env observed with
 `claudeCode.cliFirstParty === true` is not Desktop-mode evidence, even when the
 intercept is disabled; foreign proxy settings do not count.
 `resolveClaudeDesktopApplyMode` preserves the resolved mode.
+First-party apply refuses `port_mismatch` before writing settings when the configured proxy port differs from the bound pair. Picker listener failures show their reason instead of offering a main-pair start that cannot repair them.
+
 An apply for a first-party install with `claudeCode.intercept.enabled: false` is refused with
 `intercept_disabled` rather than switched to gateway. New installs apply gateway.
 `src/claude/desktop-risk.ts` owns the account-suspension warning: first-party sends subscription
@@ -152,7 +154,7 @@ row; the only lever is the picker's Anthropic id on each request. A binding maps
 bindings overlaid (binding wins per key, `native/` targets normalized to the bare slug, global values
 left verbatim). The live config object is never copied or persisted with the merged map. Every other
 resolution rule is unchanged, so a bound id is translated rather than natively passed through, dated
-ids reach undated keys, and an `ocx-route` directive still wins. `ocx claude` sessions and the public
+ids reach undated keys, and an `ocx-route` directive still wins over a bare model id; an explicit gateway selector wins over that legacy fallback. `ocx claude` sessions and the public
 Messages listener never see bindings.
 
 `PUT /api/claude-desktop/first-party-bindings` (`{ set?, remove? }`) validates ids and routes against
@@ -196,13 +198,15 @@ The User-Agent is a routing hint, not a trust boundary: a client that fakes it r
 any local process already reaches (the `api.anthropic.com` intercept is on the Claude Code proxy
 too; the `claude.ai` relay verifies upstream and adds no credential) and breaks only its own TLS,
 because each terminator presents a certificate only its intended client trusts. `claude.ai:443` is
-terminated by a `node:https` HTTP/1.1 relay (`picker-listener.ts`) only while the runtime's cached
+terminated by a `node:https` HTTP/1.1 relay (`picker-listener.ts`) with a bounded 64 KiB
+incoming-request and ordinary upstream-response header allowance for browser session cookies,
+only while the runtime's cached
 decision is armed: macOS, persisted resolved Desktop mode first-party, Desktop intent on,
 `claudeCode.intercept.picker !== false`, no disarm latch, listener up, and the current picker CA
 trusted in the login keychain (`picker-trust.ts`). The picker CA (`picker-ca.ts`) carries critical
 name constraints permitting only `claude.ai` and excluding every IPv4 and IPv6 address. Its signing
 key exists only in the server process; only public certificates are written under
-`<OPENCODEX_HOME>/claude-picker/`. Every intercept start drops any legacy `ca.key`, even with the intercept or picker off; on restart the lifecycle keeps the applied
+`<OPENCODEX_HOME>/claude-picker/`. Every unbound intercept startup attempt makes a best-effort cleanup of legacy `ca.key` before eligibility checks, including client role, disabled routing/interception, and ephemeral public ports; cleanup failures do not block startup. See the [runtime lifecycle contract](../runtime.md#claude-intercept-pair). On restart the lifecycle keeps the applied
 profile row in place, and removes the prior public root only when the published certificate differs
 from this process's authority — a reused authority stays trusted, and a predecessor that cannot be
 untrusted leaves the picker disabled rather than trusted beside its replacement —
@@ -240,8 +244,26 @@ remote `ccr` (`picker-bootstrap.ts`), failing open to the original bytes; the mo
 comes from a persisted snapshot (`picker-models.ts`), so a bootstrap never waits on discovery. Picker aliases carry `[1m]` only for authoritative windows of at least 1M, using the shared context marker helper with auto-context disabled. Sub-million opt-ins remain unmarked because the picker cannot guarantee the Desktop runner's compaction environment. A
 CONNECT to claude.ai that arrives before the first refresh waits at most 3 s, then goes blind. A
 picker proxy bind failure only disables picker mode; a picker construction or start failure closes
-every socket the start had bound before rethrowing. Nothing is logged but method, bootstrap or
-other, and status.
+every socket the start had bound before rethrowing. Ordinary session cookies within the header
+allowance relay unchanged. Upstream header overflow returns an empty 502 and logs the fixed
+reason `upstream:headers-too-large`; other records contain only method, bootstrap or other,
+status, and fixed bootstrap rewrite outcomes. Header values and request paths are not logged.
+Upgraded connections retain raw TLS relay semantics; their upstream bytes do not pass through
+the ordinary HTTP response parser.
+
+### Picker catalog rewrite bounds
+
+`src/claude/intercept/picker-budget.ts` preflights plain JSON before copying injected rows.
+Each retained field value and key is limited to 64 KiB of serialized UTF-8, each added row to
+256 KiB, and the whole response to 4096 added rows and 2 MiB of added JSON (including separators).
+All selected surfaces, including duplicate surface ids, share that budget. The original body plus
+reserved additions must fit 16 MiB before deep clones or final serialization. The CLI's explicit
+bootstrap fallback uses the same budget, including space for a newly created options property.
+A refused rewrite leaves every original row and the upstream response unchanged; it never publishes
+a partially extended picker. Small nested capabilities/thinking metadata retain their shape,
+while presentation/version stripping, descriptions, context windows, and surface eligibility keep
+their existing rules. Regression coverage is in `tests/claude-integration/claude-picker-bootstrap.test.ts`
+and `tests/claude-integration/claude-cli-picker.test.ts`.
 
 `src/claude/desktop-picker.ts` owns every mutation while a server is running. One controller lock
 serializes `enable`, `disable`, and `transition`; the latter wraps a whole Desktop mode change so

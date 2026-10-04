@@ -460,6 +460,19 @@
       ]
     },
     {
+      "path": "clients/chatgpt-desktop.md",
+      "tier": 5,
+      "title": "ChatGPT Desktop",
+      "scope": "Experimental macOS app-server stdout shim and local-CA TLS intercept, opt-in launch/watcher, restore and failure boundaries.",
+      "documents": [
+        "src/chatgpt/",
+        "src/cli/",
+        "src/codex/",
+        "src/server/index/chatgpt-unblock-lifecycle.ts",
+        "src/lib/socks5-handshake.ts"
+      ]
+    },
+    {
       "path": "clients/claude-desktop.md",
       "tier": 5,
       "title": "Claude Desktop Integration",
@@ -588,17 +601,6 @@
       "scope": "Test-runner home and case-scoped lifecycle teardown ordering.",
       "documents": [
         "tests/"
-      ]
-    },
-    {
-      "path": "clients/chatgpt-desktop.md",
-      "tier": 5,
-      "title": "ChatGPT Desktop",
-      "scope": "Opt-in composer send-unblock (listeners, rewrites, PAC fallback, launch watcher) and the experimental app-server stdout shim.",
-      "documents": [
-        "src/chatgpt/",
-        "src/cli/",
-        "src/codex/"
       ]
     }
   ],

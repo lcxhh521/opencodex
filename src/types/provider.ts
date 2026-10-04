@@ -68,15 +68,15 @@ export interface TransientRetryPolicy {
 }
 
 /**
- * Opt-in replacement of a native Responses send whose upstream connection closed while the
+ * Opt-in replacement of a Responses send whose upstream connection closed while the
  * caller had observed nothing (`providers.<name>.retryOnReset`).
  *
- * Covers both ambiguous stages the proxy can be in: no response head at all, and a head whose
- * SSE body carried only control events. Disabled unless the object is present; a bare `{}`
- * opts in with defaults. Only a request the proxy can judge self-contained is ever replaced;
- * see `src/server/responses/reset-replay.ts`. The replacement inference may still be billed if
- * the origin had already started the first one, which is what makes this opt-in rather than
- * default.
+ * Native Responses covers pre-header resets and post-header SSE carrying only control events.
+ * Generic translated dispatch covers initial and rebuilt pre-header sends, sharing the same
+ * grant and send budget; adapter-owned transports and translated post-header failures are excluded.
+ * Disabled unless present; `{}` opts in. Only self-contained requests qualify (see
+ * `src/server/responses/reset-replay.ts`). Replacement inference may still be billed if the
+ * origin had already started the first one, so this is opt-in rather than default.
  */
 export interface ResetReplayPolicy {
   /** Master switch. Presence of the object also enables the policy (default true). */
@@ -412,6 +412,22 @@ export interface OcxProviderConfig {
    */
   preserveResponsesReasoningContent?: boolean;
   /**
+   * Whether to preserve Codex-private `input[].id` on `store: false` requests.
+   * Disabled by default: ordinary Responses upstreams interpret input IDs as references
+   * to nonexistent stored items and return 404. Upstream launcher relays such as
+   * Codex Web GPT (`chatgpt-web/*`) require the current-turn user message ID for
+   * browser-session replay (#6220).
+   */
+  preserveResponsesInputItemIds?: boolean;
+  /**
+   * Whether to preserve ChatGPT-internal `internal_chat_message_metadata_passthrough`
+   * on outgoing input messages for noncanonical destinations. Disabled by default:
+   * public Responses gateways reject the private field as an unknown parameter.
+   * Upstream launcher relays such as Codex Web GPT require this metadata (or the item ID)
+   * to extract turn provenance (#6220).
+   */
+  preserveResponsesMessageMetadata?: boolean;
+  /**
    * Treat this provider's `modelReasoningEfforts` as authoritative at the wire, not only in the
    * catalog. Adapters that ship their own per-model effort table (currently `command-code`)
    * otherwise let that table win for models it knows, so a widened row is advertised in the
@@ -652,6 +668,8 @@ export interface OcxProviderConfig {
    */
   autoReviewModelOverrides?: Record<string, string>;
   headers?: Record<string, string>;
+  /** Inbound client metadata headers to copy to this provider when the outbound field is otherwise unset. */
+  forwardClientHeaders?: string[];
   /** Default provider-routing preferences for models sent through the canonical OpenRouter API. */
   openRouterRouting?: OpenRouterProviderRouting;
   /** Exact model-id overrides for `openRouterRouting`. Each matching entry replaces the default. */
@@ -992,9 +1010,9 @@ export interface OcxProviderConfig {
    */
   transientRetryOn5xx?: TransientRetryPolicy;
   /**
-   * Opt-in replacement of a native Responses send that died while the caller had observed
-   * nothing (`providers.<name>.retryOnReset`). Disabled unless present; a bare `{}` opts in
-   * with defaults. Native Responses sends only, and only for self-contained requests.
+   * Opt-in replacement of self-contained Responses sends (`providers.<name>.retryOnReset`).
+   * Disabled unless present; `{}` opts in. Native sends and generic translated initial/rebuilt
+   * pre-header sends share the grant/budget; adapter-owned and translated post-header failures are excluded.
    */
   retryOnReset?: ResetReplayPolicy;
   /**

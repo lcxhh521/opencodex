@@ -118,6 +118,10 @@ For Antigravity, an upstream `401` can refresh the rejected account’s OAuth cr
 retry the request once. The retry uses that credential’s Cloud Code Assist project. If refresh
 fails or no usable project is available, the request returns an authentication error; use the
 reauthentication flow above. A second `401` does not start another refresh/retry cycle.
+A `403` asking to verify the account quarantines that credential as `needs-reauth(verify)`;
+when account failover is enabled, the request can retry on another eligible account. Complete
+Google's account verification, then run `ocx login google-antigravity`. Silent token refresh
+does not clear this verification requirement. If OpenCodex cannot save the quarantine, this adapter exchange preserves the original `403` without another recovery send; the account has not been durably quarantined. If a sibling request cannot be built or admitted for sending, the exchange delivers the original `403` through normal error formatting. An enclosing combo or policy route can still apply its existing fallback rules.
 
 A proxy that is already running picks up the new credential without a restart: the CLI asks it to
 reload that one provider from disk, and the request carries no credential of its own. If the
@@ -499,6 +503,27 @@ Anthropic pause applies even when proactive pooling is disabled, including sessi
 and does not interrupt a turn already sent. Removing the account removes its pause state.
 Per-account Anthropic auto-switch thresholds are not part of this control.
 
+Anthropic's automatic pause fallback keeps account order, skips paused accounts and accounts
+requiring reauthentication, and excludes Claude Code imports expiring within 60 seconds.
+Legacy accounts without a recorded source remain eligible using only their own stored credentials
+and normal stored-token refresh; they never adopt CLI-disk credentials. A still-valid Claude Code import with more time remaining
+can be selected. Later automatic re-adoption accepts a shared, nonempty access or refresh token.
+If both tokens rotate, OpenCodex requires authenticated account UUID proof for both the stored
+and imported bearer. It saves that proof privately when available from login, refresh, or profile
+lookup; account labels, email, organization and credential-file location cannot substitute for it.
+
+When the old bearer has expired and no bound account proof was saved, automatic recovery may be
+impossible. An unavailable profile or unverified rotated pair leaves the stored account unchanged
+and does not replay a potentially consumed refresh token. Use explicit login to import the current
+Claude Code credential. Import preserves unrelated identityless slots and may create a separate
+account; select the intended account and remove obsolete slots only after checking them. A profile
+lookup failure can leave a new import identityless, with the same automatic-recovery limitation.
+
+If no permitted fallback remains, quota and live model discovery wait for a usable active account.
+You can explicitly select an existing unpaused legacy account with
+`ocx account use anthropic <account-id-or-alias>`; its own valid credential and normal stored-token
+refresh remain available even when its original credential source was not recorded.
+
 ```bash
 ocx account pause google-antigravity <account-id-or-alias>
 ocx account resume google-antigravity <account-id-or-alias>
@@ -794,6 +819,15 @@ all refuse the bad value rather than storing something the catalog writer would 
 Use `ocx provider add mine --adapter openai-chat --base-url https://example.com/v1 --default-model model-a --text-only` when registering a provider, or `ocx provider edit mine --model model-a --text-only` for an existing provider. Add can use `--model` or its default model; edit requires `--model`. The flag updates only that exact model's `modelCapabilities.inputModalities` to `["text"]`, preserving other models and axes.
 
 ### Cached quota history
+
+Automatic OpenAI account exhaustion checks distinguish purchased usage credits from reset
+tickets. Spending remains off by default: enable **Use credits** for that account (stored in
+`creditCodexAccountIds`). Only that opt-in together with a fresh positive spendable balance or
+unlimited credits can keep an account eligible after included usage reaches 100%; an upstream refusal or overage limit still
+blocks that evidence. Credit evidence expires after five minutes, and usage headers do not
+renew its clock. `pause-exhausted` uses this rule. Reset tickets alone never grant automatic
+headroom, and a credits-only response cannot clear a request cooldown. The default-on main-account
+hard lock remains a separate local policy and is not lifted by the credits switch.
 
 `ocx account history openai <pool-account-id> [--limit 1-200] [--json]` reads stored observations without contacting the provider. The output separates actual observation time, WHAM or response-header source, window family and usage percentage. At most 200 observations per account are retained for 30 days, with global storage bounds.
 

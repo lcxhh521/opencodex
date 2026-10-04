@@ -1,3 +1,4 @@
+import { isSubagentModelEntry, rawSubagentModelForce } from "./subagent-models";
 import { chmodSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { compactionRecoveryConfigError } from "./schema/compaction-recovery";
@@ -40,6 +41,7 @@ import {
   transientRetryOn5xxPolicySchema,
   runtimeRoleSchema,
   spendSchema,
+  chatgptDesktopConfigIssue,
 } from "./schema/leaf-validators";
 import { hasWarnedInheritedFastWireConflict, markWarnedInheritedFastWireConflict } from "./warn-memo";
 
@@ -123,6 +125,8 @@ export function warnDegradedCompactionRouting(rawParsed: unknown, validated: Ocx
 export function warnDegradedTopLevelOptIns(rawParsed: unknown, validated: OcxConfig): void {
   if (compactionRecoveryConfigError(rawParsed)) console.warn("⚠️  invalid compactionRecovery disabled; the original compaction failure is preserved");
   if (blockedModelRedirectsError(rawParsed)) console.warn("⚠️  invalid blockedModelRedirects ignored; provider routing remains available");
+  const chatgptDesktop = chatgptDesktopConfigIssue(rawParsed);
+  if (chatgptDesktop) console.warn(`⚠️  config.json ${chatgptDesktop} — the whole chatgptDesktop block is ignored, so the ChatGPT desktop integration reads as off`);
   warnDegradedStreamMode(rawParsed, validated);
   warnDegradedCompactionRouting(rawParsed, validated);
   warnDegradedMemoryModels(rawParsed, validated);
@@ -592,6 +596,7 @@ export function normalizePersistedClaudeCode(claudeCode: unknown): OcxConfig["cl
     return claudeCode as OcxConfig["claudeCode"];
   }
   const normalized = { ...claudeCode } as Record<string, unknown>;
+  if (Object.hasOwn(normalized, "subagentModelForce") && !isSubagentModelEntry(normalized.subagentModelForce)) delete normalized.subagentModelForce;
   // A malformed hand edit must not arm CLI interception or discard the whole config.
   if (Object.hasOwn(normalized, "cliFirstParty") && typeof normalized.cliFirstParty !== "boolean") {
     delete normalized.cliFirstParty;
@@ -634,6 +639,8 @@ export function normalizeClaudeSubagentEffort(config: OcxConfig, _rawParsed: unk
 }
 
 export function warnDegradedClaudeSubagentEffort(rawParsed: unknown): void {
+  const force = rawSubagentModelForce(rawParsed);
+  if (force !== undefined && !isSubagentModelEntry(force)) console.warn("⚠️ config.json claudeCode.subagentModelForce is invalid — ignoring it. Other settings were preserved.");
   const rawEffort = rawClaudeSubagentEffort(rawParsed);
   if (rawEffort !== undefined && !isClaudeSubagentEffort(rawEffort)) {
     console.warn(`⚠️  config.json claudeCode.subagentEffort is invalid (expected ${CLAUDE_SUBAGENT_EFFORTS.join(", ")}) — ignoring it. Other settings were preserved.`);

@@ -20,12 +20,17 @@ export interface UnconfiguredRoutedRemoval {
 type RoutedNamespaceConfig = Pick<OcxConfig, "providers" | "combos">;
 
 function routedNamespace(entry: RawEntry): string | null {
-  if (typeof entry.slug !== "string") return null;
+  if (!entry || typeof entry !== "object" || typeof entry.slug !== "string") return null;
   // Account-bound native rows follow the account pool, not provider config.
   if (trustedAccountBoundNativeCatalogSlug(entry) !== undefined) return null;
+  if (isNativeAliasCatalogEntry(entry)) return COMBO_NAMESPACE;
+  // Combo aliases may be bare or use an unrelated provider namespace. Ownership selects the
+  // combo namespace only with the same generated-description authorship signal as routed rows.
+  if (entry.owned_by === COMBO_NAMESPACE
+    && typeof entry.description === "string"
+    && entry.description.startsWith("Routed via opencodex → ")) return COMBO_NAMESPACE;
   // Foreign rows (Cursor, user tooling) are never removed by the provider rule.
   if (!isOcxAuthoredRoutedEntry(entry)) return null;
-  if (isNativeAliasCatalogEntry(entry)) return COMBO_NAMESPACE;
   return entry.slug.slice(0, entry.slug.indexOf("/"));
 }
 
@@ -97,6 +102,10 @@ export function routedRemovalBackedByConfigFile(
 export const FOREIGN_CODEX_HOME_OWNER_MESSAGE = "Codex catalog left unchanged: this Codex home was set up by "
   + "another OpenCodex home (OPENCODEX_HOME), recorded in its opencodex-journal.json. Run opencodex "
   + "from that home, or run `ocx restore` there first.";
+
+/** Unavailable evidence is not proof of a foreign owner. No paths or journal content are exposed. */
+export const UNKNOWN_CODEX_HOME_OWNER_MESSAGE = "Codex catalog left unchanged: ownership of this Codex home "
+  + "could not be checked. Restore readable ownership evidence and retry.";
 
 /** One line for logs: counts only, never provider names, model ids or paths. */
 export function unbackedRoutedRemovalMessage(count: number): string {

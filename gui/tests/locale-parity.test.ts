@@ -41,6 +41,8 @@ function carriesTranslatableWords(value: string): boolean {
 // gap. Anything *not* on this list that ships an English-identical value is treated as a stale
 // placeholder and fails the build.
 const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
+  // The Codex sidebar row is the product name, kept in every locale like Claude.
+  "nav.codexSet",
   // A bare em dash: the "no Reasoning control" marker is a symbol, not copy.
   "integrations.cursor.noControl",
   // API protocol/endpoint names
@@ -78,8 +80,6 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   "claude.pageTitle",
   // A literal Claude Desktop picker model id used as the input placeholder, not prose.
   "claudeDesktop.firstParty.bindings.pickerPlaceholder",
-  "claude.tabCode",
-  "claude.tabDesktop",
   // Claude Desktop model-family labels (proper nouns)
   "claudeDesktop.effort.supported",
   "claudeDesktop.family.fable",
@@ -331,6 +331,11 @@ const DSH_VISIBLE_COPY: Record<(typeof LOCALE_CODES)[number], readonly [string, 
     "DeepSeek Harness (DSH)",
     "DSH",
     "OpenCodex chỉ quản lý provider opencodex trong dòng llm-pi-ai của $DSH_HOME/profiles/desktop/cordis.patch.yml, profile Desktop mà DSH 0.1.7+ đọc ($DSH_HOME/settings.yaml khi profile đó chưa tồn tại). DSH sẽ hot reload provider này; model mặc định của bạn và deepseek-official không thay đổi. Hiện chỉ hỗ trợ loopback; không ghi credential thật nào.",
+  ],
+  pt: [
+    "DeepSeek Harness (DSH)",
+    "DSH",
+    "O OpenCodex gerencia apenas o provedor opencodex da linha llm-pi-ai em $DSH_HOME/profiles/desktop/cordis.patch.yml, o perfil Desktop que o DSH 0.1.7+ lê ($DSH_HOME/settings.yaml enquanto esse perfil não existir). O DSH recarrega esse provedor a quente; seu modelo padrão e o deepseek-official permanecem inalterados. Atualmente somente loopback; nenhuma credencial real é gravada.",
   ],
 };
 

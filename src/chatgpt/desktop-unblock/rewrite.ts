@@ -1,3 +1,6 @@
+import { isRecord, unlockRateLimitGate } from "../app-server-shim/gate-rewrite";
+export { unlockRateLimitGate } from "../app-server-shim/gate-rewrite";
+
 /**
  * Send-unblock rewriting for the ChatGPT desktop intercept.
  *
@@ -26,8 +29,6 @@
  *    through untouched, so the app keeps showing the account's real usage.
  */
 
-import { unlockRateLimitGate } from "../app-server-shim/gate-rewrite";
-
 /** `blocked_features[].name` values the desktop composer treats as a send lock. */
 const SEND_BLOCKED_FEATURE_NAMES = new Set(["send", "tpp_send"]);
 
@@ -40,13 +41,6 @@ const SEND_LIMIT_FEATURE_NAME = "send";
  * or a reason this code has never seen -- is left in place.
  */
 const QUOTA_BLOCK_REASONS = new Set(["usage_limit", "usage_limit_reached", "rate_limit_exceeded", "rate_limit_reached", "quota_exhausted"]);
-
-/**
- * `rate_limit_reached_type.type` value for the plain subscription quota. The workspace and
- * credit variants (`workspace_owner_usage_limit_reached`, `workspace_member_credits_depleted`,
- * ...) describe an organisation or billing state the relay cannot argue with, so they stay.
- */
-const PLAIN_QUOTA_REACHED_TYPE = "rate_limit_reached";
 
 /** Which part of the rewrite applies to a response. */
 export type RewriteSurface = "conversation" | "usage";
@@ -75,10 +69,6 @@ export interface PreservedSendBlock {
 export interface RewriteResult {
   value: unknown;
   changed: boolean;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isSendBlockedFeature(entry: unknown): entry is Record<string, unknown> {

@@ -1,261 +1,283 @@
-import { readFileSync, realpathSync, statSync } from "node:fs";
-
-import { loadConfig } from "../config";
+import { readConfigAdmissionSnapshot } from "../config/diagnostics";
+import { readRuntimePort } from "../config/process-state";
 import { readClientConnectionState } from "../client/state";
-import { isRecyclingForExit, isShutdownDraining } from "../server/lifecycle";
+import { getActiveTurnCount, isDraining, isRecyclingForExit, isShutdownDraining } from "../server/lifecycle";
 import type { OcxConfig } from "../types";
-import { selectDriftHealCatalogPath } from "./catalog-auto-refresh";
+import { observeCatalogHealFile, sameCatalogHealPath, selectCatalogHealPath, type CatalogObservation } from "./catalog/heal-observation";
+import { subscribeCatalogPublication } from "./catalog/publication-observer";
 import { configEnablesRoutedNamespace, ocxRoutedNamespaceCounts } from "./catalog/routed-removal";
-import type { RawCatalog } from "./catalog/parsing";
 import { inspectCodexHomeOwner } from "./codex-home-owner";
 import { shouldSyncCodexOnStart } from "./desired-state";
-import { JOURNAL_PATH } from "./journal";
+import { JOURNAL_PATH, journalOwner } from "./journal";
 import { CODEX_HOME, DEFAULT_CATALOG_PATH, resolveCodexConfigPath } from "./paths";
 import { siblingOfLivePort } from "./sibling-start";
 
-/**
- * The live owner republishes a Codex catalog that lost the routed models it publishes (#6529).
- *
- * Startup sync, management writes and the hourly refresh are the only times the owner writes the
- * catalog. A catalog another process rewrote in between (the #6529 incident: native-only, from a
- * process with an empty OPENCODEX_HOME) stayed wrong until the next of those, which for a quiet
- * install can be days. This loop closes that gap.
- *
- * Cost: one `stat` of the catalog every 30 s from an unref'd timer. The file is parsed only when
- * its identity (device, inode, size, mtime) changed. A heal runs only when routed namespaces that
- * were in the catalog are gone, the owner's config still enables them, and every gate is open. It
- * is the owner's ordinary catalog convergence, so the config-backed removal rule, the Codex-home
- * binding and the audit trail all apply. Whatever that convergence publishes becomes the new
- * baseline, so a namespace the owner itself legitimately emptied (an authoritative empty provider)
- * is looked at once, not fought. Rate and flap caps pause the loop for at most an hour and never
- * stop it. Started only from `handleStart`'s owner path and stopped in its exit cleanup.
- */
-
+export type { CatalogObservation } from "./catalog/heal-observation";
 export const CATALOG_HEAL_TICK_MS = 30_000;
 export const CATALOG_HEAL_RECHECK_MS = 5 * 60_000;
 export const CATALOG_HEAL_WINDOW_MS = 60 * 60_000;
-/** Convergence attempts (refused and failed ones included) per rolling window. */
 export const CATALOG_HEAL_MAX_ATTEMPTS = 6;
-/** Successful republishes per window: more means another writer keeps rewriting the catalog. */
 export const CATALOG_HEAL_MAX_HEALS = 3;
 
-export type CatalogSelfHealGate = "sibling" | "exiting" | "codex-off" | "not-owner" | "client";
-
+export type CatalogSelfHealGate = "sibling" | "exiting" | "idle" | "runtime-record" | "config-unavailable" | "codex-off" | "not-owner" | "client";
 export interface CatalogSelfHealGates {
   siblingOfLivePort(): number | null;
   exiting(): boolean;
-  loadConfig(): OcxConfig;
-  /** This process's OPENCODEX_HOME is the one the Codex home's journal is bound to (or nothing is bound). */
+  idle(): boolean;
+  runtimeOwned(): boolean;
+  /** File-backed config authority; missing, malformed or salvaged config returns null. */
+  loadConfig(): OcxConfig | null;
   ownsCodexHome(): boolean;
-  /** A connected client takes its catalog from the hub (`ocx catalog pull`), not from this config. */
   clientConnected(): boolean;
+  clientJournalOwner(): boolean;
 }
-
-export interface CatalogObservation {
-  /** Device, inode, size and mtime; equal signatures are not read again. */
-  readonly signature: string;
-  readonly catalog: RawCatalog | null;
+export interface CatalogHealOutcome { readonly committed: boolean }
+export interface CatalogHealLifecycle {
+  readonly beforeCommit: () => boolean;
+  readonly expectedCatalogPath: string;
 }
-
-export interface CatalogHealOutcome {
-  /** The convergence wrote a catalog (changed or not). */
-  readonly committed: boolean;
-}
-
 export interface CatalogSelfHealRecord {
   readonly at: string;
   readonly lostNamespaces: number;
   readonly committed: boolean;
 }
-
 export interface CatalogSelfHealHandle {
   stop(): void;
   lastHeal(): CatalogSelfHealRecord | null;
-  /** Test-only: run one tick now. */
   tickForTests(): Promise<void>;
 }
-
 export interface CatalogSelfHealDeps {
   scheduleFn?: (fn: () => void, ms: number) => { cancel(): void };
   now?: () => number;
   catalogPath?: () => string | null;
   observe?: (path: string, readContent: boolean) => CatalogObservation | null;
-  converge?: (config: OcxConfig) => Promise<CatalogHealOutcome>;
+  converge?: (config: OcxConfig, lifecycle: CatalogHealLifecycle) => Promise<CatalogHealOutcome>;
+  subscribe?: typeof subscribeCatalogPublication;
   gates?: Partial<CatalogSelfHealGates>;
   log?: Pick<Console, "warn">;
 }
 
 function defaultSchedule(fn: () => void, ms: number): { cancel(): void } {
   const timer = setTimeout(fn, ms);
-  if (typeof timer.unref === "function") timer.unref();
+  timer.unref?.();
   return { cancel: () => clearTimeout(timer) };
 }
 
-function observeCatalogFile(path: string, readContent: boolean): CatalogObservation | null {
-  try {
-    const stat = statSync(path);
-    if (!stat.isFile()) return null;
-    const signature = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
-    if (!readContent) return { signature, catalog: null };
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-    const catalog = parsed !== null && typeof parsed === "object" && Array.isArray((parsed as RawCatalog).models)
-      ? parsed as RawCatalog : null;
-    return { signature, catalog };
-  } catch {
-    return null;
-  }
-}
-
-function canonicalCodexHome(): string {
-  try {
-    return realpathSync.native(CODEX_HOME);
-  } catch {
-    return CODEX_HOME;
-  }
-}
-
-async function convergeOwnCatalog(config: OcxConfig): Promise<CatalogHealOutcome> {
+async function convergeOwnCatalog(config: OcxConfig, lifecycle: CatalogHealLifecycle): Promise<CatalogHealOutcome> {
   const [{ armDetachedConfigBaseline }, { createManagementConvergeCodex }, { createCatalogConvergeRequest }] = await Promise.all([
-    import("../config"),
-    import("./management-convergence"),
-    import("./catalog-admission"),
+    import("../config"), import("./management-convergence"), import("./catalog-admission"),
   ]);
-  // Same as the hourly refresh: convergence may persist discovery fields after its provider
-  // awaits, so this independently loaded snapshot saves as a rebase against disk.
+  if (!lifecycle.beforeCommit()) return { committed: false };
+  // Discovery persistence rebases this detached snapshot against current disk config.
   armDetachedConfigBaseline(config);
-  const outcome = await createManagementConvergeCodex(config)(createCatalogConvergeRequest({ deadlineMs: 1_000 }));
+  const outcome = await createManagementConvergeCodex(config, lifecycle)(createCatalogConvergeRequest({ deadlineMs: 1_000 }));
   return { committed: outcome.kind === "catalog-only" && outcome.catalogRefresh.status === "committed" };
 }
 
-const defaultGates: CatalogSelfHealGates = {
-  siblingOfLivePort,
-  exiting: () => isRecyclingForExit() || isShutdownDraining(),
-  loadConfig,
-  ownsCodexHome: () => {
-    const owner = inspectCodexHomeOwner(canonicalCodexHome());
-    return owner.kind === "owned" || owner.kind === "unbound";
-  },
-  clientConnected: () => readClientConnectionState().kind !== "disconnected",
-};
-
-/** Cheapest first. The config is loaded only once the in-memory gates are open. */
-export function evaluateCatalogSelfHealGates(
-  gates: CatalogSelfHealGates,
-): { readonly open: true; readonly config: OcxConfig } | { readonly open: false; readonly gate: CatalogSelfHealGate } {
+export function evaluateCatalogSelfHealGates(gates: CatalogSelfHealGates):
+  { readonly open: true; readonly config: OcxConfig } | { readonly open: false; readonly gate: CatalogSelfHealGate } {
   if (gates.siblingOfLivePort() !== null) return { open: false, gate: "sibling" };
   if (gates.exiting()) return { open: false, gate: "exiting" };
+  if (!gates.idle()) return { open: false, gate: "idle" };
+  if (!gates.runtimeOwned()) return { open: false, gate: "runtime-record" };
   const config = gates.loadConfig();
+  if (config === null) return { open: false, gate: "config-unavailable" };
   if (!shouldSyncCodexOnStart(config)) return { open: false, gate: "codex-off" };
-  if (gates.clientConnected()) return { open: false, gate: "client" };
+  if (gates.clientConnected() || gates.clientJournalOwner()) return { open: false, gate: "client" };
   if (!gates.ownsCodexHome()) return { open: false, gate: "not-owner" };
   return { open: true, config };
 }
 
-export function startCodexCatalogSelfHeal(options: { deps?: CatalogSelfHealDeps } = {}): CatalogSelfHealHandle {
+type NamespaceObservation = { path: string; signature: string; namespaces: ReadonlySet<string> | null };
+
+/** Owner lifecycle only: importing this module starts no timer or publication subscription. */
+export function startCodexCatalogSelfHeal(options: { port?: number; deps?: CatalogSelfHealDeps } = {}): CatalogSelfHealHandle {
   const deps = options.deps ?? {};
   const scheduleFn = deps.scheduleFn ?? defaultSchedule;
   const clock = deps.now ?? (() => performance.now());
-  const catalogPath = deps.catalogPath
-    ?? (() => selectDriftHealCatalogPath(JOURNAL_PATH, DEFAULT_CATALOG_PATH, resolveCodexConfigPath));
-  const observe = deps.observe ?? observeCatalogFile;
+  const catalogPath = deps.catalogPath ?? (() => selectCatalogHealPath(JOURNAL_PATH, DEFAULT_CATALOG_PATH, resolveCodexConfigPath));
+  const observe = deps.observe ?? observeCatalogHealFile;
   const converge = deps.converge ?? convergeOwnCatalog;
-  const gates: CatalogSelfHealGates = { ...defaultGates, ...deps.gates };
+  const gates: CatalogSelfHealGates = {
+    siblingOfLivePort,
+    exiting: () => isRecyclingForExit() || isShutdownDraining(),
+    idle: () => !isDraining() && getActiveTurnCount() === 0,
+    runtimeOwned: () => {
+      const runtime = readRuntimePort(process.pid);
+      return runtime !== null && runtime.siblingOfPort === undefined
+        && (options.port === undefined || runtime.port === options.port);
+    },
+    loadConfig: () => {
+      const snapshot = readConfigAdmissionSnapshot();
+      return snapshot.kind === "read" && snapshot.diagnostics.source === "file"
+        ? snapshot.diagnostics.config : null;
+    },
+    ownsCodexHome: () => {
+      const owner = inspectCodexHomeOwner(CODEX_HOME);
+      return owner.kind === "owned" || owner.kind === "unbound";
+    },
+    clientConnected: () => readClientConnectionState().kind !== "disconnected",
+    clientJournalOwner: () => journalOwner({ readOnly: true })?.kind === "client",
+    ...deps.gates,
+  };
   const log = deps.log ?? console;
-
   let stopped = false;
-  let pending: { cancel(): void } | undefined;
+  let released = false;
+  let generation = 0;
+  let timer: { cancel(): void } | undefined;
   let running = false;
   let last: CatalogSelfHealRecord | null = null;
-  /** The routed namespaces last accepted as this owner's catalog, and the file identity they came from. */
-  let baseline: { path: string; signature: string; namespaces: ReadonlySet<string> } | null = null;
+  let target: string | null = null;
+  let baseline: NamespaceObservation | null = null;
+  let observed: NamespaceObservation | null = null;
+  let pendingRetry: { path: string; lostNamespaces: readonly string[] } | null = null;
   let recheckAt = 0;
   const attempts: number[] = [];
   const heals: number[] = [];
 
-  const accept = (path: string): void => {
+  const read = (path: string): NamespaceObservation | null => {
+    const quick = observe(path, false);
+    if (quick === null) return null;
+    if (observed !== null && sameCatalogHealPath(observed.path, path) && observed.signature === quick.signature) return observed;
     const seen = observe(path, true);
-    baseline = seen?.catalog
-      ? { path, signature: seen.signature, namespaces: new Set(ocxRoutedNamespaceCounts(seen.catalog).keys()) }
-      : null;
+    if (seen === null) return null;
+    observed = { path, signature: seen.signature, namespaces: seen.catalog ? new Set(ocxRoutedNamespaceCounts(seen.catalog).keys()) : null };
+    return observed;
+  };
+  const accept = (path: string): void => {
+    const seen = read(path);
+    if (seen?.namespaces != null) baseline = seen;
+  };
+  const clear = (): void => {
+    generation += 1;
+    baseline = observed = null;
+    pendingRetry = null;
+    recheckAt = 0;
+  };
+  const updateTarget = (path: string | null): void => {
+    // Unavailable selection is not evidence of a different target or lost authority.
+    if (path === null) return;
+    if (target !== null && sameCatalogHealPath(target, path)) return;
+    clear();
+    target = path;
+  };
+  const beforeCommit = (path: string, entryGeneration: number): boolean => {
+    try {
+      const selected = catalogPath();
+      return !stopped && !released && generation === entryGeneration
+        && selected !== null && sameCatalogHealPath(selected, path) && evaluateCatalogSelfHealGates(gates).open;
+    } catch { return false; }
+  };
+  const capRetryAt = (now: number): number => {
+    while (attempts.length && now - attempts[0]! >= CATALOG_HEAL_WINDOW_MS) attempts.shift();
+    while (heals.length && now - heals[0]! >= CATALOG_HEAL_WINDOW_MS) heals.shift();
+    return Math.max(
+      attempts.length >= CATALOG_HEAL_MAX_ATTEMPTS ? attempts[0]! + CATALOG_HEAL_WINDOW_MS : 0,
+      heals.length >= CATALOG_HEAL_MAX_HEALS ? heals[0]! + CATALOG_HEAL_WINDOW_MS : 0,
+    );
   };
 
   const tick = async (): Promise<void> => {
-    if (stopped || running) return;
+    if (stopped || running || released) return;
     running = true;
     try {
       const path = catalogPath();
+      updateTarget(path);
       if (path === null) return;
-      const now = clock();
-      const quick = observe(path, false);
-      if (quick === null) return;
-      if (baseline?.path === path && baseline.signature === quick.signature) return;
-      if (baseline === null || baseline.path !== path) {
-        accept(path);
-        return;
+      // Pending cache/funnel failure is independent of catalog stat or apparent repaired rows.
+      if (pendingRetry) {
+        const config = gates.loadConfig();
+        if (config === null) return;
+        const enabled = pendingRetry.lostNamespaces.filter(ns => configEnablesRoutedNamespace(config, ns));
+        if (enabled.length === 0) {
+          pendingRetry = null;
+          recheckAt = 0;
+          const seen = read(path);
+          if (seen?.namespaces != null) baseline = seen;
+          return;
+        }
+        pendingRetry = { path, lostNamespaces: enabled };
       }
-      // A closed gate or a spent cap already looked at this change; wait before reading it again.
+      const now = clock();
       if (now < recheckAt) return;
-      const seen = observe(path, true);
-      if (seen?.catalog == null) return;
-      const present = new Set(ocxRoutedNamespaceCounts(seen.catalog).keys());
-      const lost = [...baseline.namespaces].filter(namespace => !present.has(namespace));
-      if (lost.length === 0) {
-        baseline = { path, signature: seen.signature, namespaces: present };
-        return;
+      const seen = read(path);
+      // Missing/corrupt custom paths are unavailable, never reconstructed from the default.
+      if (seen?.namespaces == null) return;
+      if (baseline === null) { baseline = seen; return; }
+      if (!pendingRetry) {
+        if (baseline.signature === seen.signature) return;
+        const lost = [...baseline.namespaces!].filter(ns => !seen.namespaces!.has(ns));
+        if (lost.length === 0) { baseline = seen; return; }
+        pendingRetry = { path, lostNamespaces: lost };
       }
       const gate = evaluateCatalogSelfHealGates(gates);
-      if (!gate.open) {
-        // The loss stays visible to a later tick, once the gate opens.
-        recheckAt = now + CATALOG_HEAL_RECHECK_MS;
-        return;
-      }
-      const lostEnabled = lost.filter(namespace => configEnablesRoutedNamespace(gate.config, namespace));
-      if (lostEnabled.length === 0) {
-        // The owner's own config dropped them: a legitimate removal, not a loss.
-        baseline = { path, signature: seen.signature, namespaces: present };
-        return;
-      }
-      while (attempts.length > 0 && now - attempts[0]! >= CATALOG_HEAL_WINDOW_MS) attempts.shift();
-      while (heals.length > 0 && now - heals[0]! >= CATALOG_HEAL_WINDOW_MS) heals.shift();
-      if (attempts.length >= CATALOG_HEAL_MAX_ATTEMPTS || heals.length >= CATALOG_HEAL_MAX_HEALS) {
-        recheckAt = Math.min(attempts[0] ?? now, heals[0] ?? now) + CATALOG_HEAL_WINDOW_MS;
-        return;
-      }
+      if (!gate.open) { recheckAt = now + CATALOG_HEAL_RECHECK_MS; return; }
+      const lostEnabled = pendingRetry.lostNamespaces.filter(ns => configEnablesRoutedNamespace(gate.config, ns));
+      if (lostEnabled.length === 0) { pendingRetry = null; baseline = seen; return; }
+      pendingRetry = { path, lostNamespaces: lostEnabled };
+      const cappedUntil = capRetryAt(now);
+      if (cappedUntil > now) { recheckAt = cappedUntil; return; }
       attempts.push(now);
-      // Privacy scan: a count only, never provider names, model ids or paths.
-      log.warn(`[catalog-self-heal] the Codex catalog lost the routed models of ${lostEnabled.length} provider namespace${lostEnabled.length === 1 ? "" : "s"} this proxy publishes; republishing`);
+      const entryGeneration = generation;
+      log.warn(`[catalog-self-heal] republishing ${lostEnabled.length} lost routed provider namespace${lostEnabled.length === 1 ? "" : "s"}`);
       let committed = false;
-      try {
-        committed = (await converge(gate.config)).committed;
-      } catch {
-        committed = false;
-      }
-      if (stopped) return;
-      if (committed) heals.push(now);
-      else recheckAt = now + CATALOG_HEAL_RECHECK_MS;
+      try { committed = (await converge(gate.config, {
+        beforeCommit: () => beforeCommit(path, entryGeneration), expectedCatalogPath: path,
+      })).committed; }
+      catch { /* Failed attempts retain pending retry and consume the attempt budget. */ }
+      const selected = catalogPath();
+      if (stopped || released || generation !== entryGeneration || selected === null || !sameCatalogHealPath(selected, path)) return;
       last = { at: new Date().toISOString(), lostNamespaces: lostEnabled.length, committed };
-      // What the owner's convergence published is the new baseline, even when it still lacks a
-      // namespace: that provider is empty by the owner's own account, so it is not fought.
-      accept(path);
-    } finally {
-      running = false;
-    }
+      if (committed) {
+        heals.push(clock());
+        pendingRetry = null;
+        recheckAt = 0;
+        accept(path); // Authoritative emptiness is a successful owner baseline too.
+      } else recheckAt = clock() + CATALOG_HEAL_RECHECK_MS;
+    } catch {
+      log.warn("[catalog-self-heal] observation unavailable; deferred");
+    } finally { running = false; }
   };
 
+  const unsubscribe = (deps.subscribe ?? subscribeCatalogPublication)(event => {
+    if (stopped) return;
+    // Native restoration can remove the journal before notification. Fence the known
+    // target (and target-less releases) without resolving possibly unavailable evidence.
+    const release = event.kind === "native-released" || event.intent === "restore";
+    if (release && (event.path === null || (target !== null && sameCatalogHealPath(event.path, target)))) {
+      clear();
+      released = true;
+      return;
+    }
+    const path = catalogPath();
+    if (event.path !== null && (target === null || !sameCatalogHealPath(event.path, target))
+      && (path === null || !sameCatalogHealPath(event.path, path))) return;
+    if (release) {
+      clear();
+      released = true; // Only a later accepted owner publication can re-arm this lifecycle.
+      return;
+    }
+    if (running) return; // Catalog-success/cache-failure must not accept a baseline.
+    // A committed owner publication supplies a read-only baseline even while heal writes are gated.
+    if (event.path === null || path === null || !sameCatalogHealPath(event.path, path)) return;
+    updateTarget(path);
+    released = false;
+    pendingRetry = null;
+    recheckAt = 0;
+    accept(event.path);
+  });
+  // Capture immediately after startup sync, before a foreign write can become the first tick.
+  try { updateTarget(catalogPath()); if (target !== null) accept(target); }
+  catch { /* Unavailable observation can be retried by the scheduled tick. */ }
   const schedule = (): void => {
     if (stopped) return;
-    pending = scheduleFn(() => {
-      void tick().finally(schedule);
+    timer = scheduleFn(() => {
+      void tick().catch(() => log.warn("[catalog-self-heal] scheduled observation failed")).finally(schedule);
     }, CATALOG_HEAL_TICK_MS);
   };
   schedule();
-
   return {
-    stop() {
-      stopped = true;
-      pending?.cancel();
-      pending = undefined;
-    },
+    stop() { stopped = true; clear(); timer?.cancel(); timer = undefined; unsubscribe(); },
     lastHeal: () => last,
     tickForTests: tick,
   };

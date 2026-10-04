@@ -256,10 +256,36 @@ ocx system codex-cli-update attest --candidate <absolute-path> --npm-prefix <abs
 
 관측한 식별값·해시는 관측 시점의 파일을 설명할 뿐 지속적인 업데이트 허가가 아닙니다. 선택된 런타임, 과거 설치 주체, 실제 npm 설정, 도구 진위를 증명하지 않습니다. 명시한 Node도 관측만 하며 런처가 그 Node를 선택한다는 뜻은 아닙니다. 대상을 실행하거나 레지스트리에 요청하거나 설치·설정 쓰기·프로세스 제어를 하지 않습니다. 기존 Windows `check`의 후보·설정 파일 시스템 I/O 없음 계약은 유지됩니다.
 
-### `ocx config <show|get|set|unset|validate|export|import> ...`
+### `ocx config [show|get|set|unset|validate|export|import] ...`
+
+`ocx config [show] [--json] [--source]`는 실행 중인 프록시 없이 로컬 설정을 표시합니다. `show`를 생략해도 두 플래그를 각각 또는 순서와 관계없이 함께 사용할 수 있습니다. `--source`는 진단 출처, 오류, 경고를 포함하며 표시 작업에서만 허용됩니다. `--json`은 명시적 작업 앞에 올 수 있으며 실행할 작업을 바꾸지 않습니다. 중복된 `--json` 또는 `--source` 플래그와 알 수 없는 인수는 거부됩니다.
 
 검증된 OpenCodex configuration을 검사하고 안전하게 수정합니다. `show`와 `get`은 비밀 값을 가립니다. import는 쓰기 전에 검증하며 `--yes`가 필요합니다.
 
 ### 연결된 클라이언트의 사용량
 
 `ocx usage`는 등록된 데이터 키로 허브에서 이 클라이언트의 사용량만 읽습니다. 출력에는 허브 출처와 키 범위가 표시됩니다. 기간·모델·공급자 필터와 `--since`/`--until`, `--json`을 그대로 사용할 수 있습니다. 계정별 내역과 다른 클라이언트 기록은 반환하지 않습니다. 허브가 응답하지 않거나 이 기능을 지원하지 않으면 오류를 알립니다. 로컬 기록으로 대신 표시하지 않습니다. 구형 허브라면 허브를 업데이트하세요.
+
+## Explain a listed request
+
+`ocx logs`의 일반 출력에 `id=<request-id>`가 표시됩니다. 이 값을 `ocx logs explain <request-id>`에 넣어 라우팅 결정을 확인할 수 있습니다. ID가 없거나 ID에 제어 문자가 있으면 조회 키를 바꾸어 표시하지 않고 이 항목을 생략합니다. JSON과 JSONL은 원래 ID와 형식을 유지합니다.
+
+## Routing profile lookup status
+
+`ocx route policy show <id>`는 프로필이 없으면 종료 코드 4를 반환합니다. 명령 인수가 빠졌거나 잘못되면 2를 반환하므로 스크립트에서 두 경우를 구별할 수 있습니다.
+
+## Upstream error details
+
+업스트림 오류 응답에 여러 메시지 필드가 있으면 기존 우선순위에서 처음 발견한 비어 있지 않은 문자열을 사용합니다. 빈 값이나 잘못된 형식의 필드 때문에 유효한 후순위 진단이 사라지지 않습니다.
+
+### Forced Claude Code subagent model
+
+The Subagents page offers **Force all subagents onto one model**, off by default. Select an exposed roster-style id, such as `combo/tev-auto`, then enable the switch. The roster is offered first; unavailable saved roster entries cannot be force targets.
+
+`ocx agent subagents force combo/tev-auto` sets `claudeCode.subagentModelForce`; `ocx agent subagents force -` clears it. `ocx agent status` reports the setting. `GET /api/subagent-models` returns `force`, `forceAvailable`, and `forceStatus`; `PUT` accepts `{ "force": "combo/tev-auto" }` or `{ "force": null }` without changing the roster. Omitting `force` leaves it unchanged. Invalid or unexposed targets are rejected on write; stale targets are reported and skipped at launch.
+
+This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` only for an authoritative million-token window; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
+
+Claude Code **2.1.257 or newer** is required for FORCE. Plugin and built-in agents (including Explore/Plan) and per-call model arguments are overridden. Forks and subagent skills with `model: inherit` keep the main conversation model. The main loop and Haiku/small-fast sidecars are unaffected. Existing roster files remain available.
+
+The dashboard warns about old or unknown CLI versions, unavailable targets, and either variable already present in `settings.json` → `env` (which overrides launch env). Detection is read-only and server-local: it cannot inspect another launch shell, another machine, or project-local settings. An unknown result is not proof of force support.

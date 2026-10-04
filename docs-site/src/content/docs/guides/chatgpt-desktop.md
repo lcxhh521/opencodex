@@ -1,204 +1,255 @@
 ---
-title: ChatGPT Desktop Send Unblock
-description: Keep the ChatGPT desktop app's composer usable when the account's usage quota runs out (macOS, opt-in).
+title: ChatGPT Desktop integrations (experimental)
+description: Opt-in macOS app-server shim and local-CA TLS intercept experiments for plain-quota send gates.
 ---
 
-When the logged-in ChatGPT account runs out of usage quota, the ChatGPT desktop app greys out
-its send button, even for conversations whose model calls opencodex routes to other providers.
-This opt-in macOS integration keeps the composer usable. It is off by default.
+This experiment is **macOS only and off by default**. It filters the bundled ChatGPT
+app-server's JSON-RPC stdout to open known plain-quota gates. It does not increase
+an account's quota or make an upstream service accept a request it refuses.
 
-## What it changes
+Enable it in your OpenCodex `config.json`:
 
-opencodex runs a local TLS listener for `chatgpt.com`. The app is launched with a Chromium
-switch that sends `chatgpt.com` to that listener; every other host, including its subdomains,
-keeps its normal route. Requests are relayed to the real `chatgpt.com` with the app's own
-credentials, and WebSockets (such as voice dictation) are relayed as well. Nothing is logged or
-stored.
+```json
+{
+  "chatgptDesktop": { "appServerShim": true }
+}
+```
 
-Responses are passed through unchanged except for two endpoints:
+Then run:
 
-- conversation metadata (`/backend-api/conversation/init` and the conversation stream): send
-  locks caused by usage quota are removed;
-- the usage snapshot (`/backend-api/wham/usage`): the "limit reached" gate is opened.
+```bash
+ocx chatgpt launch
+ocx chatgpt status
+```
 
-Send locks with any other reason, such as a subscription requirement, are kept, and
-`ocx chatgpt status` lists them. Displayed usage (percentages, reset times, banners) is never
-changed, and OpenAI's servers still enforce every limit on their own requests.
+`launch` creates an executable launcher under the OpenCodex config directory,
+quits ChatGPT if it is running, and relaunches it with
+`open -a <bundle> --env CODEX_CLI_PATH=<launcher>`. The app is found by its bundle
+identifier, `com.openai.codex`, so an install in `~/Applications` or on another
+volume works, and another app that shares the "ChatGPT" name is never quit or
+opened. Save ongoing work first: this
+restarts the app. It does not require a running OpenCodex proxy.
 
-On some builds the send button follows what the app's built-in Codex server reports about your
-account, and that server fetches it with its own HTTP client, which neither the resolver rule nor a
-PAC file reaches. The experimental [app-server shim](#app-server-shim-experimental) covers that
-case.
+To remove the launcher and relaunch without the override:
 
-## Setup
+```bash
+ocx chatgpt restore
+```
 
-1. Enable the feature in `~/.opencodex/config.json` and restart opencodex:
+Restore leaves the config flag as configured. Set `chatgptDesktop.appServerShim`
+to `false` or remove it to disable future explicit shim launches. Normal launches
+from Dock or Spotlight do not apply the shim automatically.
 
-   ```json
-   { "chatgptDesktop": { "unblockSend": true } }
-   ```
+If ChatGPT is not installed (no `com.openai.codex` bundle is found), `restore`
+only removes the launcher: it cannot relaunch anything and exits with an error.
 
-   The listener uses the proxy port plus 200 (`10300` by default). Set
-   `chatgptDesktop.port` to choose another port.
+## Rewrite boundary
 
-2. Trust the local certificate authority once. The command asks for your login password, so
-   run it yourself:
+Only `account/rateLimits/updated` notifications and responses whose top-level
+result contains `rateLimits`, `rateLimitsByLimitId`, or `ordinaryUsageAllowed`
+are eligible. Plain `rate_limit_reached` markers are cleared; known quota gate
+flags (`allowed`, `limit_reached` / `limitReached`, `ordinaryUsageAllowed`) are
+opened only with plain-quota evidence (a cleared plain reached type or a window at
+100%). A flag closed for a reason the payload does not show stays closed. Workspace,
+credit, unknown reached-type and spend-control
+restrictions keep the usage gate closed.
 
-   ```bash
-   security add-trusted-cert -r trustRoot -p ssl \
-     -k ~/Library/Keychains/login.keychain-db ~/.opencodex/claude-intercept/ca.pem
-   ```
+Displayed usage stays honest: percentages, reset times, window durations, plan
+information and other display fields stay as received. Unrelated JSON-RPC
+messages, nested tool output, conversation send-block metadata and malformed
+lines pass through. Only changed lines are serialized again; other bytes retain
+their original encoding and line endings. Stdin, stderr and the real binary's
+exit status retain their direct connection to the app.
 
-   Without this trust the app cannot load account, usage or settings pages. If you use a
-   custom opencodex home, `ocx chatgpt status` prints the exact command for your setup.
+## Executable and environment security
 
-3. Launch the app through opencodex:
+The generated launcher has mode `0755` and embeds the current OpenCodex executable
+and, for source installs, the CLI entry path. `CODEX_CLI_PATH` tells ChatGPT to
+execute this launcher instead of its bundled binary directly. Keep the launcher,
+its config directory, and the OpenCodex installation under your control: changing
+these executable paths changes code the app runs. The launcher still `exec`s the
+bundled binary of the discovered bundle; if that bundle has no app-server binary,
+`launch` refuses instead of writing a launcher.
 
-   ```bash
-   ocx chatgpt launch
-   ```
+Before writing the launcher, `launch` also checks that the bundle and its
+app-server binary are owned by you or root, are not writable by group or others,
+and pass strict code-signature verification under OpenAI's team ID
+(`2DC432GLL2`). A bundle that fails any of these checks is refused, including
+one owned by another account. The launcher file is
+written to a temporary file and renamed into place; an existing symbolic link at
+that path is replaced, not followed.
 
-4. Optional: make normal Dock and Spotlight launches use the route too:
+`restore` applies the same ownership, permissions, and signature checks to the
+bundle and its main app executable before quitting or opening it. It works with
+the experimental flag off and without a bundled app-server binary. If trust
+verification or relaunch fails, the existing launcher is kept for recovery.
 
-   ```bash
-   ocx chatgpt install-watcher
-   ```
+Both commands also check the folders containing the bundle up to the filesystem
+root. Folders owned by another account, symbolic links, and ordinary group- or
+world-writable parents are refused. Root-owned administrator-group installation
+folders and trusted sticky folders retain their normal permissions behavior.
+These are ownership, POSIX-permission, and signature checks; native ACL and
+volume ownership-policy behavior has not been verified.
 
-   The watcher runs each time the app starts, and again when opencodex starts. If the app was
-   opened normally, it quits the app right after launch and reopens it with the route. When the
-   app opens at login before opencodex is up, it does this as soon as opencodex is running. To
-   avoid quitting an app you have been using for a while, it only restarts an app that started
-   in the last five minutes (an app whose age cannot be read counts as just started);
-   `ocx chatgpt launch` restarts the app whatever its age. It does nothing while opencodex is
-   not running. The command asks for confirmation; `--yes` confirms non-interactively.
+The app-server shim alone installs no certificate, network listener, PAC, or background
+watcher. It does not log the app's messages or environment. Status reports whether
+the running ChatGPT bundle process carries the expected launcher override.
 
-## Network setups
+## Failure behavior and known limits
 
-No VPN or proxy rules are needed. In the default mode the launch arguments are chosen from the
-system proxy each time the app starts:
+When the platform is not macOS, the OpenCodex runtime is missing, or the filter
+self-test fails, the launcher runs the original binary with untouched stdout. A
+missing bundled app-server binary is the exception: there is nothing to fall back
+to, so the launcher exits with an error (see below).
+A filter that passes the self-test and then dies mid-session closes the pipe.
+What the bundled app-server does after that has not been verified; it may get
+SIGPIPE or a write error and be respawned by Desktop through the same launcher.
+The filter's passthrough mode limits this to an exit/crash case: a rewrite exception
+passes its line through, and an unexpected rewrite-machinery failure switches the
+remaining stream to raw bytes.
 
-| Setup | What the app is launched with |
-|---|---|
-| No proxy | The `chatgpt.com` route only. |
-| VPN in system-proxy mode | The route, the system proxy with a direct fallback, and a bypass for `chatgpt.com` only. |
-| VPN in TUN mode | The route only; loopback traffic never enters the tunnel. |
-| PAC file | The route only. The PAC file may keep `chatgpt.com` on the proxy, so the composer can stay locked, but nothing else breaks. |
+The experiment depends on the bundled binary path, the app honoring
+`CODEX_CLI_PATH`, and current RPC field shapes. Updates may change these. A moved
+or removed OpenCodex installation fails the launcher preflight and runs the
+original binary. Run `ocx chatgpt launch` again after relocating the installation.
+If an app update moves or removes the bundled app-server binary itself, the
+launcher cannot start it: it prints a message naming `ocx chatgpt launch` and
+`ocx chatgpt restore` on stderr and exits, and Desktop cannot start its
+app-server until you run one of them. A single output line longer than 8 MiB is
+passed through unparsed rather than buffered.
 
-opencodex reaches the real `chatgpt.com` through its own `proxy` setting, like all its other
-outbound traffic.
+This standalone shim does not rewrite conversation metadata or route model calls.
+Other app gates or upstream refusals can still prevent sending. Evidence reported
+on an exhausted Plus account also used an intercept, so it does not establish
+that this shim alone resolves every desktop send lock.
 
-## Keep the app working when opencodex stops
+## Local-CA TLS intercept (experimental candidate)
 
-In the default mode a routed app depends on the listener: while opencodex is stopped, its
-`chatgpt.com` requests fail. PAC fallback launches the app with a generated PAC script instead,
-so the app falls back on its own. The script is passed inline (a `data:` URL) because the app
-ignores a `file://` PAC and an `http://` one would need opencodex running to be fetched:
+The separate `chatgptDesktop.unblockSend` experiment terminates TLS for the
+`chatgpt.com` apex host on loopback, relays the account's cookies and credentials,
+and rewrites known quota send gates in conversation metadata and usage responses.
+It is **off by default**, macOS only, and independent of `appServerShim`:
+
+```json
+{
+  "chatgptDesktop": {
+    "unblockSend": true,
+    "port": 10300
+  }
+}
+```
+
+`port` is optional; its default is the running proxy's public port plus 200
+(`10100` → `10300`). A derived port outside the TCP range requires an explicit
+free port. Client-role processes do not start the intercept. A bind or certificate
+failure warns without stopping the proxy's other services.
+
+Start OpenCodex with this config, then run `ocx chatgpt status`. The listener
+creates or reuses the local authority shared with the Claude intercept. **You
+must trust this CA yourself** in the macOS login keychain before launching the
+intercepted app. Status prints the exact command; with the default config path:
+
+```bash
+security add-trusted-cert -r trustRoot -p ssl -k "$HOME/Library/Keychains/login.keychain-db" "$HOME/.opencodex/claude-intercept/ca.pem"
+ocx chatgpt launch
+ocx chatgpt status
+```
+
+Use the certificate path reported by status if your OpenCodex home differs. The
+CLI prints the trust command and never runs it. Trusting a local CA changes the
+login keychain's TLS trust: anyone controlling its private key can issue trusted
+certificates. The listener sees the decrypted account traffic, including cookies,
+authorization headers and message content that it relays. Protect the config
+directory and CA key. The relay does not log request bodies or credentials.
+`restore` removes launch overrides; it does **not** remove CA trust or delete the
+shared authority. Remove trust manually through Keychain Access when you no
+longer need it, accounting for other integrations using the same authority.
+
+Launch restarts ChatGPT with
+`--host-resolver-rules=MAP chatgpt.com 127.0.0.1:<port>`. Explicit system HTTP/SOCKS
+proxies get an apex-host bypass while other hosts retain the proxy with a direct
+fallback; TUN/direct networking needs only the resolver rule. An existing system
+PAC cannot be combined with that bypass, so it may prevent the intercept from
+seeing traffic. With `pacFallback` (below) the app is launched through a generated
+PAC instead of the resolver rule.
+
+If both flags are true, `ocx chatgpt launch` applies the existing app-server shim
+and the intercept together. The shim alone still works without a running proxy.
+The intercept requires OpenCodex's identity-confirmed listener. When OpenCodex
+stops, an app still carrying the resolver rule cannot reach `chatgpt.com`; run
+`ocx chatgpt restore` to relaunch with native networking, or use PAC fallback.
+
+### PAC fallback: keep the app working when OpenCodex stops
+
+PAC fallback launches the app with a generated PAC script instead of the resolver
+rule, so the app falls back on its own. The script is passed inline (a `data:` URL)
+because the app ignores a `file://` PAC and an `http://` one would need OpenCodex
+running to be fetched:
 
 ```json
 { "chatgptDesktop": { "unblockSend": true, "pacFallback": true } }
 ```
 
-`pacFallback` only takes effect together with `unblockSend`. opencodex then also listens on the
-listener port plus one (`10301` by default) and rewrites `chatgpt-unblock.pac` in its home
-directory at every start. The PAC sends `chatgpt.com` to opencodex first, and every other host
-the way the system routes it:
+`pacFallback` only takes effect together with `unblockSend`. OpenCodex then also
+listens on the listener port plus one (`10301` by default), a CONNECT entry that
+splices onto the TLS listener, and rewrites `chatgpt-unblock.pac` in its home
+directory at every start, before the `chatgpt-unblock.ready` marker. The PAC sends
+`chatgpt.com` to that entry first, and every other host the way the system routes it:
 
-| Setup | Other hosts, and `chatgpt.com` while opencodex is stopped |
+| Setup | Other hosts, and `chatgpt.com` while OpenCodex is stopped |
 |---|---|
 | No proxy, or VPN in TUN mode | Direct. |
 | VPN in system-proxy mode | The system proxy, then direct. |
 | PAC file | The system PAC, embedded in the generated file. |
 
-When opencodex stops, the app keeps working on that route without a restart; only the send unblock
-pauses until opencodex is back. The route is captured when opencodex starts: after changing the
-VPN mode, restart opencodex and run `ocx chatgpt launch`. If a system PAC is set but cannot be
-read at that moment, or is too large to pass to the app (the PAC travels inside one launch
-argument, limited to 512 KiB once encoded), other hosts follow the system proxy, if there is one,
-then go direct, and opencodex prints a warning.
+When OpenCodex stops, the app keeps working on that route without a restart; only
+the send unblock pauses until OpenCodex is back. The route is captured when
+OpenCodex starts: after changing the VPN mode, restart OpenCodex and run
+`ocx chatgpt launch`. If a system PAC is set but cannot be read at that moment, or
+is too large to pass to the app (the PAC travels inside one launch argument,
+limited to 512 KiB once encoded), other hosts follow the system proxy, if there is
+one, then go direct, and OpenCodex prints a warning. After turning `pacFallback` on
+or off, restart OpenCodex, run `ocx chatgpt launch`, and run
+`ocx chatgpt install-watcher` again if you use the watcher. `restore` undoes a PAC
+launch the same way as a resolver-rule one.
 
-After turning `pacFallback` on or off, restart opencodex, run `ocx chatgpt launch`, and run
-`ocx chatgpt install-watcher` again if you use the watcher.
+### Intercept rewrite boundary
 
-## App-server shim (experimental)
+Only `/backend-api/conversation/init`, `/backend-api/conversation` and
+`/backend-api/f/conversation` (including child paths), plus the exact
+`/backend-api/wham/usage` and `/backend-api/wham/usage/stream` paths are rewritten.
+Conversation metadata loses known quota `send` / `tpp_send` blocks and exhausted
+send progress entries. Unknown and subscription/policy/workspace reasons remain;
+status reports preserved reasons. Usage rewriting reuses the shim's gate helpers,
+keeping workspace, credit and spend-control gates and usage display intact. Other
+HTTP responses pass through; WebSocket upgrades, voice and dictation relay
+without rewriting through direct, HTTP CONNECT or shared SOCKS5 transport.
 
-The shim filters the built-in Codex server's JSON-RPC output to open known plain-quota gates. It
-does not increase an account's quota or make an upstream service accept a request it refuses. It
-is macOS only and off by default, and works in two ways:
-
-- **On its own.** Set `{ "chatgptDesktop": { "appServerShim": true } }` and run
-  `ocx chatgpt launch`. opencodex writes an executable launcher in its home directory, quits
-  ChatGPT if it is running, and relaunches it with `open -a <bundle> --env CODEX_CLI_PATH=<launcher>`.
-  The app is found by its bundle identifier, `com.openai.codex`, so an install in `~/Applications`
-  or on another volume works, and another app that shares the "ChatGPT" name is never quit or
-  opened. Save ongoing work first: this restarts the app. It does not need a running opencodex
-  proxy. Normal Dock or Spotlight launches do not apply the shim. `ocx chatgpt restore` removes the
-  launcher and relaunches without the override.
-- **With send unblock.** With `unblockSend` and `appServerShim` both on, opencodex prepares the
-  launcher at every start, and `ocx chatgpt launch` and the watcher start the app through it. If the
-  checks below refuse the bundle, opencodex prints a warning and the intercept keeps working
-  without the shim.
-
-Only `account/rateLimits/updated` notifications and responses whose top-level result contains
-`rateLimits`, `rateLimitsByLimitId` or `ordinaryUsageAllowed` are eligible. Plain
-`rate_limit_reached` markers are cleared; the gate flags (`allowed`, `limit_reached` /
-`limitReached`, `ordinaryUsageAllowed`) open only with plain-quota evidence, that marker or a window
-at 100%. A flag closed for a reason the payload does not show stays closed, and workspace, credit,
-unknown and spend-control restrictions keep the gate closed. Displayed usage stays as received, and
-every other message passes through byte for byte. Stdin, stderr and the real binary's exit status
-keep their direct connection to the app.
-
-Before writing the launcher, opencodex checks that the bundle and its app-server binary are owned by
-you or root, are not writable by group or others, and pass strict code-signature verification under
-OpenAI's team ID (`2DC432GLL2`). A bundle that fails any of these is refused. The launcher has mode
-`0755`, embeds the current opencodex executable, and is written to a temporary file and renamed into
-place, so a symbolic link at that path is replaced rather than followed. Keep the launcher, its
-directory and the opencodex installation under your control: changing these paths changes code the
-app runs.
-
-When the platform is not macOS, the opencodex runtime is missing, or the filter's self-test fails,
-the launcher runs the original binary with untouched stdout. If an app update moves or removes the
-bundled app-server binary itself, the launcher prints a message naming `ocx chatgpt launch` and
-`ocx chatgpt restore` and exits, and the app cannot start its server until you run one of them. A
-filter that passes the self-test and then dies mid-session closes the server's output pipe; what the
-app does after that has not been verified. A single output line longer than 8 MiB is passed through
-unparsed. The shim depends on the app honoring `CODEX_CLI_PATH` and on the current message shapes,
-which updates may change.
-
-## Check the state
+### Optional intercept launch watcher
 
 ```bash
-ocx chatgpt status
-```
-
-It reports whether the feature is on, whether the listener on the port is opencodex's, whether
-the certificate is trusted, the watcher state, whether the running app carries the route, and
-any send locks that were kept on purpose. With the app-server shim on it also reports whether its
-launcher exists and whether the running app was started through it.
-
-## Turn it off
-
-```bash
+ocx chatgpt install-watcher --yes
 ocx chatgpt uninstall-watcher
 ocx chatgpt restore
 ```
 
-`restore` reopens a routed app with native networking and without the app-server shim, and removes
-the shim's launcher. Then set `chatgptDesktop.unblockSend` (and `appServerShim`) to `false` and
-restart opencodex. The certificate authority is
-shared with opencodex's Claude integrations; remove its trust only if you use neither.
+Installation without `--yes` asks in an interactive terminal. The launchd agent
+watches the app's Electron `SingletonLock` and the `chatgpt-unblock.ready` marker. In watch
+mode, it restarts an app launched without intercept switches only while the listener answers as
+OpenCodex and the app is no more than five minutes old; a missing or unparseable process age
+counts as fresh, and explicit `ocx chatgpt launch` is not age-limited. This can interrupt
+startup work; it does nothing while the listener is unavailable. It manages
+**intercept launches only**; use explicit launch for the app-server shim. A loaded
+watcher must be uninstalled before `restore`, so it cannot put the switches back.
+In PAC-fallback mode the watcher also waits for the CONNECT entry and launches
+with the PAC switch instead of the resolver rule.
 
-## Troubleshooting
+### Evidence and decision limits
 
-- **Account, usage or settings pages do not load:** the certificate is not trusted. Run
-  step 2 again; `ocx chatgpt status` shows the trust state.
-- **The send button is still grey:** check `ocx chatgpt status`. The app may be running
-  without the route (run `ocx chatgpt launch`), or the lock may have a reason other than usage
-  quota, which is listed under "send blocks kept".
-- **The send button stays grey with the route working:** the lock may come from the built-in Codex
-  server rather than from the pages the route covers. Turn on `chatgptDesktop.appServerShim`, run
-  `ocx chatgpt launch`, and check `ocx chatgpt status` (the "app-server shim" line says whether the
-  running app was started through it). If opencodex warned at start that the shim was not
-  prepared, or `launch` refuses it, the reason names the check the bundle failed.
-- **The app cannot load anything after opencodex stops:** in the default mode a routed app
-  depends on the listener. Start opencodex again or run `ocx chatgpt restore`, or turn on
-  PAC fallback so the app falls back on its own.
+[#6196](https://github.com/lidge-jun/opencodex/issues/6196) reported zero established
+listener connections over about 20 hours on current Desktop builds: the bundled
+app-server performs the gate reads and may bypass Chromium's resolver rule.
+The later exhausted-Plus-account report used the shim, intercept and restart
+together and does not isolate the intercept's effectiveness. This candidate
+conflicts with the maintainer's provider-aware admission design, which rejects
+local CA installation and quota-data rewriting; maintainers may close it.

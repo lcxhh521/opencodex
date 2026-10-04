@@ -1,192 +1,161 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-import { withCatalogWriteSerialization } from "../../src/codex/catalog-write-serialization";
-import { CODEX_CATALOG_AUDIT_FILE } from "../../src/codex/catalog/write-audit";
-import {
-  CODEX_HOME_JOURNAL_FILE,
-  currentOpencodexHome,
-  inspectCodexHomeOwner,
-  opencodexHomeForInjection,
-} from "../../src/codex/codex-home-owner";
-import { resolveCodexCatalogSerializationDatabasePath, resolveEffectiveUserIdentity } from "../../src/codex/user-identity";
-import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { CODEX_HOME_JOURNAL_FILE, currentOpencodexHome, inspectCodexHomeOwner, opencodexHomeForInjection } from "../../src/codex/codex-home-owner";
 import { repoRoot } from "../helpers/repo-root";
+import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
 
-function runInHomes(script: string): { status: number; stdout: string; stderr: string } {
-  const result = spawnSync(process.execPath, ["--eval", script], {
-    cwd: repoRoot(),
-    env: { ...process.env, CODEX_HOME: codexHome, OPENCODEX_HOME: process.env.OPENCODEX_HOME },
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-  });
-  return { status: result.status ?? 1, stdout: result.stdout?.trim() ?? "", stderr: result.stderr ?? "" };
+setDefaultTimeout(SPAWN_BUDGET_MS);
+let root: string, codexHome: string, ownHome: string, otherHome: string;
+let previous: string | undefined;
+const journal = (home?: string) => ({ version: 1, originalConfig: "", originalProfile: null,
+  pid: 1, timestamp: "2026-10-04T00:00:00.000Z", ...(home === undefined ? {} : { opencodexHome: home }) });
+const bind = (home?: string) => writeFileSync(join(codexHome, CODEX_HOME_JOURNAL_FILE), JSON.stringify(journal(home)));
+function run(script: string): Record<string, unknown> {
+  const child = spawnSync(process.execPath, ["--eval", script], { cwd: repoRoot(),
+    env: { ...process.env, CODEX_HOME: codexHome, CODEX_SQLITE_HOME: "", OPENCODEX_HOME: ownHome },
+    encoding: "utf8", timeout: SPAWN_BUDGET_MS - 5_000 });
+  expect(child.status, child.stderr).toBe(0);
+  return JSON.parse(child.stdout.trim().split("\n").at(-1) ?? "{}");
 }
-
-let root = "";
-let codexHome = "";
-let ownHome = "";
-let otherHome = "";
-let previousOpencodexHome: string | undefined;
-
-function bindTo(home: string | undefined): void {
-  writeFileSync(join(codexHome, CODEX_HOME_JOURNAL_FILE), JSON.stringify({
-    version: 1,
-    originalConfig: "",
-    originalProfile: null,
-    pid: 1,
-    timestamp: "2026-10-04T00:00:00.000Z",
-    ...(home === undefined ? {} : { opencodexHome: home }),
-  }));
-}
-
 beforeEach(() => {
-  previousOpencodexHome = process.env.OPENCODEX_HOME;
-  root = realpathSync.native(mkdtempSync(join(tmpdir(), "ocx-home-owner-")));
-  codexHome = join(root, "codex");
-  ownHome = join(root, "own");
-  otherHome = join(root, "other");
-  for (const dir of [codexHome, ownHome, otherHome]) mkdirSync(dir);
+  previous = process.env.OPENCODEX_HOME;
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), "ocx-owner-")));
+  codexHome = join(root, "codex"); ownHome = join(root, "own"); otherHome = join(root, "other");
+  for (const home of [codexHome, ownHome, otherHome]) mkdirSync(home);
   process.env.OPENCODEX_HOME = ownHome;
 });
-
 afterEach(() => {
-  if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
-  else process.env.OPENCODEX_HOME = previousOpencodexHome;
-  const path = resolveCodexCatalogSerializationDatabasePath(resolveEffectiveUserIdentity(), codexHome);
-  for (const suffix of ["", "-journal", "-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
+  if (previous === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = previous;
   removeTreeWithRetry(root);
 });
 
-describe("Codex home binding (#6529)", () => {
-  test("a Codex home without a journal, or with a pre-binding journal, is unbound", () => {
-    expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "unbound" });
-    bindTo(undefined);
-    expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "unbound" });
-    writeFileSync(join(codexHome, CODEX_HOME_JOURNAL_FILE), "{not json");
-    expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "unbound" });
-    // Read-only: an unreadable journal is recovery evidence, not ours to clean.
-    expect(existsSync(join(codexHome, CODEX_HOME_JOURNAL_FILE))).toBe(true);
-  });
-
-  test("the injecting home owns it, under any spelling of the same directory", () => {
-    bindTo(ownHome);
-    expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "owned" });
-    const alias = join(root, "alias");
-    symlinkSync(ownHome, alias);
-    bindTo(alias);
-    expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "owned" });
-  });
-
-  test("another existing home is foreign; a vanished one is stale", () => {
-    bindTo(otherHome);
-    expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "foreign", boundHome: otherHome });
-    removeTreeWithRetry(otherHome);
-    expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "stale", boundHome: otherHome });
-  });
-
-  test("an injection keeps an existing owner, fills a missing one, and replaces only a stale one", () => {
-    const current = currentOpencodexHome();
-    expect(current).toBe(ownHome);
-    expect(opencodexHomeForInjection(undefined)).toBe(ownHome);
-    expect(opencodexHomeForInjection(ownHome)).toBe(ownHome);
-    expect(opencodexHomeForInjection(otherHome)).toBe(otherHome);
-    removeTreeWithRetry(otherHome);
-    expect(opencodexHomeForInjection(otherHome)).toBe(ownHome);
-  });
-
-  test("K refuses a writer from another home before running its callback", () => {
-    bindTo(otherHome);
-    let ran = false;
-    const outcome = withCatalogWriteSerialization(codexHome, () => { ran = true; }, { intent: "refresh", writer: "test" });
-    expect(outcome).toEqual({ kind: "unavailable", reason: "foreign-owner" });
-    expect(ran).toBe(false);
-    // No audit file was created on the owner's behalf.
-    expect(existsSync(join(codexHome, CODEX_CATALOG_AUDIT_FILE))).toBe(false);
-  });
-
-  test("a refused writer leaves one line in an audit file the owner created", () => {
-    bindTo(otherHome);
-    writeFileSync(join(codexHome, CODEX_CATALOG_AUDIT_FILE), "");
-    withCatalogWriteSerialization(codexHome, () => null, { intent: "restore", writer: "codex-restore" });
-    const lines = readFileSync(join(codexHome, CODEX_CATALOG_AUDIT_FILE), "utf8").trim().split("\n");
-    expect(lines).toHaveLength(1);
-    expect(JSON.parse(lines[0]!)).toMatchObject({
-      target: "catalog",
-      outcome: "refused",
-      reason: "foreign-owner",
-      intent: "restore",
-      writer: "codex-restore",
-      pid: process.pid,
-    });
-  });
-
-  test("K lets the owner, an unbound home and a stale binding through", () => {
-    for (const bound of [ownHome, undefined]) {
-      bindTo(bound);
-      expect(withCatalogWriteSerialization(codexHome, () => "ran", { intent: "refresh", writer: "test" }))
-        .toEqual({ kind: "completed", value: "ran" });
-    }
-    bindTo(otherHome);
-    removeTreeWithRetry(otherHome);
-    expect(withCatalogWriteSerialization(codexHome, () => "ran", { intent: "refresh", writer: "test" }))
-      .toEqual({ kind: "completed", value: "ran" });
-  });
-
-  test("an injection records the injecting home, and fills it into a pre-binding journal", () => {
-    writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n');
-    const first = runInHomes(`
-      const { writeJournal } = require("./src/codex/journal");
-      writeJournal();
-    `);
-    expect(first.status).toBe(0);
-    const journalPath = join(codexHome, CODEX_HOME_JOURNAL_FILE);
-    expect(JSON.parse(readFileSync(journalPath, "utf8")).opencodexHome).toBe(ownHome);
-
-    const legacy = JSON.parse(readFileSync(journalPath, "utf8")) as Record<string, unknown>;
-    delete legacy.opencodexHome;
-    writeFileSync(journalPath, JSON.stringify(legacy));
-    const marked = runInHomes(`
-      const { markJournalInjectedState } = require("./src/codex/journal");
-      markJournalInjectedState("routed", null, { injectedOpenaiBaseUrl: null, injectedRealtimeWsBaseUrl: null, injectedCatalogPath: null });
-    `);
-    expect(marked.status).toBe(0);
-    expect(JSON.parse(readFileSync(journalPath, "utf8")).opencodexHome).toBe(ownHome);
-  });
-
-  test("a replacement native snapshot from another home keeps the binding", () => {
-    writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n');
-    bindTo(otherHome);
-    const replaced = runInHomes(`
-      const { writeJournal } = require("./src/codex/journal");
-      writeJournal({ currentStateIsNative: true });
-    `);
-    expect(replaced.status).toBe(0);
-    const journal = JSON.parse(readFileSync(join(codexHome, CODEX_HOME_JOURNAL_FILE), "utf8")) as Record<string, unknown>;
-    expect(journal.originalConfig).toBe(Buffer.from('model = "gpt-5.5"\n').toString("base64"));
-    expect(journal.opencodexHome).toBe(otherHome);
-  });
-
-  test("a sync from another home leaves a bound catalog alone, even with a valid config", () => {
-    const catalog = `${JSON.stringify({ models: [
-      { slug: "gpt-5.5", display_name: "GPT-5.5", description: "native", priority: 1, visibility: "list" },
-      { slug: "ark/glm-5.3", display_name: "ark/glm-5.3", description: "Routed via opencodex → ark/glm-5.3 (ark).", priority: 5, visibility: "list" },
-    ] }, null, 2)}\n`;
-    writeFileSync(join(codexHome, "config.toml"), 'model_catalog_json = "catalog.json"\n');
-    writeFileSync(join(codexHome, "catalog.json"), catalog);
-    bindTo(otherHome);
-    // The #6530 guard cannot see this one: config.json is valid and genuinely routes nothing.
-    writeFileSync(join(ownHome, "config.json"), JSON.stringify({ providers: {} }));
-    const r = runInHomes(`
-      const { syncCatalogModels } = require("./src/codex/catalog");
-      syncCatalogModels({ providers: {} }).then(res => console.log(JSON.stringify(res)));
-    `);
-    expect(r.status).toBe(0);
-    expect(readFileSync(join(codexHome, "catalog.json"), "utf8")).toBe(catalog);
-    const result = JSON.parse(r.stdout.split("\n").at(-1) ?? "{}") as Record<string, unknown>;
-    expect(result).toMatchObject({ catalogWritten: false, refreshOutcome: "refused", skippedReason: "foreign_owner" });
-  });
+test("missing and valid hashless legacy journals are unbound", () => {
+  expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "unbound" });
+  bind();
+  expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "unbound" });
+});
+test("canonical paths and aliases on both sides identify the physical owner", () => {
+  bind(ownHome);
+  expect(currentOpencodexHome()).toBe(ownHome);
+  expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "owned" });
+  const alias = join(root, "alias"); symlinkSync(ownHome, alias, "dir");
+  bind(alias);
+  expect(inspectCodexHomeOwner(codexHome, ownHome)).toEqual({ kind: "owned" });
+  bind(ownHome);
+  expect(inspectCodexHomeOwner(codexHome, alias)).toEqual({ kind: "owned" });
+});
+test("extant foreign directories are refused and proven absent bindings are stale", () => {
+  bind(otherHome);
+  expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "foreign", boundHome: otherHome });
+  rmSync(otherHome, { recursive: true });
+  expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "stale", boundHome: otherHome });
+});
+test("uncertain current resolution and dangling owner links fail closed", () => {
+  bind(ownHome);
+  expect(inspectCodexHomeOwner(codexHome, join(root, "missing"))).toEqual({ kind: "unknown" });
+  const alias = join(root, "dangling"); symlinkSync(join(root, "absent"), alias, "dir");
+  bind(alias);
+  expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "unknown" });
+  expect(opencodexHomeForInjection(alias)).toBe(alias);
+});
+test("malformed, invalid binding and oversized journals remain unknown and unchanged", () => {
+  const path = join(codexHome, CODEX_HOME_JOURNAL_FILE);
+  for (const bytes of ["{broken", "null", "{}", JSON.stringify(journal("relative")),
+    JSON.stringify({ ...journal(), opencodexHome: null }), " ".repeat(1024 * 1024 + 1)]) {
+    writeFileSync(path, bytes);
+    expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "unknown" });
+    expect(readFileSync(path, "utf8")).toBe(bytes);
+  }
+});
+test("symlinked journal, directory journal and owner file are not authority", () => {
+  const path = join(codexHome, CODEX_HOME_JOURNAL_FILE);
+  const target = join(root, "target"); writeFileSync(target, JSON.stringify(journal(ownHome)));
+  symlinkSync(target, path, "file");
+  expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "unknown" });
+  rmSync(path); mkdirSync(path);
+  expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "unknown" });
+  rmSync(path, { recursive: true }); bind(target);
+  expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "unknown" });
+});
+test("unresolvable owner paths and journals fail closed without a blocking read", () => {
+  const loop = join(root, "loop"); symlinkSync(loop, loop, "dir");
+  bind(loop);
+  expect(inspectCodexHomeOwner(codexHome)).toEqual({ kind: "unknown" });
+  expect(inspectCodexHomeOwner(join(loop, "codex"))).toEqual({ kind: "unknown" });
+  expect(opencodexHomeForInjection(loop)).toBe(loop);
+});
+test("injection binding selection preserves foreign evidence and adopts only legacy/stale", () => {
+  expect(opencodexHomeForInjection(undefined)).toBe(ownHome);
+  expect(opencodexHomeForInjection(ownHome)).toBe(ownHome);
+  expect(opencodexHomeForInjection(otherHome)).toBe(otherHome);
+  rmSync(otherHome, { recursive: true });
+  expect(opencodexHomeForInjection(otherHome)).toBe(ownHome);
+});
+test("snapshot and injected-state writers fill legacy, refresh owned native snapshots, and adopt stale bindings", () => {
+  writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-6.1-sol"\n');
+  const script = `const j = require("./src/codex/journal");
+    j.writeJournal({currentStateIsNative:true});
+    j.markJournalInjectedState("routed", null, {injectedOpenaiBaseUrl:null,injectedRealtimeWsBaseUrl:null,injectedCatalogPath:null});
+    console.log(require("node:fs").readFileSync(j.JOURNAL_PATH,"utf8"));`;
+  expect(run(script).opencodexHome).toBe(ownHome);
+  bind(); expect(run(script).opencodexHome).toBe(ownHome);
+  bind(ownHome);
+  const replaced = run(script);
+  expect(replaced.opencodexHome).toBe(ownHome);
+  expect(replaced.originalConfig).toBe(Buffer.from('model = "gpt-6.1-sol"\n').toString("base64"));
+  bind(otherHome);
+  rmSync(otherHome, { recursive: true });
+  expect(run(script).opencodexHome).toBe(ownHome);
+});
+test("direct snapshot and mark refuse foreign ownership preserving all recovery bytes", () => {
+  const configPath = join(codexHome, "config.toml");
+  const profilePath = join(codexHome, "opencodex.config.toml");
+  const journalPath = join(codexHome, CODEX_HOME_JOURNAL_FILE);
+  writeFileSync(configPath, 'model = "gpt-6.1-sol"\n');
+  writeFileSync(profilePath, "profile-before\n");
+  const bytes = JSON.stringify({ ...journal(otherHome), originalConfig: Buffer.from("foreign original").toString("base64"),
+    injectedConfigHash: "foreign-hash", injectedCatalogPath: "foreign-catalog.json" }, null, 2) + "\n";
+  writeFileSync(journalPath, bytes);
+  const result = run(`const j=require("./src/codex/journal");const fs=require("node:fs");let reasons=[],snapshots=[];
+    for(const fn of [()=>j.writeJournal({currentStateIsNative:true}),
+      ()=>j.markJournalInjectedState("routed", "new profile", {injectedOpenaiBaseUrl:"http://127.0.0.1:19999",injectedRealtimeWsBaseUrl:null,injectedCatalogPath:"new-catalog.json"})]) {
+      try {fn();} catch(e) {reasons.push(e.reason);}
+      snapshots.push(fs.readFileSync(j.JOURNAL_PATH,"utf8"));
+    }console.log(JSON.stringify({reasons,snapshots}));`);
+  expect(result.reasons).toEqual(["foreign-owner", "foreign-owner"]);
+  expect(result.snapshots).toEqual([bytes, bytes]);
+  expect(readFileSync(journalPath, "utf8")).toBe(bytes);
+  expect(readFileSync(configPath, "utf8")).toBe('model = "gpt-6.1-sol"\n');
+  expect(readFileSync(profilePath, "utf8")).toBe("profile-before\n");
+});
+test("corrupt journals refuse direct snapshot and mark without overwriting evidence", () => {
+  writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-6.1-sol"\n');
+  const path = join(codexHome, CODEX_HOME_JOURNAL_FILE); writeFileSync(path, "{broken");
+  const result = run(`const j = require("./src/codex/journal"); let reasons=[];
+    for (const fn of [()=>j.writeJournal({currentStateIsNative:true}),
+      ()=>j.markJournalInjectedState("routed",null,{injectedOpenaiBaseUrl:null,injectedRealtimeWsBaseUrl:null,injectedCatalogPath:null})]) {
+      try {fn();} catch(e) {reasons.push(e.reason);}
+    } console.log(JSON.stringify({reasons}));`);
+  expect(result.reasons).toEqual(["owner-unknown", "owner-unknown"]);
+  expect(readFileSync(path, "utf8")).toBe("{broken");
+});
+test("foreign valid providerless sync preserves catalog and cache", () => {
+  const catalog = JSON.stringify({ models: [
+    { slug: "gpt-6.1-sol", display_name: "native", description: "native", priority: 1, visibility: "list" },
+    { slug: "ark/glm-5.3", display_name: "routed", description: "Routed via opencodex → ark/glm-5.3 (ark).", priority: 5, visibility: "list" },
+  ] });
+  writeFileSync(join(codexHome, "config.toml"), 'model_catalog_json = "catalog.json"\n');
+  writeFileSync(join(codexHome, "catalog.json"), catalog);
+  writeFileSync(join(codexHome, "models_cache.json"), "cache-before");
+  writeFileSync(join(ownHome, "config.json"), JSON.stringify({ providers: {} })); bind(otherHome);
+  const result = run(`const {syncCatalogModels}=require("./src/codex/catalog");
+    console.log(JSON.stringify(await syncCatalogModels({providers:{}})));`);
+  expect(result).toMatchObject({ catalogWritten: false, refreshOutcome: "refused", skippedReason: "foreign_owner" });
+  expect(readFileSync(join(codexHome, "catalog.json"), "utf8")).toBe(catalog);
+  expect(readFileSync(join(codexHome, "models_cache.json"), "utf8")).toBe("cache-before");
 });

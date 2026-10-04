@@ -17,6 +17,7 @@ import type { LivenessIo, LiveProxy } from "../server/proxy-liveness";
 import type { OcxConfig } from "../types";
 import type { OwnedIntegrationRefreshOutcome } from "../integrations/owned-refresh";
 import { hasHelpFlag, printSubcommandUsage, printUsage } from "./help";
+import { printUnknownCommand } from "./help-recovery";
 import {
   HUB_GATED_SKIP_MESSAGE,
   localClientSkipMessage,
@@ -351,7 +352,8 @@ const commandRunners: Record<string, CommandRunner> = {
       console.error(clientState.kind === "connected"
         ? "Client mode does not start a local provider proxy; use 'ocx sync'."
         : `Client state is ${clientState.kind}: ${clientState.reason}`);
-      return 1;
+      // A validated client delegates inference to its hub; no local startup is needed.
+      return clientState.kind === "connected" ? 0 : 1;
     }
     await deps.handleEnsure();
     return Number(process.exitCode ?? 0);
@@ -513,7 +515,7 @@ const commandRunners: Record<string, CommandRunner> = {
             },
             config,
             port: live.port,
-          }, ["mcode", "pi", "raycast", "omo", "cline", "droid"]));
+          }, ["mcode", "pi", "raycast", "omo", "cline", "droid", "opencode", "kilo"]));
         } catch (error) {
           console.warn(`Client integrations were not refreshed: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -632,6 +634,10 @@ const commandRunners: Record<string, CommandRunner> = {
       console.log("No Codex catalog to derive a cache from; nothing to sync.");
     } else if (unchanged) {
       console.log("Codex model cache is already current; nothing to sync.");
+    } else if (invalidated.kind === "unavailable"
+      && (invalidated.reason === "foreign-owner" || invalidated.reason === "owner-unknown")) {
+      const { FOREIGN_CODEX_HOME_OWNER_MESSAGE, UNKNOWN_CODEX_HOME_OWNER_MESSAGE } = await import("../codex/catalog/routed-removal");
+      console.error(invalidated.reason === "foreign-owner" ? FOREIGN_CODEX_HOME_OWNER_MESSAGE : UNKNOWN_CODEX_HOME_OWNER_MESSAGE);
     } else if (!ok) {
       console.error(`Cache refresh did not complete (${invalidated.kind}). The Codex model cache was not rewritten.`);
     }
@@ -696,15 +702,20 @@ const commandRunners: Record<string, CommandRunner> = {
     switch (deps.args[1]) {
       case "install": {
         const r = installCodexShim();
-        const { healthy, summary } = diagnoseCodexShim();
+        const { healthy, runnable, active, summary } = diagnoseCodexShim();
+        const success = !r.refused && (runnable ?? healthy);
         const { collectCodexShimReadinessWarnings } = await import("./codex-shim-readiness");
-        const warnings = healthy
+        const warnings = success
           ? collectCodexShimReadinessWarnings()
           : [];
-        console.log(`${r.installed && warnings.length === 0 ? "✅ " : "⚠️  "}${r.message}`);
+        console.log(`${success && healthy && warnings.length === 0 ? "✅ " : "⚠️  "}${r.message}`);
         for (const warning of warnings) console.warn(`   ${warning}`);
-        if (!healthy) console.error(`Codex shim installation is unhealthy: ${summary}`);
-        return healthy ? 0 : 1;
+        if (success && active !== undefined && active !== true) {
+          const { overlayActivationHint } = await import("../codex/shim-overlay");
+          console.warn(`   ${overlayActivationHint()}`);
+        }
+        if (!success) console.error(`${r.refused ? "Codex shim installation was refused" : "Codex shim installation is unhealthy"}: ${summary}`);
+        return success ? 0 : 1;
       }
       case "status":
         console.log(codexShimStatus());
@@ -948,6 +959,10 @@ const commandRunners: Record<string, CommandRunner> = {
     const { handleLabCommand } = await import("./lab");
     return await handleLabCommand(deps.args.slice(1));
   },
+  chatgpt: async deps => {
+    const { handleChatgptCommand } = await import("./chatgpt-command");
+    return await handleChatgptCommand(deps.args.slice(1));
+  },
   claude: async deps => {
     const { cmdClaude } = await import("./claude");
     // "ocx claude desktop" → write Desktop 3P config
@@ -957,15 +972,15 @@ const commandRunners: Record<string, CommandRunner> = {
       if (exitCode !== 0) return exitCode;
       return 0;
     }
+    if (deps.args[1] === "intercept") {
+      const { handleClaudeInterceptCommand } = await import("./integrations");
+      return await handleClaudeInterceptCommand(deps.args.slice(2));
+    }
     if (deps.args[1] === "config") {
       const { handleClaudeConfigCommand } = await import("./integrations");
       return await handleClaudeConfigCommand(deps.args.slice(2));
     }
     return await cmdClaude(deps.args.slice(1));
-  },
-  chatgpt: async deps => {
-    const { handleChatgptCommand } = await import("./chatgpt-command");
-    return await handleChatgptCommand(deps.args.slice(1));
   },
   opencode: async deps => {
     const { cmdOpencode } = await import("./opencode");
@@ -1163,8 +1178,7 @@ export async function dispatchCommand(head: CliHead, deps: CliDispatchDeps): Pro
   }
   const runner = commandRunners[resolveDispatchCommand(command) ?? ""];
   if (!runner) {
-    console.error(`Unknown command: ${command}`);
-    printUsage();
+    printUnknownCommand(command);
     return 1;
   }
   return await runner(deps);

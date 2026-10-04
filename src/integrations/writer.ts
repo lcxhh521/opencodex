@@ -18,7 +18,7 @@ import { shouldInjectApiAuthHeader } from "../codex/inject";
 import { detachedConfigSnapshot } from "../config/admitted-identity";
 import { copyPlainData } from "../lib/plain-data";
 import type { OcxConfig } from "../types";
-import { defaultIntegrationIO, loadTarget, type IntegrationIO } from "./config-io";
+import { defaultIntegrationIO, loadTarget, parseConfig, type IntegrationIO } from "./config-io";
 import { inspectKiloCandidates } from "./kilo-candidates";
 import {
   fingerprint,
@@ -33,7 +33,7 @@ import {
   refreshablePathsOf,
   semanticProtectedContributionFingerprint,
 } from "./ownership-policy";
-import { AmbiguousSelectorError, createdContainerPaths, mergeContribution, removeFragments } from "./merge";
+import { AmbiguousSelectorError, createdContainerPaths, mergeContribution, parseSegment, removeFragments } from "./merge";
 import {
   INTEGRATION_CLIENTS,
   assertDroidPathsUnambiguous,
@@ -43,12 +43,12 @@ import {
   type IntegrationClientId,
 } from "./registry";
 import { declaredIntegrationTarget } from "./target";
-import { exportContextOf } from "./state";
+import { buildIntegrationContribution, exportContextOf } from "./state";
 import type { IntegrationState } from "./state";
 import { serializeDocument, UnserializableValueError } from "./serialize";
 import { ClientPathError } from "../clients/config-export";
 import { matchesOperationResult, newOpId, type JournalEntry } from "./journal";
-import { observeIntegration, type IntegrationWriteInput, type RefusalReason } from "./mutation-plan";
+import { observeIntegration, restoreStoreDirectoryRefusal, type IntegrationWriteInput, type RefusalReason } from "./mutation-plan";
 import { createIntegrationStateStore, type IntegrationStateStore } from "./store";
 import {
   patchYamlFragmentSource,
@@ -300,6 +300,8 @@ function applyOrRefreshIntegration(
     return refuse(clientId, "superseded_store", classified.state,
       target.ineffective.why === "owned-config-file"
         ? `${clientId} now reads its providers from ${readsFrom}, and opencodex still has a block in ${configPath}, which it no longer reads. Disable the ${clientId} integration to remove that block, then enable it again to write ${readsFrom}.`
+        : target.ineffective.why === "missing-store"
+          ? `${clientId} reads its providers from ${readsFrom}, which does not exist. ${clientId} renames ${configPath} away and imports it on its next start, so opencodex will not write there. ${target.ineffective.remedy ?? fallback}`
         : readsFrom === configPath
           ? `opencodex does not recognise the schema of ${readsFrom}, the file ${clientId} reads its providers from, so it will not merge into it. ${fallback}`
           : `${clientId} now reads its providers from ${readsFrom}, whose schema opencodex does not recognise, so writing ${configPath} would change nothing it loads. ${fallback}`);
@@ -383,8 +385,15 @@ function applyOrRefreshIntegration(
   let created: string[];
   let text: string;
   try {
+    // The source patcher updates this selected row in place. Keep it in the
+    // semantic merge too, even when we originally created it, and retain that
+    // provenance so disable can still remove the row when it becomes empty.
+    const sourceRoot = target.sourcePreservingYaml?.path[0];
+    const retainedRow = sourceRoot && parseSegment(sourceRoot).kind === "select" ? sourceRoot : null;
+    const priorCreated = record?.createdContainers ?? [];
+    const prunable = new Set(priorCreated.filter(path => path !== retainedRow));
     const base = classified.state === "stale" && record
-      ? removeFragments(parsed, record.fragmentPaths, new Set(record.createdContainers ?? [])).doc
+      ? removeFragments(parsed, record.fragmentPaths, prunable).doc
       : classified.state === "conflict" && record
         /*
          * A forced overwrite of a `foreign-edit` conflict drops what the previous
@@ -399,11 +408,12 @@ function applyOrRefreshIntegration(
          * them, so a later disable removes our leaves and leaves their structure
          * standing.
          */
-        ? removeFragments(parsed, record.fragmentPaths, new Set(record.createdContainers ?? [])).doc
+        ? removeFragments(parsed, record.fragmentPaths, prunable).doc
         : parsed;
     // Computed against the document as it stands BEFORE the merge: afterwards
     // every container exists and "did we create this?" is unanswerable.
     created = createdContainerPaths(base, contribution);
+    if (retainedRow && priorCreated.includes(retainedRow)) created = [...new Set([retainedRow, ...created])];
     const nextDocument = mergeContribution(base, contribution);
     if (clientId === "cline") preserveClineSelection(parsed, nextDocument);
     if (target.sourcePreservingYaml && before !== null) {
@@ -651,6 +661,10 @@ export function restoreIntegration(input: IntegrationRestoreInput): WriteOutcome
     return refuse(clientId, "conflict", "conflict",
       `that operation was recorded for ${configPath}, which this client no longer writes; it now resolves to ${resolvedPath}`);
   }
+  const directoryRefusal = restoreStoreDirectoryRefusal(input, configPath, io);
+  if (directoryRefusal !== null) {
+    return refuse(clientId, "unsafe", "unsafe", directoryRefusal);
+  }
   /*
    * Preview refuses this in observeRestore. Refusing here too is what keeps an
    * undo of an older candidate from replacing the record a newer candidate owns.
@@ -713,7 +727,11 @@ export function restoreIntegration(input: IntegrationRestoreInput): WriteOutcome
   // exact bytes when the snapshot was taken. Re-deriving it from the file would
   // mean guessing which entries are ours, and a wrong guess deletes a user's.
   const restoredRecord = entry.priorRecord;
-  const fresh = rowTarget.buildContribution(exportContextOf(input));
+  const fresh = buildIntegrationContribution(
+    { ...input, droidReasoningDefaults: undefined }, rowTarget,
+    clientId === "droid" && restoredText !== null ? parseConfig(restoredText, "json") : undefined,
+    restoredRecord,
+  );
   /*
    * Does the restored record actually describe the restored bytes?
    *
@@ -812,6 +830,12 @@ function freezeIntegrationInput(input: IntegrationWriteInput): FrozenIntegration
   if (!models.ok) {
     throw new UncopyableIntegrationInputError("the model roster could not be captured for this write");
   }
+  const droidReasoningDefaults = input.droidReasoningDefaults === undefined
+    ? undefined
+    : copyPlainData(input.droidReasoningDefaults);
+  if (droidReasoningDefaults !== undefined && !droidReasoningDefaults.ok) {
+    throw new UncopyableIntegrationInputError("Droid reasoning defaults could not be captured for this write");
+  }
   /*
    * One resolution for both paths. Aside derives them from the account id in
    * its manifest, so two independent calls could verify one account's install
@@ -828,7 +852,11 @@ function freezeIntegrationInput(input: IntegrationWriteInput): FrozenIntegration
    * checked in one state and written from another, which is the substitution the fingerprint
    * exists to prevent. Copying both here gives the plan and the document one input.
    */
-  return { ...input, config, models: models.value, env, home, store, io, resolvedPaths };
+  return {
+    ...input, config, models: models.value,
+    ...(droidReasoningDefaults === undefined ? {} : { droidReasoningDefaults: droidReasoningDefaults.value }),
+    env, home, store, io, resolvedPaths,
+  };
 }
 
 function tryFreezeIntegrationInput(input: IntegrationWriteInput):
@@ -873,15 +901,30 @@ function storeLockFile(frozen: FrozenIntegrationInput): string | null {
  * them in that order, so two of ours cannot deadlock, and the client's own
  * writer only ever holds one of them.
  */
-function withClientLocks<T>(
+function withClientLocks(
   frozen: FrozenIntegrationInput,
   suffix: ".lock",
-  run: () => Promise<T>,
-  seams?: IntegrationWriterLockSeams,
-): Promise<T> {
-  const storeLock = storeLockFile(frozen);
-  const locked = storeLock === null ? run : () => withIntegrationWriterLock(storeLock, run, seams, ".lock");
-  return withIntegrationWriterLock(frozen.resolvedPaths.configPath, locked, seams, suffix);
+  operation: () => WriteOutcome,
+  options?: CoordinatedIntegrationOptions,
+): Promise<WriteOutcome> {
+  const run = async (heldStoreLock: string | null): Promise<WriteOutcome> => {
+    const refused = await options?.revalidate?.(frozen);
+    if (refused) return refused;
+    // A profile can appear while revalidation awaits. Acquire its lock and
+    // repeat the validation before observing or mutating its document.
+    const required = storeLockFile(frozen);
+    if (required !== null && required !== heldStoreLock) {
+      return withIntegrationWriterLock(required, () => run(required), options?.lockSeams, ".lock");
+    }
+    // No await between the last store probe and the synchronous transaction.
+    return operation();
+  };
+  return withIntegrationWriterLock(frozen.resolvedPaths.configPath, () => {
+    // Decide only after the outer lock has actually been acquired.
+    const storeLock = storeLockFile(frozen);
+    return storeLock === null ? run(null)
+      : withIntegrationWriterLock(storeLock, () => run(storeLock), options?.lockSeams, ".lock");
+  }, options?.lockSeams, suffix);
 }
 
 async function coordinatedWrite(
@@ -901,16 +944,14 @@ async function coordinatedWrite(
   // An absent client home is not created merely to acquire a sibling lock.
   if (frozen.io.statKind(frozen.resolvedPaths.detectDir) !== "dir") {
     const refused = await options?.revalidate?.(frozen);
-    return refused ?? operation(frozen);
+    if (refused) return refused;
+    if (frozen.io.statKind(frozen.resolvedPaths.detectDir) !== "dir") return operation(frozen);
   }
   return withClientLocks(
     frozen,
     spec.writerLock.suffix,
-    async () => {
-      const refused = await options?.revalidate?.(frozen);
-      return refused ?? operation(frozen);
-    },
-    options?.lockSeams,
+    () => operation(frozen),
+    options,
   );
 }
 
@@ -966,12 +1007,7 @@ export async function restoreIntegrationCoordinated(
   return withClientLocks(
     frozen,
     spec.writerLock.suffix,
-    async () => {
-      // An undo is bound like any other confirmation, and this is the only place where that check
-      // happens with the lock held and before the snapshot, the write and the journal row.
-      const refused = await options?.revalidate?.(frozen);
-      return refused ?? run();
-    },
-    options?.lockSeams,
+    run,
+    options,
   );
 }

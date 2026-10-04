@@ -293,6 +293,33 @@ admission source, still forward unchanged, as does a `gpt-reserve` selector an o
 or routed onto a noncanonical provider. Enabling the flag restores eligibility rather than the
 refusal, so the two predicates can never both hold.
 
+### Spendable Codex credits
+
+WHAM `credits` is spendable usage capacity, separate from manually redeemed
+`rate_limit_reset_credits`. The quota store keeps normalized flags, a finite nonnegative balance,
+and a separate observation clock. Explicit zero/null replaces earlier evidence; partial usage
+headers retain its original clock. A positive balance with `has_credits`, or unlimited credits,
+can keep an account selectable at 100% included usage for five minutes only when its id is in
+`creditCodexAccountIds`. Balance evidence never grants permission: unlisted accounts retain the
+default 100% hold, and opted-in accounts require fresh evidence. Included-plan `rate_limit.allowed`
+does not grant or veto credit spending; a present non-null `spend_control` must be an object with
+`reached: false`, and a reached or malformed control or an overage limit defeats that credit evidence.
+Absent/null controls impose no veto. A refusing control retracts cached credits even without a
+credits field or usage windows. Existing cached refusal flags are retained
+until a fresh WHAM credits observation replaces them. Selection caps its usage score
+at 99 so accounts with more included headroom remain preferred; observed percentage bars stay
+unchanged. Bulk pause and complete-snapshot recovery use the same credit decision. Credits-only
+payloads cannot clear cooldowns, actual request refusals still drive cooldown/failover, and the
+default-on main-account hard lock retains its separate local admission policy. Registration
+warmup remains conservative and does not spend paid credits to validate an exhausted account.
+
+Credit parsing, expiry, partial updates and reset-ticket separation are covered in
+`tests/codex-integration/codex-quota-parser-parity.test.ts`; selection and bulk-pause behavior
+are covered in `tests/codex-integration/codex-credits-after-limit.test.ts` and
+`tests/codex-integration/codex-credits-after-limit-main.test.ts`, alongside the general routing,
+bulk-pause and recovery suites `tests/codex-integration/codex-routing.test.ts`,
+`tests/codex-integration/codex-auth-api.test.ts` and `tests/codex-integration/codex-cooldown-recovery.test.ts`.
+
 ### Quota cache and short-window history
 
 `src/codex/quota.ts` drops an omitted account-level short tuple from the display/rotation

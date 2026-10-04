@@ -1,96 +1,171 @@
-import { appendFileSync, chmodSync, lstatSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  closeSync, constants, fstatSync, ftruncateSync, lstatSync, openSync, readSync, writeSync,
+  type Stats,
+} from "node:fs";
 import { join } from "node:path";
-
 import { redactUserPath } from "../../lib/redact";
-import type { CatalogWriteIntent } from "../catalog-write-serialization";
-import { currentOpencodexHome } from "../codex-home-owner";
+import { hardenSecretPath, windowsSecretAclApplies } from "../../lib/windows-secret-acl";
+import type { CatalogWriteAuditEvent } from "./write-audit-contract";
 
-/**
- * Who wrote the Codex catalog, from where, and what it did to the routed rows (#6529).
- *
- * The native-only catalog in #6529 was found a day after the write, and nothing could say which
- * process wrote it: no catalog writer logged. Every catalog or models-cache write, and every
- * refused one, now appends one line here. The file sits in CODEX_HOME, beside the catalog, so a
- * writer from any OPENCODEX_HOME reports into the same place, and it survives a reboot.
- *
- * Bounded: past {@link CATALOG_AUDIT_MAX_BYTES} the oldest lines are dropped, keeping the newest
- * {@link CATALOG_AUDIT_KEEP_RECORDS}. Lines carry counts, never model ids or provider names. Paths
- * are user-home-redacted. Auditing never fails a write: every error is swallowed.
- */
 export const CODEX_CATALOG_AUDIT_FILE = "opencodex-catalog-audit.jsonl";
 export const CATALOG_AUDIT_MAX_BYTES = 256 * 1024;
 export const CATALOG_AUDIT_KEEP_RECORDS = 400;
-
-export interface CatalogWriteAuditEvent {
-  readonly target: "catalog" | "cache";
-  readonly outcome: "written" | "refused";
-  /** Why a write was refused. */
-  readonly reason?: "foreign-owner" | "unbacked-routed-removal" | "unbacked-routed-clear";
-  readonly intent: CatalogWriteIntent;
-  /** The writer that asked for the permit, e.g. `convergence` or `retained-sync`. */
-  readonly writer: string;
-  /** OpenCodex-authored routed rows before and after; null when the file could not be parsed. */
-  readonly routedBefore?: number | null;
-  readonly routedAfter?: number | null;
-  /**
-   * Where the writing process's config came from at write time: `default` is a missing config.json,
-   * `fallback` a salvaged parse failure.
-   */
-  readonly configSource?: "file" | "default" | "fallback" | "unreadable";
-}
+export const CATALOG_AUDIT_MAX_EVENT_BYTES = 2 * 1024;
+const MAX_HOME_CHARACTERS = 256;
+const AUDIT_ACL_DEADLINE_MS = 1000;
+const WRITERS = new Set([
+  "convergence", "retained-sync", "cache-from-catalog", "cache-invalidate",
+  "catalog-pull", "catalog-restore", "codex-restore", "sync-cache", "startup-cache",
+]);
 
 export function codexCatalogAuditPath(codexHome: string): string {
   return join(codexHome, CODEX_CATALOG_AUDIT_FILE);
 }
 
-function auditLine(event: CatalogWriteAuditEvent): string {
-  return `${JSON.stringify({
-    at: new Date().toISOString(),
-    pid: process.pid,
-    ppid: process.ppid,
-    // Enough to tell `ocx sync`, the service and a test runner apart, never full argument lists.
-    command: process.argv.slice(1, 3).map(part => redactUserPath(part)).join(" ").slice(0, 200),
-    opencodexHome: redactUserPath(currentOpencodexHome()),
-    ...event,
-  })}\n`;
+function safeCount(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
-function trimToNewest(path: string): void {
-  const lines = readFileSync(path, "utf8").split("\n").filter(line => line.length > 0);
-  if (lines.length <= CATALOG_AUDIT_KEEP_RECORDS) return;
-  const temp = `${path}.${process.pid}.tmp`;
-  writeFileSync(temp, `${lines.slice(-CATALOG_AUDIT_KEEP_RECORDS).join("\n")}\n`, { mode: 0o600 });
-  renameSync(temp, path);
+function auditLine(event: CatalogWriteAuditEvent): Buffer {
+  const writer = WRITERS.has(event.writer) ? event.writer : "other";
+  // Explicit projection: no argv, arbitrary event properties, model IDs or provider names.
+  return Buffer.from(`${JSON.stringify({
+    at: new Date().toISOString(), pid: process.pid, ppid: process.ppid,
+    command: writer,
+    opencodexHome: redactUserPath(event.opencodexHome).slice(0, MAX_HOME_CHARACTERS),
+    target: event.target, outcome: event.outcome, reason: event.reason,
+    intent: event.intent, writer,
+    configSource: event.configSource,
+    routedBefore: safeCount(event.routedBefore), routedAfter: safeCount(event.routedAfter),
+  })}\n`);
+}
+
+function regularPrivateFile(stat: Stats): boolean {
+  // POSIX bits cannot prove NTFS privacy. Windows requires fresh-file ACL hardening.
+  return !windowsSecretAclApplies() && stat.isFile() && stat.nlink === 1
+    && stat.uid === process.getuid?.() && (stat.mode & 0o777) === 0o600;
+}
+
+function sameFile(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size
+    && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+
+/** Read at most the tail budget plus one byte to locate a complete first record. */
+function readTail(fd: number, size: number): Buffer {
+  const start = Math.max(0, size - CATALOG_AUDIT_MAX_BYTES - 1);
+  const bytes = Buffer.alloc(size - start);
+  let length = 0;
+  while (length < bytes.length) {
+    const count = readSync(fd, bytes, length, bytes.length - length, start + length);
+    if (count === 0) break;
+    length += count;
+  }
+  if (length !== bytes.length) throw new Error("audit file changed during read");
+  if (start === 0) return bytes;
+  const boundary = bytes.indexOf(10);
+  return boundary === -1 ? Buffer.alloc(0) : bytes.subarray(boundary + 1);
+}
+
+function completeRecords(bytes: Buffer): { records: Buffer[]; count: number; clean: boolean } {
+  const records: Buffer[] = [];
+  let start = 0;
+  let clean = true;
+  let count = 0;
+  for (let end = bytes.indexOf(10); end !== -1; end = bytes.indexOf(10, start)) {
+    const line = bytes.subarray(start, end);
+    try {
+      const text = line.toString("utf8");
+      if (!line.equals(Buffer.from(text))) throw new Error("invalid UTF-8");
+      JSON.parse(text);
+      records[count % CATALOG_AUDIT_KEEP_RECORDS] = bytes.subarray(start, end + 1);
+      count++;
+    } catch { clean = false; }
+    start = end + 1;
+  }
+  const pivot = count > CATALOG_AUDIT_KEEP_RECORDS ? count % CATALOG_AUDIT_KEEP_RECORDS : 0;
+  return { records: records.slice(pivot).concat(records.slice(0, pivot)), count,
+    clean: clean && start === bytes.length };
+}
+
+function writeAll(fd: number, bytes: Buffer, position: number | null): void {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const count = writeSync(fd, bytes, offset, bytes.length - offset,
+      position === null ? null : position + offset);
+    if (count === 0) throw new Error("audit write made no progress");
+    offset += count;
+  }
 }
 
 /**
- * Append one record. `create: false` only appends to an existing file, for a writer that is not
- * this Codex home's owner: it must leave a trace, but not a file the owner's uninstall cannot claim.
- * Returns whether the file was created, so the owner can register it for uninstall.
+ * Best-effort adapter. Caller MUST hold K, even for a refusal that has no permit.
+ * POSIX owners compact the descriptor; foreign callers only append within both caps.
+ * Windows only publishes into fresh owner files after required ACL hardening.
+ * This diagnostic has no replay or authorization role. Process death may leave a partial line.
  */
 export function appendCatalogWriteAudit(
   codexHome: string,
   event: CatalogWriteAuditEvent,
   options: { readonly create: boolean },
 ): "appended" | "created" | "skipped" {
-  const path = codexCatalogAuditPath(codexHome);
+  let fd: number | undefined;
   try {
-    let existed = true;
-    try {
-      const entry = lstatSync(path);
-      if (!entry.isFile()) return "skipped";
-      if (entry.size > CATALOG_AUDIT_MAX_BYTES) trimToNewest(path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return "skipped";
-      if (!options.create) return "skipped";
-      existed = false;
+    const line = auditLine(event);
+    if (line.length > CATALOG_AUDIT_MAX_EVENT_BYTES) return "skipped";
+    const path = codexCatalogAuditPath(codexHome);
+    const windows = windowsSecretAclApplies();
+    let before: Stats | undefined;
+    try { before = lstatSync(path); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || !options.create) return "skipped";
     }
-    appendFileSync(path, auditLine(event), { mode: 0o600 });
-    if (!existed) {
-      try { chmodSync(path, 0o600); } catch { /* Windows: ACLs, not modes */ }
+    if (before && !regularPrivateFile(before)) return "skipped";
+    // No mkdir, pathname truncation or chmod. O_EXCL prevents creation over a raced path.
+    const flags = constants.O_RDWR | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)
+      | (before ? (options.create ? 0 : constants.O_APPEND) : constants.O_CREAT | constants.O_EXCL);
+    fd = openSync(path, flags, 0o600);
+    let opened = fstatSync(fd);
+    if (windows) {
+      // Existing files have already been refused: no read-only NTFS privacy verifier exists.
+      if (!opened.isFile() || opened.nlink !== 1 || opened.size !== 0
+        || !sameFile(opened, lstatSync(path))) return "skipped";
+      if (!hardenSecretPath(path, { required: true, deadlineMs: AUDIT_ACL_DEADLINE_MS }).ok) return "skipped";
+      const hardened = fstatSync(fd);
+      // ACL changes legitimately move ctime. Retain object identity, then take a fresh baseline.
+      if (!hardened.isFile() || hardened.nlink !== 1 || hardened.size !== 0
+        || opened.dev !== hardened.dev || opened.ino !== hardened.ino
+        || !sameFile(hardened, lstatSync(path))) return "skipped";
+      opened = hardened;
+    } else if (!regularPrivateFile(opened) || (before && !sameFile(before, opened))) return "skipped";
+    if (!options.create && opened.size + line.length > CATALOG_AUDIT_MAX_BYTES) return "skipped";
+    const tail = readTail(fd, opened.size);
+    const parsed = completeRecords(tail);
+    if (!sameFile(opened, fstatSync(fd)) || !sameFile(opened, lstatSync(path))) return "skipped";
+    if (!options.create) {
+      if (!parsed.clean || parsed.count + 1 > CATALOG_AUDIT_KEEP_RECORDS) return "skipped";
+      writeAll(fd, line, null);
+    } else if (opened.size <= CATALOG_AUDIT_MAX_BYTES - line.length
+      && parsed.clean && parsed.count < CATALOG_AUDIT_KEEP_RECORDS) {
+      writeAll(fd, line, opened.size);
+    } else {
+      const retained: Buffer[] = [line];
+      let bytes = line.length;
+      for (let index = parsed.records.length - 1; index >= 0 && retained.length < CATALOG_AUDIT_KEEP_RECORDS; index--) {
+        const record = parsed.records[index]!;
+        if (bytes + record.length > CATALOG_AUDIT_MAX_BYTES) break;
+        retained.unshift(record);
+        bytes += record.length;
+      }
+      const output = Buffer.concat(retained, bytes);
+      writeAll(fd, output, 0);
+      ftruncateSync(fd, output.length);
     }
-    return existed ? "appended" : "created";
+    return before ? "appended" : "created";
   } catch {
+    // Deliberately best-effort: an audit IO failure never changes the catalog result.
     return "skipped";
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* diagnostic only */ } }
   }
 }

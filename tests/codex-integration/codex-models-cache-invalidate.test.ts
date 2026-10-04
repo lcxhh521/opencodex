@@ -17,7 +17,7 @@ import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 /** Every K acquisition states its intent (#6529); these tests exercise the lock, not the intent. */
-const TEST_CATALOG_WRITE = { intent: "refresh", writer: "test" } as const;
+const TEST_CATALOG_WRITE = { intent: "cache", writer: "test" } as const;
 
 const emptyConfig = {
   port: 10100,

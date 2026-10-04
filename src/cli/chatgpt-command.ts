@@ -2,52 +2,82 @@ import { spawnSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "../config";
-import { findLiveProxy } from "../server/proxy-liveness";
 import type { OcxConfig } from "../types";
+import { findLiveProxy } from "../server/proxy-liveness";
+import { getConfigDir } from "../config/paths";
+import { claudeInterceptCaCertPath } from "../claude/intercept/local-ca";
+import { chatgptCaTrustCommand, inspectChatgptCaTrust } from "../chatgpt/desktop-unblock/ca-trust";
+import { chatgptPacFallbackEnabled, chatgptUnblockEntryPort, chatgptUnblockPacArg, chatgptUnblockPort, chatgptUnblockResolverArg } from "../chatgpt/desktop-unblock/runtime";
 import {
-  chatgptAppCommandLine,
-  chatgptAppHasShim,
-  chatgptCommandLineHasRule,
-  chatgptUnblockWatcherStatus,
-  installChatgptUnblockWatcher,
-  launchChatgptWithRule,
-  probeChatgptUnblockListener,
-  restoreChatgptNative,
+  chatgptAppCommandLine, chatgptCommandLineHasPac, chatgptCommandLineHasRule, chatgptUnblockWatcherStatus,
+  installChatgptUnblockWatcher, launchChatgptWithRule, probeChatgptUnblockListener,
   uninstallChatgptUnblockWatcher,
 } from "../chatgpt/desktop-unblock/launch-watcher";
-import { chatgptAppServerShimEnabled, chatgptUnblockEnabled, chatgptPacFallbackEnabled, chatgptUnblockEntryPort, chatgptUnblockPacArg, chatgptUnblockPort, chatgptUnblockResolverArg } from "../chatgpt/desktop-unblock/runtime";
-import { chatgptCommandLineHasPac } from "../chatgpt/desktop-unblock/launch-watcher";
-import { chatgptCaTrustCommand, inspectChatgptCaTrust } from "../chatgpt/desktop-unblock/ca-trust";
-import { claudeInterceptCaCertPath } from "../claude/intercept/local-ca";
-import { getConfigDir } from "../config/paths";
 import { interactiveConfirm } from "./interactive-confirm";
-import { chatgptShimLauncherPath } from "../chatgpt/app-server-shim/launcher";
-import { discoverChatgptApp, prepareChatgptShimLauncher } from "../chatgpt/app-server-shim/prepare";
+import { readConfigFileSnapshot } from "../config/diagnostics";
+import { chatgptDesktopConfigIssue } from "../config/schema/chatgpt-desktop";
+import {
+  chatgptShimLauncherPath,
+  resolveChatgptCodexBinary,
+  writeChatgptShimLauncher,
+} from "../chatgpt/app-server-shim/launcher";
+import { untrustedChatgptBundleReason } from "../chatgpt/app-server-shim/bundle-trust";
+import { darwinDefaultExec, darwinDesktopAppAdapter } from "../codex/desktop-app/darwin";
 import type { DesktopAppInstall } from "../codex/desktop-app/types";
 
-/**
- * `ocx chatgpt` — the ChatGPT desktop integrations (macOS): the send-unblock intercept and the
- * maintainer's experimental app-server shim (#6361). With `chatgptDesktop.unblockSend` off,
- * `launch|restore|status` are the shim on its own; with it on, they also carry the intercept's
- * launch switches and the shim rides along when `appServerShim` is set.
- *
- *   ocx chatgpt status                   Feature, listener, trust, watcher, shim and app state
- *   ocx chatgpt install-watcher [--yes]  Install the launch watcher (Dock/Spotlight launches too)
- *   ocx chatgpt uninstall-watcher        Remove the launch watcher
- *   ocx chatgpt launch                   Relaunch the app with the configured switches and/or shim
- *   ocx chatgpt restore                  Relaunch with native networking, without the shim
- */
+const USAGE = `Usage (experimental, macOS only):
+  ocx chatgpt launch                 Relaunch with configured app-server shim and/or TLS intercept
+  ocx chatgpt restore                Relaunch with native networking and remove the shim launcher
+  ocx chatgpt status                 Inspect flags, listener, CA trust, watcher and app environment
+  ocx chatgpt install-watcher [--yes] Install the intercept launch watcher (requires unblockSend: true;
+                                     with pacFallback it launches through the PAC instead)
+  ocx chatgpt uninstall-watcher      Remove the intercept launch watcher`;
 
-const USAGE = `Usage (macOS):
-  ocx chatgpt status                   Feature, listener, certificate trust, watcher, shim and app state
-  ocx chatgpt install-watcher [--yes]  Install the launch watcher (covers Dock/Spotlight launches; needs unblockSend)
-  ocx chatgpt uninstall-watcher        Remove the launch watcher
-  ocx chatgpt launch                   Relaunch ChatGPT with the intercept switches and/or the experimental app-server shim
-  ocx chatgpt restore                  Relaunch ChatGPT with native networking and without the shim; removes the shim launcher`;
+export function resolveChatgptUnblockPort(config: OcxConfig, livePort: number | undefined): number {
+  return chatgptUnblockPort(config, livePort ?? config.port ?? 10100);
+}
+
+/** PAC-fallback mode: the CONNECT entry port the PAC points chatgpt.com at, or undefined when off. */
+function resolveChatgptPacEntry(config: OcxConfig, livePort: number | undefined): { entryPort: number } | undefined {
+  if (!chatgptPacFallbackEnabled(config)) return undefined;
+  return { entryPort: chatgptUnblockEntryPort(config, livePort ?? config.port ?? 10100) };
+}
+
+const WATCHER_CONSENT = `The experimental watcher quits and reopens ChatGPT after a Dock/Spotlight launch
+without intercept switches while opencodex's listener is running. This can interrupt
+startup work. It manages the TLS intercept only; use 'ocx chatgpt launch' for the shim.
+Remove it with 'ocx chatgpt uninstall-watcher'.`;
 
 function run(command: string, args: string[]) {
   const result = spawnSync(command, args, { encoding: "utf8", timeout: 5000 });
   return { ok: result.status === 0, output: `${result.stdout ?? ""}${result.stderr ?? ""}`.trim() };
+}
+
+/**
+ * Why the config file's `chatgptDesktop` block reads as absent, or null when it is valid, absent
+ * or the file cannot be parsed (the config loader reports that case itself).
+ */
+function chatgptDesktopIssueInFile(): string | null {
+  const { raw } = readConfigFileSnapshot();
+  if (raw === undefined) return null;
+  try {
+    return chatgptDesktopConfigIssue(JSON.parse(raw.replace(/^\uFEFF/, "")));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The installed app, found and confirmed by bundle identifier (com.openai.codex) the same way the
+ * desktop restart adapter does. "ChatGPT" is a display name another app can share, so quitting,
+ * relaunching and the binary path all key on this verified bundle rather than on the name.
+ */
+function discoverApp(): DesktopAppInstall | null {
+  try {
+    return darwinDesktopAppAdapter.discover(darwinDefaultExec);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -86,40 +116,116 @@ async function quitApp(install: DesktopAppInstall, launcher: string): Promise<bo
   return !appState(install, launcher).running;
 }
 
-/**
- * The maintainer's experimental shim on its own (#6361), used while the send-unblock intercept is
- * off: it installs no listener, CA, PAC or watcher, and explicit launches are its only activation.
- */
-async function handleShimOnly(sub: "launch" | "restore" | "status", config: OcxConfig): Promise<number> {
+export async function handleChatgptCommand(args: string[], platform: NodeJS.Platform = process.platform): Promise<number> {
+  const sub = args[0];
+  if (!sub || ["help", "--help", "-h"].includes(sub)) {
+    console.log(USAGE);
+    return sub ? 0 : 64;
+  }
+  if (!["launch", "restore", "status", "install-watcher", "uninstall-watcher"].includes(sub)
+    || (sub === "install-watcher" ? args.slice(1).some(arg => arg !== "--yes") || args.length > 2 : args.length !== 1)) {
+    console.error(USAGE);
+    return 64;
+  }
+  if (platform !== "darwin") {
+    console.error("ChatGPT desktop integrations (experimental): macOS only.");
+    return 1;
+  }
   try {
-    const launcher = chatgptShimLauncherPath();
-    const install = discoverChatgptApp();
-    if (sub === "status") {
-      const app = install ? appState(install, launcher) : { running: false, shim: false };
-      console.log(`app-server shim (experimental): ${config.chatgptDesktop?.appServerShim === true ? "on" : "off"}
-launcher: ${existsSync(launcher) ? "present" : "absent"}
-app: ${install ? (app.running ? "running" : "not running") : "not installed"}
-CODEX_CLI_PATH launcher: ${app.shim ? "yes" : "no"}
-send-unblock intercept: off (chatgptDesktop.unblockSend)`);
+    // Removal remains available even if the hand-edited config or derived port is invalid.
+    if (sub === "uninstall-watcher") {
+      uninstallChatgptUnblockWatcher();
+      console.log("Experimental intercept launch watcher removed.");
       return 0;
     }
-    if (!install) {
+    const config = loadConfig();
+    const intercept = config.chatgptDesktop?.unblockSend === true;
+    const shim = config.chatgptDesktop?.appServerShim === true;
+    const live = intercept || sub === "status" ? await findLiveProxy().catch(() => null) : null;
+    const port = intercept && sub !== "restore" && sub !== "status" ? resolveChatgptUnblockPort(config, live?.port) : undefined;
+    const pac = port !== undefined ? resolveChatgptPacEntry(config, live?.port) : undefined;
+    const launcher = chatgptShimLauncherPath();
+    const install = discoverApp();
+    if (sub === "status") {
+      const app = install ? appState(install, launcher) : { running: false, shim: false };
+      const configIssue = config.chatgptDesktop?.appServerShim === true ? null : chatgptDesktopIssueInFile();
+      const flag = config.chatgptDesktop?.appServerShim === true ? "on"
+        : configIssue ? `off (config.json ${configIssue}; the whole chatgptDesktop block is ignored)` : "off";
+      console.log(`app-server shim (experimental): ${flag}
+launcher: ${existsSync(launcher) ? "present" : "absent"}
+app: ${install ? (app.running ? "running" : "not running") : "not installed"}
+CODEX_CLI_PATH launcher: ${app.shim ? "yes" : "no"}`);
+      try {
+        await printInterceptStatus(config, resolveChatgptUnblockPort(config, live?.port), live?.port);
+      } catch (error) {
+        console.log(`Intercept status unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return 0;
+    }
+    if (sub === "install-watcher") {
+      if (!intercept || config.runtimeRole === "client") {
+        console.error("Enable chatgptDesktop.unblockSend in a server config before installing the watcher.");
+        return 1;
+      }
+      console.log(WATCHER_CONSENT);
+      if (!args.includes("--yes") && (!process.stdin.isTTY
+        || !(await interactiveConfirm({ question: "Install the experimental intercept watcher?", defaultYes: false })))) {
+        console.error("Watcher not installed; re-run with --yes to confirm.");
+        return 1;
+      }
+      installChatgptUnblockWatcher({ port: port!, ...(pac ? { entryPort: pac.entryPort } : {}) });
+      console.log(`Experimental intercept launch watcher installed for port ${port}${pac ? ` (PAC fallback, entry port ${pac.entryPort})` : ""}.`);
+      return 0;
+    }
+    if ((sub === "launch" || sub === "restore") && !install) {
       if (sub === "restore") rmSync(launcher, { force: true });
       console.error("ChatGPT (com.openai.codex) was not found; install or open it once, then retry.");
       return 1;
     }
+    let binary: string | undefined;
     if (sub === "launch") {
-      if (config.chatgptDesktop?.appServerShim !== true) {
-        console.error("Experimental shim disabled; set chatgptDesktop.appServerShim: true before launching.");
+      if (!shim && !intercept) {
+        // Read the file only to explain a refusal; restore and a valid launch never touch it.
+        const configIssue = chatgptDesktopIssueInFile();
+        console.error(configIssue
+          ? `ChatGPT desktop launch disabled: config.json ${configIssue}. The whole chatgptDesktop block is ignored until that is fixed.`
+          : "Enable chatgptDesktop.appServerShim or chatgptDesktop.unblockSend before launching.");
         return 1;
       }
-      const prepared = prepareChatgptShimLauncher();
-      if (!prepared.ok) {
-        console.error(`Refusing to launch the shim: ${prepared.reason}.`);
-        return 1;
+      if (intercept) {
+        if (config.runtimeRole === "client" || (await probeChatgptUnblockListener(port!)).state !== "ours") {
+          console.error("Experimental intercept listener is not answering; start opencodex in server mode first.");
+          return 1;
+        }
+      }
+      if (shim) {
+        binary = resolveChatgptCodexBinary(install!.root) ?? undefined;
+        if (!binary) {
+          console.error(`No bundled app-server binary was found in ${install!.root}; the shim cannot launch this build.`);
+          return 1;
+        }
       }
     }
-    if (!(await quitApp(install, launcher))) {
+    // Every relaunch path executes the discovered bundle, the intercept one included. Restore
+    // validates the app shell without requiring an app-server binary or an experimental opt-in.
+    const untrusted = untrustedChatgptBundleReason(install!.root, binary);
+    if (untrusted) {
+      console.error(`Refusing to ${sub === "launch" ? (shim ? "launch the shim" : "launch ChatGPT") : "restore ChatGPT"}: ${untrusted}.`);
+      return 1;
+    }
+    // A loaded watcher would immediately put the intercept switches back on restore.
+    if (sub === "restore" && chatgptUnblockWatcherStatus(0).agentLoaded) {
+      console.error("Uninstall the launch watcher before restoring native networking.");
+      return 1;
+    }
+    if (binary) writeChatgptShimLauncher(undefined, binary);
+    if (sub === "launch" && intercept) {
+      // The intercept script owns the restart under its lock so the watcher cannot race it.
+      const result = launchChatgptWithRule(port!, undefined, shim, pac);
+      if (result.output) (result.ok ? console.log : console.error)(result.output);
+      return result.ok ? 0 : 1;
+    }
+    if (!(await quitApp(install!, launcher))) {
       console.error("ChatGPT did not quit; quit it manually and retry.");
       return 1;
     }
@@ -127,200 +233,46 @@ send-unblock intercept: off (chatgptDesktop.unblockSend)`);
     const env = { ...process.env };
     delete env.CODEX_CLI_PATH;
     // Open the verified bundle by path, so the relaunch is the same app that was quit.
-    const result = spawnSync("/usr/bin/open", ["-a", install.root, ...(sub === "launch" ? ["--env", `CODEX_CLI_PATH=${launcher}`] : [])], {
+    const result = spawnSync("/usr/bin/open", ["-a", install!.root, ...(sub === "launch" && shim ? ["--env", `CODEX_CLI_PATH=${launcher}`] : [])], {
       encoding: "utf8", env, timeout: 10000,
     });
     if (result.status !== 0) throw new Error(result.error?.message ?? (result.stderr?.trim() || "open failed"));
     if (sub === "restore") rmSync(launcher, { force: true });
-    console.log(`ChatGPT relaunched ${sub === "launch" ? "with" : "without"} the experimental app-server shim.`);
+    console.log(`ChatGPT relaunched ${sub === "launch" ? "with" : "without"} the configured experimental integrations.`);
     return 0;
   } catch (error) {
-    console.error(`ChatGPT shim (experimental): ${error instanceof Error ? error.message : String(error)}`);
+    console.error(`ChatGPT desktop (experimental): ${error instanceof Error ? error.message : String(error)}`);
     return 1;
   }
 }
 
-/** Port the intercept listens on: explicit config, else live proxy + offset, else default + offset. */
-export function resolveChatgptUnblockPort(config: OcxConfig, livePort: number | undefined): number {
-  return chatgptUnblockPort(config, livePort ?? (typeof config.port === "number" ? config.port : 10100));
-}
-
-const WATCHER_CONSENT = `The launch watcher runs each time the ChatGPT app starts, and again when opencodex
-starts. If the app was opened normally (Dock, Spotlight), it quits the app right after launch
-and reopens it with the opencodex route. It only restarts an app that started in the last
-five minutes, and does nothing while opencodex is not running. Remove it any time with
-'ocx chatgpt uninstall-watcher'.`;
-
-export async function handleChatgptCommand(args: string[], platform: NodeJS.Platform = process.platform): Promise<number> {
-  const sub = args[0];
-  if (!sub || sub === "help" || sub === "--help" || sub === "-h") {
-    console.log(USAGE);
-    return sub ? 0 : 64;
-  }
-  if (!["status", "install-watcher", "uninstall-watcher", "launch", "restore"].includes(sub)) {
-    console.error(`unknown subcommand: ${sub}`);
-    return 64;
-  }
-  if (platform !== "darwin") {
-    // lsof/pgrep/launchd do not exist elsewhere; answering "not running" would be a false report.
-    console.error("The ChatGPT desktop send-unblock integration is only supported on macOS.");
-    return 1;
-  }
-
-  // uninstall-watcher must work even when the port cannot be resolved: the operator may need
-  // to remove the watcher precisely because the configuration no longer resolves.
-  if (sub === "uninstall-watcher") {
-    try {
-      uninstallChatgptUnblockWatcher();
-    } catch (error) {
-      console.error(`Launch watcher not removed: ${error instanceof Error ? error.message : String(error)}`);
-      return 1;
-    }
-    console.log("Launch watcher removed.");
-    return 0;
-  }
-
-  const config = loadConfig();
-  // Without the intercept, launch/restore/status are the experimental shim on its own.
-  if (!chatgptUnblockEnabled(config) && (sub === "launch" || sub === "restore" || sub === "status")) {
-    return await handleShimOnly(sub, config);
-  }
-  const live = await findLiveProxy().catch(() => null);
-  let port: number;
-  try {
-    port = resolveChatgptUnblockPort(config, live?.port);
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
-    return 1;
-  }
-
-  if (sub === "status") return await printStatus(config, port, live?.port);
-
-  if (sub === "install-watcher") {
-    if (config.chatgptDesktop?.unblockSend !== true) {
-      console.error("chatgptDesktop.unblockSend is not enabled; add it to ~/.opencodex/config.json first:");
-      console.error('  { "chatgptDesktop": { "unblockSend": true } }');
-      return 1;
-    }
-    console.log(WATCHER_CONSENT);
-    if (!args.includes("--yes")) {
-      if (!process.stdin.isTTY) {
-        console.error("Re-run with --yes to confirm installing the launch watcher.");
-        return 1;
-      }
-      if (!(await interactiveConfirm({ question: "Install the launch watcher?", defaultYes: false }))) {
-        console.log("Launch watcher not installed.");
-        return 1;
-      }
-    }
-    try {
-      const pacMode = chatgptPacFallbackEnabled(config);
-      installChatgptUnblockWatcher({
-        port,
-        ...(pacMode ? { entryPort: chatgptUnblockEntryPort(config, live?.port ?? (typeof config.port === "number" ? config.port : 10100)) } : {}),
-        shimMode: chatgptAppServerShimEnabled(config),
-      });
-    } catch (error) {
-      console.error(`Launch watcher not installed: ${error instanceof Error ? error.message : String(error)}`);
-      return 1;
-    }
-    console.log(`🛰 Launch watcher installed for port ${port}.`);
-    return 0;
-  }
-
-  const pacMode = chatgptPacFallbackEnabled(config);
-  const entryPort = pacMode ? chatgptUnblockEntryPort(config, live?.port ?? (typeof config.port === "number" ? config.port : 10100)) : undefined;
-
-  const shimMode = chatgptAppServerShimEnabled(config);
-  // The launcher normally comes from the running server; prepare it here too, through the same
-  // identity and OpenAI-signature checks, so a launch never points the app at an unchecked binary
-  // or a script that does not exist yet.
-  if (sub === "launch" && shimMode) {
-    try {
-      const prepared = prepareChatgptShimLauncher(getConfigDir());
-      if (!prepared.ok) {
-        console.error(`Refusing to launch the shim: ${prepared.reason}.`);
-        return 1;
-      }
-    } catch (error) {
-      console.error(`ChatGPT not launched: could not write the app-server launcher: ${error instanceof Error ? error.message : String(error)}`);
-      return 1;
-    }
-  }
-  if (sub === "launch") return report(launchChatgptWithRule(port, undefined, pacMode, entryPort, shimMode));
-
-  // restore: the watcher would put the switches straight back on the relaunch while opencodex runs.
-  const watcher = chatgptUnblockWatcherStatus(port, undefined, pacMode, entryPort, shimMode);
-  if (watcher.agentLoaded && (await probeChatgptUnblockListener(port)).state === "ours") {
-    console.error("The launch watcher would re-apply the opencodex route on relaunch while opencodex is running.");
-    console.error("Run 'ocx chatgpt uninstall-watcher' first, or stop opencodex, then 'ocx chatgpt restore'.");
-    return 1;
-  }
-  const restored = restoreChatgptNative(port, undefined, pacMode, entryPort, shimMode);
-  // As the shim's own restore does: the launcher goes once the app is back on its own binary.
-  if (restored.ok) rmSync(chatgptShimLauncherPath(getConfigDir()), { force: true });
-  return report(restored);
-}
-
-function report(result: { ok: boolean; output: string }): number {
-  if (result.output) (result.ok ? console.log : console.error)(result.output);
-  return result.ok ? 0 : 1;
-}
-
-async function printStatus(config: OcxConfig, port: number, livePort: number | undefined): Promise<number> {
-  const enabled = config.chatgptDesktop?.unblockSend === true;
-  const pacMode = chatgptPacFallbackEnabled(config);
+async function printInterceptStatus(config: OcxConfig, port: number, livePort?: number): Promise<void> {
   const configDir = getConfigDir();
-  const entryPort = pacMode ? chatgptUnblockEntryPort(config, livePort ?? (typeof config.port === "number" ? config.port : 10100)) : undefined;
+  const pac = resolveChatgptPacEntry(config, livePort);
   const listener = await probeChatgptUnblockListener(port);
-  const watcher = chatgptUnblockWatcherStatus(port, configDir, pacMode, entryPort, chatgptAppServerShimEnabled(config));
-  const appCommandLine = chatgptAppCommandLine();
-  const appRunning = appCommandLine !== null;
-  const appFlagged = appRunning
-    && (pacMode ? chatgptCommandLineHasPac(appCommandLine, configDir) : chatgptCommandLineHasRule(appCommandLine, port));
+  const watcher = chatgptUnblockWatcherStatus(port, undefined, false, pac);
+  const app = chatgptAppCommandLine();
+  const flagged = app !== null && (pac ? chatgptCommandLineHasPac(app, configDir) : chatgptCommandLineHasRule(app, port));
   const caPath = claudeInterceptCaCertPath(configDir);
   const trust = await inspectChatgptCaTrust(caPath);
-  const listenerLine = {
-    ours: "listening",
-    foreign: "held by ANOTHER process (not opencodex); set chatgptDesktop.port to a free port",
-    down: "not listening",
-  }[listener.state];
-  const trustLine = {
-    trusted: "trusted",
-    untrusted: "NOT trusted (account, usage and settings pages will fail to load)",
-    missing: "not created yet (start opencodex with the feature enabled)",
-    unknown: "could not be checked",
-    unsupported: "not applicable on this platform",
-  }[trust];
-  const launchSwitch = pacMode ? chatgptUnblockPacArg(configDir) : chatgptUnblockResolverArg(port);
-  const shimOn = chatgptAppServerShimEnabled(config);
-  const shimLine = !shimOn
-    ? "off (chatgptDesktop.appServerShim)"
-    : !appRunning ? "on"
-    : chatgptAppHasShim(configDir) ? "on (app started through it)" : "on, but the app was started WITHOUT it (run ocx chatgpt launch)";
-  console.log(`ChatGPT send-unblock:
-  feature enabled:     ${enabled ? "yes" : "no (set chatgptDesktop.unblockSend: true)"}${pacMode ? "\n  PAC fallback:        on (auto-fallback to the VPN chain / direct when opencodex is down)" : ""}
-  listener port:       ${port} (${listenerLine})${pacMode && entryPort ? `\n  entry port:          ${entryPort}` : ""}
-  launch switch:       ${launchSwitch}
-  app-server shim:     ${shimLine}${shimOn ? `\n  shim launcher:       ${existsSync(chatgptShimLauncherPath(configDir)) ? "present" : "absent (start opencodex or run ocx chatgpt launch)"}` : ""}
-  CA trust:            ${trustLine}
-  watcher script:      ${watcher.scriptInstalled ? (watcher.scriptUpToDate ? "installed" : "installed (outdated; reinstall)") : "not installed"}
-  watcher agent:       ${watcher.agentLoaded ? "loaded" : watcher.plistInstalled ? "installed but not loaded" : "not installed"}
-  app:                 ${appRunning ? (appFlagged ? "running with switches" : "running WITHOUT switches (composer will lock)") : "not running"}`);
-  if (trust === "untrusted") console.log(`  restore trust with:  ${chatgptCaTrustCommand(caPath)}`);
-  if (listener.state === "ours" && listener.preservedSendBlocks.length > 0) {
-    // Non-quota send blocks are deliberately left in place; name them so a locked composer has a cause.
-    console.log("  send blocks kept:    (not usage quota, so not lifted)");
-    for (const block of listener.preservedSendBlocks) console.log(`    - ${block.name}: ${block.reason} (last seen ${block.lastSeen})`);
+  // The PAC switch carries the whole script inline; show its shape, not kilobytes of base64.
+  const pacSwitch = pac ? chatgptUnblockPacArg(configDir) : "";
+  const launchSwitch = pac ? `${pacSwitch.slice(0, pacSwitch.indexOf(",") + 1)}… (${pacSwitch.length} bytes)` : chatgptUnblockResolverArg(port);
+  console.log(`send-unblock TLS intercept (experimental): ${config.chatgptDesktop?.unblockSend === true ? "on" : "off"}
+PAC fallback: ${pac ? `on (entry port ${pac.entryPort}; falls back to the system chain, then DIRECT, when opencodex is down)` : "off"}
+listener: ${port} (${listener.state === "ours" ? "listening" : listener.state === "foreign" ? "held by another process" : "not listening"})
+launch switch: ${launchSwitch}
+CA trust: ${trust}
+watcher script: ${watcher.scriptInstalled ? watcher.scriptUpToDate ? "installed" : "outdated; reinstall" : "absent"}
+watcher agent: ${watcher.agentLoaded ? "loaded" : watcher.plistInstalled ? "installed but not loaded" : "absent"}
+app intercept switches: ${flagged ? "yes" : "no"}`);
+  if (trust === "untrusted") console.log(`Trust manually with: ${chatgptCaTrustCommand(caPath)}`);
+  if (listener.state === "ours") {
+    for (const block of listener.preservedSendBlocks) console.log(`Send block kept: ${block.name}: ${block.reason} (last seen ${block.lastSeen})`);
   }
-  if (appFlagged && listener.state !== "ours") {
-    console.log(pacMode ? `
-  ⚠ The app is routed through opencodex's PAC, but the listener is not answering. ChatGPT
-    falls back to the system chain automatically; until the PAC is refreshed it may bypass
-    opencodex on the next launches. Run 'ocx chatgpt restore' for clean native networking.` : `
-  ⚠ The app is routed to port ${port}, but opencodex's listener is not answering there.
-    Every chatgpt.com request from the app fails until opencodex runs again, or run
-    'ocx chatgpt restore' to relaunch the app with native networking.`);
+  if (flagged && listener.state !== "ours") {
+    console.log(pac
+      ? "ChatGPT is launched through opencodex's PAC, but the listener is not answering: it falls back to the system chain, and may bypass opencodex on later launches until the PAC is refreshed. Start opencodex again or run ocx chatgpt restore."
+      : "ChatGPT is routed to a closed or foreign port; start opencodex again or run ocx chatgpt restore.");
   }
-  return 0;
 }

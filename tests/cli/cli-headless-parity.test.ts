@@ -7,7 +7,7 @@ import { handleAccessCommand } from "../../src/cli/access";
 import { handleAgentCommand } from "../../src/cli/agent";
 import { handleComboCommand } from "../../src/cli/combo";
 import { handleConfigCommand } from "../../src/cli/config-command";
-import { handleClientIntegrationCommand, handleGrokCommand } from "../../src/cli/integrations";
+import { handleClientIntegrationCommand, handleGrokCommand, handleClaudeInterceptCommand } from "../../src/cli/integrations";
 import { handleModelsRuntimeCommand } from "../../src/cli/models-runtime";
 import { handleProviderRuntimeCommand } from "../../src/cli/provider-runtime";
 import { providerQuotaLine } from "../../src/cli/account-extended";
@@ -538,6 +538,7 @@ describe("headless GUI parity CLI", () => {
       // the Claude flag flips through `ocx claude config` — so a dedicated
       // `ocx integration native` verb would duplicate existing commands rather
       // than add a capability. Listed so the sweep stays exhaustive.
+      ["/api/claude-intercept/start", "ocx claude intercept start"],
       ["/api/native-integrations", "(none — GUI-only)"],
       // #3417: the dashboard's native main login disclosure reads and writes the same
       // routes as `ocx account main` — list/doctor, register, switch and recover — so the
@@ -999,15 +1000,19 @@ describe("headless GUI parity CLI", () => {
       sizingModel: "gpt-5.5",
       proposals: [
         { role: "explorer", model: "gpt-5.5", status: "proposed", tier: "fast", effortIntent: "glance", proposedModel: "a/small", proposedEffort: "low" },
-        { role: "worker", model: null, status: "proposed", tier: "standard", effortIntent: "measured", proposedModel: "a/mid", proposedEffort: null },
+        { role: "worker", model: null, status: "proposed", tier: "standard", effortIntent: "measured", rationale: "Use \x1b]52;c;cG9pc29uZWQ=\x07 carefully.", proposedModel: "a/mid", proposedEffort: null },
         { role: "vague", model: null, status: "unsized", reason: "no JSON" },
       ],
     };
     const runtime = fakeRuntime(req => req.method === "POST" ? proposals : { ok: true });
     const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    let output = "";
     try {
       expect(await handleAgentCommand(["roles", "suggest", "--model", "a/sizer", "--json"], runtime.deps)).toBe(0);
+      expect(JSON.parse(logSpy.mock.calls.flat().join("\n"))).toEqual(proposals);
+      logSpy.mockClear();
       expect(await handleAgentCommand(["roles", "suggest", "--apply"], runtime.deps)).toBe(0);
+      output = logSpy.mock.calls.flat().join("\n");
     } finally {
       logSpy.mockRestore();
     }
@@ -1017,6 +1022,8 @@ describe("headless GUI parity CLI", () => {
       { path: "/api/codex-agent-roles/explorer", method: "PUT", body: { model: "a/small", effort: "low" } },
       { path: "/api/codex-agent-roles/worker", method: "PUT", body: { model: "a/mid" } },
     ]);
+    expect(output).not.toMatch(/[\x07\x1b]/);
+    expect(output).toContain("Use \\x1b]52;c;cG9pc29uZWQ=\\x07 carefully.");
   });
 
   test("agent roles suggest --apply skips proposals that already match the role's pin and says so", async () => {
@@ -1101,13 +1108,20 @@ describe("headless GUI parity CLI", () => {
   test("agent injection suggest prints the proposal, and --apply writes it through PUT /api/injection-model", async () => {
     const suggestion = {
       sizingModel: "gpt-5.5",
-      proposal: { model: "a/big", effort: "high", status: "proposed", tier: "fast", effortIntent: "glance", rationale: "Bounded edits.", moveUpIf: "It crosses modules.", moveDownIf: "Never.", proposedModel: "a/small", proposedEffort: "low", reason: null },
+      proposal: { model: "a/big", effort: "high", status: "proposed", tier: "fast", effortIntent: "glance", rationale: "Bounded\x1b]52;c;payload\x07 edits.", moveUpIf: "It crosses\rmodules.", moveDownIf: "Never\u009b31m.", proposedModel: "a/small", proposedEffort: "low", reason: null },
     };
     const runtime = fakeRuntime(req => req.method === "POST" ? suggestion : { ok: true });
     const logSpy = spyOn(console, "log").mockImplementation(() => {});
     try {
       expect(await handleAgentCommand(["injection", "suggest", "rename", "symbols", "--model", "a/sizer", "--json"], runtime.deps)).toBe(0);
+      expect(JSON.parse(logSpy.mock.calls.flat().join("\n"))).toEqual(suggestion);
+      logSpy.mockClear();
       expect(await handleAgentCommand(["injection", "suggest", "rename symbols", "--apply"], runtime.deps)).toBe(0);
+      const output = logSpy.mock.calls.flat().join("\n");
+      expect(output).not.toMatch(/[\x07\x1b\r\u009b]/);
+      expect(output).toContain("Bounded\\x1b]52;c;payload\\x07 edits.");
+      expect(output).toContain("It crosses\\x0dmodules.");
+      expect(output).toContain("Never\\u009b31m.");
       expect(await handleAgentCommand(["injection", "suggest"], runtime.deps)).not.toBe(0);
     } finally {
       logSpy.mockRestore();
@@ -1699,4 +1713,13 @@ describe("ownership recovery advice does not assume injection is enabled", () =>
       } finally { log.mockRestore(); }
     });
   }
+});
+
+test("Claude intercept start uses the management POST and preserves refusal exit status", async () => {
+  const success = fakeRuntime();
+  expect(await handleClaudeInterceptCommand(["start", "--json"], success.deps)).toBe(0);
+  expect(success.requests).toEqual([{ path: "/api/claude-intercept/start", method: "POST", body: null }]);
+  const refused = fakeRuntime(() => Response.json({ ok: false, reason: "port_in_use" }, { status: 409 }));
+  expect(await handleClaudeInterceptCommand(["start", "--json"], refused.deps)).not.toBe(0);
+  expect(refused.requests).toHaveLength(1);
 });

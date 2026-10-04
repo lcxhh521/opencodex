@@ -79,6 +79,7 @@ const OAUTH_HEADERS = {
   "authorization": "Bearer sk-ant-oat01-tst",
   "user-agent": "claude-cli/2.1.200",
   "x-app": "cli",
+  "x-claude-code-session-id": "44444444-4444-4444-8444-444444444444",
 };
 
 function claudeBody(): Record<string, unknown> {
@@ -121,6 +122,7 @@ test("unmapped claude model + sk-ant credential passes through verbatim", async 
     expect(hit.headers.get("anthropic-beta")).toBe(OAUTH_HEADERS["anthropic-beta"]);
     expect(hit.headers.get("user-agent")).toBe("claude-cli/2.1.200");
     expect(hit.headers.get("x-app")).toBe("cli");
+    expect(hit.headers.get("x-claude-code-session-id")).toBe(OAUTH_HEADERS["x-claude-code-session-id"]);
     // Body untouched: thinking signature, cache_control, max_tokens all intact.
     expect(hit.body).toEqual(claudeBody());
 
@@ -215,18 +217,21 @@ test("count_tokens passes through with native credentials", async () => {
 
 // The legacy claude-ocx spelling is what a picker saved before the ocx-claude aliases.
 test.each([
-  "ocx-claude-native--claude-fable-5-1",
-  "claude-ocx-native--claude-fable-5-1",
-])("Fable 1M picker alias %s preserves native passthrough on both Messages endpoints", async pickerModel => {
+  ["ocx-claude-native--claude-fable-5-1", "claude-fable-5-1"],
+  ["claude-ocx-native--claude-fable-5-1", "claude-fable-5-1"],
+  ["ocx-claude-native--claude-sonnet-5", "claude-sonnet-5"],
+  ["claude-ocx-native--claude-sonnet-5", "claude-sonnet-5"],
+])("Native force/picker alias %s preserves native passthrough on both Messages endpoints", async (pickerModel, nativeModel) => {
   const captured: Captured[] = [];
   const upstream = mockAnthropicUpstream(captured);
-  saveConfig(cfg(upstream.url.toString().replace(/\/$/, "")));
+  saveConfig(cfg(upstream.url.toString().replace(/\/$/, ""), { subagentModelForce: "combo/changed-after-launch" }));
+  const system = "<!-- ocx-route: ocx-claude-mock--test-model -->";
   const server = startServer(0);
   try {
     const messagesWithoutMarker = await fetch(new URL("/v1/messages", server.url), {
       method: "POST",
       headers: OAUTH_HEADERS,
-      body: JSON.stringify({ ...claudeBody(), model: pickerModel }),
+      body: JSON.stringify({ ...claudeBody(), system, model: pickerModel }),
     });
     expect(messagesWithoutMarker.status).toBe(200);
     await messagesWithoutMarker.text();
@@ -234,7 +239,7 @@ test.each([
     const messagesWithMarker = await fetch(new URL("/v1/messages", server.url), {
       method: "POST",
       headers: OAUTH_HEADERS,
-      body: JSON.stringify({ ...claudeBody(), model: `${pickerModel}[1m]` }),
+      body: JSON.stringify({ ...claudeBody(), system, model: `${pickerModel}[1m]` }),
     });
     expect(messagesWithMarker.status).toBe(200);
     await messagesWithMarker.text();
@@ -242,15 +247,15 @@ test.each([
     const countTokens = await fetch(new URL("/v1/messages/count_tokens", server.url), {
       method: "POST",
       headers: OAUTH_HEADERS,
-      body: JSON.stringify({ model: `${pickerModel}[1m]`, messages: [{ role: "user", content: "hi" }] }),
+      body: JSON.stringify({ system, model: `${pickerModel}[1m]`, messages: [{ role: "user", content: "hi" }] }),
     });
     expect(countTokens.status).toBe(200);
     expect(await countTokens.json()).toEqual({ input_tokens: 4242 });
 
     expect(captured).toHaveLength(3);
-    expect(captured[0]!.body.model).toBe("claude-fable-5-1");
-    expect(captured[1]!.body.model).toBe("claude-fable-5-1");
-    expect(captured[2]!.body.model).toBe("claude-fable-5-1");
+    expect(captured[0]!.body.model).toBe(nativeModel);
+    expect(captured[1]!.body.model).toBe(nativeModel);
+    expect(captured[2]!.body.model).toBe(nativeModel);
   } finally {
     await server.stop(true);
     upstream.stop(true);
@@ -1413,4 +1418,30 @@ test("a CRLF turn followed by bytes past the cap is finished, not a failure", as
   const text = await new Response(tapped).text();
   expect(text).not.toContain("event: error");
   expect(calls).toEqual([{ status: 200, closeReason: "terminal" }]);
+});
+
+
+test.each(["missing-credential", "disabled", "provider-alias", "model-map"])("native force alias keeps %s boundary on both endpoints", async scenario => {
+  const captured: Captured[] = [];
+  const upstream = mockAnthropicUpstream(captured);
+  const extra = scenario === "disabled" ? { nativePassthrough: false }
+    : scenario === "model-map" ? { modelMap: { "claude-sonnet-5": "mock/test-model" } } : {};
+  saveConfig(cfg(upstream.url.toString().replace(/\/$/, ""), extra));
+  const server = startServer(0);
+  try {
+    for (const path of ["/v1/messages", "/v1/messages/count_tokens"]) {
+      const response = await fetch(new URL(path, server.url), {
+        method: "POST",
+        headers: scenario === "missing-credential" ? { "content-type": "application/json" } : OAUTH_HEADERS,
+        body: JSON.stringify({ ...claudeBody(), stream: false,
+          model: scenario === "provider-alias" ? "ocx-claude-anthropic--claude-sonnet-5" : "ocx-claude-native--claude-sonnet-5",
+          system: "<!-- ocx-route: ocx-claude-mock--test-model -->" }),
+      });
+      await response.text();
+    }
+    expect(captured).toHaveLength(0);
+  } finally {
+    await server.stop(true);
+    upstream.stop(true);
+  }
 });

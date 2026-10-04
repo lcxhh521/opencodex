@@ -5,19 +5,23 @@ import {
   AtomicWriteResidualTempError,
   AtomicWriteSecretResidualError,
   atomicWriteFile,
-  getConfigDir,
   resolveWriteTarget,
   type AtomicWriteIO,
-} from "../../config";
+} from "../../config/atomic-write";
+import { getConfigDir } from "../../config/paths";
+import { readConfigAdmissionSnapshot } from "../../config/diagnostics";
+import { ConfigMutationLockError, withConfigMutationLockSync } from "../../config/mutation-lock";
+import { codexCatalogAuditPath } from "../catalog/write-audit";
+import type { CatalogAuditConfigSource, CatalogAuditRefusalReason, CatalogWriteAuditDetails } from "../catalog/write-audit-contract";
+import { ocxRoutedRowCount } from "../catalog/routed-removal";
+import { notifyCatalogPublication } from "../catalog/publication-observer";
 import {
   assertCatalogWritePermit,
+  auditCatalogWriteWithPermit,
   catalogWritePermitContext,
   CatalogWritePermitRefusal,
   type CatalogWritePermit,
 } from "../catalog-write-serialization";
-import { readConfigAdmissionSnapshot } from "../../config/diagnostics";
-import { ocxRoutedRowCount } from "../catalog/routed-removal";
-import { appendCatalogWriteAudit, codexCatalogAuditPath, type CatalogWriteAuditEvent } from "../catalog/write-audit";
 import {
   forgetEphemeralSecretPath,
   hardenSecretPath,
@@ -66,14 +70,15 @@ let backupTempSequence = 0;
  * An unreadable or absent file reports "differs", so the caller performs the real
  * write; that also converges a file that does not exist yet.
  */
-export function preparedBytesDifferFromDisk(prepared: PreparedCatalogFileWrite): boolean {
-  let onDisk: Buffer;
-  try {
-    onDisk = readFileSync(prepared.path);
-  } catch {
-    return true;
-  }
-  return !onDisk.equals(Buffer.from(prepared.content, "utf8"));
+function readExistingCatalogBytes(path: string): Buffer | null {
+  try { return readFileSync(path); } catch { return null; }
+}
+
+export function preparedBytesDifferFromDisk(
+  prepared: PreparedCatalogFileWrite,
+  onDisk: Buffer | null = readExistingCatalogBytes(prepared.path),
+): boolean {
+  return onDisk === null || !onDisk.equals(Buffer.from(prepared.content, "utf8"));
 }
 
 function isMissingPathError(error: unknown): boolean {
@@ -204,64 +209,58 @@ function publishCatalogBackup(
   return "written";
 }
 
-/**
- * What a catalog or models-cache replacement did. `unchanged`: the bytes on disk already match, so
- * nothing was written and no mtime moved. `refused`: a refresh would have cleared every routed row
- * while config.json is missing or unreadable (#6529).
- */
 export type CatalogFileReplacement =
   | { readonly kind: "written" }
   | { readonly kind: "unchanged" }
   | { readonly kind: "refused"; readonly reason: "unbacked-routed-clear" };
 
-function readExistingBytes(path: string): Buffer | null {
-  try {
-    return readFileSync(path);
-  } catch {
-    return null;
-  }
+function routedRowsFromJson(content: string): number | null {
+  try { return ocxRoutedRowCount(JSON.parse(content)); } catch { return null; }
 }
 
-function parseJson(bytes: Buffer | string | null): unknown {
-  if (bytes === null) return null;
-  try {
-    return JSON.parse(typeof bytes === "string" ? bytes : bytes.toString("utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function configSourceNow(): NonNullable<CatalogWriteAuditEvent["configSource"]> {
+function configSourceNow(): CatalogAuditConfigSource {
   try {
     const snapshot = readConfigAdmissionSnapshot();
-    // A missing file runs on defaults; any other read failure is reported as unreadable.
-    if (snapshot.kind === "read") return snapshot.diagnostics.source;
-    return snapshot.diagnostics.source === "default" ? "default" : "unreadable";
-  } catch {
-    return "unreadable";
-  }
+    return snapshot.kind === "read" ? snapshot.diagnostics.source
+      : snapshot.diagnostics.source === "default" ? "default" : "unreadable";
+  } catch { return "unreadable"; }
 }
 
-/** Every writer reaching the funnel holds a permit K issued, so it is this Codex home's owner or it is unbound. */
-function auditWrite(owningCodexHome: string, event: CatalogWriteAuditEvent, register: boolean): void {
-  if (appendCatalogWriteAudit(owningCodexHome, event, { create: true }) !== "created") return;
-  // The owner's uninstall removes what its manifest names. A process without a real config.json
-  // has no home worth claiming the file for.
-  if (register && event.configSource === "file") {
-    try { recordOwnedConfigPath(getConfigDir(), codexCatalogAuditPath(owningCodexHome)); } catch { /* best-effort */ }
-  }
+function routedRowsOnDisk(path: string): number | null {
+  try { return routedRowsFromJson(readFileSync(path, "utf8")); } catch { return null; }
 }
 
-/**
- * Replace the active catalog with the caller's already-prepared bytes.
- *
- * The one funnel every catalog writer goes through, so the rules that must hold for all of them
- * live here (#6529): identical bytes are not rewritten; a `refresh` may clear every OpenCodex
- * routed row only while config.json is a readable file, because a config that fell back to
- * defaults routes nothing and would otherwise publish a native-only catalog; only `restore` clears
- * them unconditionally; a `cache` permit never reaches the catalog. Each write and refusal is
- * audited in CODEX_HOME.
- */
+function auditWrite(
+  permit: CatalogWritePermit,
+  home: string,
+  details: CatalogWriteAuditDetails,
+  register: boolean,
+): void {
+  try {
+    if (auditCatalogWriteWithPermit(permit, home, details) !== "created"
+      || !register || details.configSource !== "file") return;
+    // The manifest rejects external CODEX_HOME paths. Such audit files remain uninstall
+    // residuals; diagnostic creation does not widen config ownership or claim cleanup.
+    if (!recordOwnedConfigPath(getConfigDir(), codexCatalogAuditPath(home))) return;
+  } catch { /* Audit and registration failures cannot change the publication outcome. */ }
+}
+
+/** Audit an actual refusal before the replacement funnel. Caller must avoid a second funnel event. */
+export function auditRefusedCatalogReplacement(
+  permit: CatalogWritePermit,
+  home: string,
+  prepared: PreparedCatalogFileWrite,
+  reason: CatalogAuditRefusalReason,
+): void {
+  assertCatalogWritePermit(permit, home);
+  auditWrite(permit, home, {
+    target: "catalog", outcome: "refused", reason,
+    routedBefore: routedRowsOnDisk(prepared.path), routedAfter: routedRowsFromJson(prepared.content),
+    configSource: configSourceNow(),
+  }, true);
+}
+
+/** One funnel for exact-byte idempotence and intent admission, under a live K permit. */
 export function replaceActiveCodexCatalog(
   permit: CatalogWritePermit,
   owningCodexHome: string,
@@ -269,24 +268,46 @@ export function replaceActiveCodexCatalog(
   io?: AtomicWriteIO,
 ): CatalogFileReplacement {
   assertCatalogWritePermit(permit, owningCodexHome);
-  const { intent, writer } = catalogWritePermitContext(permit);
+  const { intent } = catalogWritePermitContext(permit);
   if (intent === "cache") {
     throw new CatalogWritePermitRefusal("A models-cache permit cannot replace the Codex catalog.");
   }
-  const before = readExistingBytes(prepared.path);
-  if (before !== null && before.equals(Buffer.from(prepared.content, "utf8"))) return { kind: "unchanged" };
-  const routedBefore = ocxRoutedRowCount(parseJson(before));
-  const routedAfter = ocxRoutedRowCount(parseJson(prepared.content));
-  const configSource = configSourceNow();
-  const event = { target: "catalog", intent, writer, routedBefore, routedAfter, configSource } as const;
-  if (intent === "refresh" && (routedBefore ?? 0) > 0 && routedAfter === 0 && configSource !== "file") {
-    auditWrite(owningCodexHome, { ...event, outcome: "refused", reason: "unbacked-routed-clear" }, io === undefined);
-    return { kind: "refused", reason: "unbacked-routed-clear" };
+  const onDisk = readExistingCatalogBytes(prepared.path);
+  if (!preparedBytesDifferFromDisk(prepared, onDisk)) {
+    notifyCatalogPublication({ kind: "published", path: prepared.path, intent });
+    return { kind: "unchanged" };
+  }
+  const routedBefore = onDisk === null ? null : routedRowsFromJson(onDisk.toString("utf8"));
+  const routedAfter = routedRowsFromJson(prepared.content);
+  const finish = (result: CatalogFileReplacement): CatalogFileReplacement => {
+    if (result.kind !== "unchanged") auditWrite(permit, owningCodexHome, {
+      target: "catalog", outcome: result.kind,
+      reason: result.kind === "refused" ? result.reason : undefined,
+      routedBefore, routedAfter, configSource: configSourceNow(),
+    }, io === undefined);
+    if (result.kind !== "refused") notifyCatalogPublication({ kind: "published", path: prepared.path, intent });
+    return result;
+  };
+  if (intent === "refresh" && (routedBefore ?? 0) > 0 && routedAfter === 0) {
+    // K -> C, including the replacement: a config save cannot race the authority check.
+    try {
+      return finish(withConfigMutationLockSync(() => {
+        const snapshot = readConfigAdmissionSnapshot();
+        if (snapshot.kind !== "read" || snapshot.diagnostics.source !== "file") {
+          return { kind: "refused", reason: "unbacked-routed-clear" } as const;
+        }
+        atomicWriteFile(prepared.path, prepared.content, io);
+        resetCodexAppServerCatalogStateCache();
+        return { kind: "written" } as const;
+      }));
+    } catch (error) {
+      if (error instanceof ConfigMutationLockError) return finish({ kind: "refused", reason: "unbacked-routed-clear" });
+      throw error;
+    }
   }
   atomicWriteFile(prepared.path, prepared.content, io);
   resetCodexAppServerCatalogStateCache();
-  auditWrite(owningCodexHome, { ...event, outcome: "written" }, io === undefined);
-  return { kind: "written" };
+  return finish({ kind: "written" });
 }
 
 /** Atomically publish the catalog-path-keyed immutable backup without clobbering. */
@@ -314,28 +335,7 @@ export function publishLegacyCodexCatalogBackup(
   return publishCatalogBackup(prepared, io);
 }
 
-/** Audit a catalog replacement its writer refused before reaching the funnel, e.g. an unbacked removal. */
-export function auditRefusedCatalogReplacement(
-  permit: CatalogWritePermit,
-  owningCodexHome: string,
-  prepared: PreparedCatalogFileWrite,
-  reason: NonNullable<CatalogWriteAuditEvent["reason"]>,
-): void {
-  assertCatalogWritePermit(permit, owningCodexHome);
-  const { intent, writer } = catalogWritePermitContext(permit);
-  auditWrite(owningCodexHome, {
-    target: "catalog",
-    outcome: "refused",
-    reason,
-    intent,
-    writer,
-    routedBefore: ocxRoutedRowCount(parseJson(readExistingBytes(prepared.path))),
-    routedAfter: ocxRoutedRowCount(parseJson(prepared.content)),
-    configSource: configSourceNow(),
-  }, true);
-}
-
-/** Replace Codex's models cache with the caller's already-prepared bytes; identical bytes are not rewritten. */
+/** Replace Codex's models cache with the caller's already-prepared bytes. */
 export function replaceCodexModelsCache(
   permit: CatalogWritePermit,
   owningCodexHome: string,
@@ -343,19 +343,14 @@ export function replaceCodexModelsCache(
   io?: AtomicWriteIO,
 ): Exclude<CatalogFileReplacement, { kind: "refused" }> {
   assertCatalogWritePermit(permit, owningCodexHome);
-  const { intent, writer } = catalogWritePermitContext(permit);
-  const before = readExistingBytes(prepared.path);
-  if (before !== null && before.equals(Buffer.from(prepared.content, "utf8"))) return { kind: "unchanged" };
+  catalogWritePermitContext(permit);
+  if (!preparedBytesDifferFromDisk(prepared)) return { kind: "unchanged" };
+  const routedBefore = routedRowsOnDisk(prepared.path);
   atomicWriteFile(prepared.path, prepared.content, io);
   resetCodexAppServerCatalogStateCache();
-  auditWrite(owningCodexHome, {
-    target: "cache",
-    outcome: "written",
-    intent,
-    writer,
-    routedBefore: ocxRoutedRowCount(parseJson(before)),
-    routedAfter: ocxRoutedRowCount(parseJson(prepared.content)),
-    configSource: configSourceNow(),
+  auditWrite(permit, owningCodexHome, {
+    target: "cache", outcome: "written", routedBefore,
+    routedAfter: routedRowsFromJson(prepared.content), configSource: configSourceNow(),
   }, io === undefined);
   return { kind: "written" };
 }

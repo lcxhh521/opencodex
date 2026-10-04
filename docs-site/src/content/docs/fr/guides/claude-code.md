@@ -19,9 +19,17 @@ choisit la plus faible utilisation connue dans la fenêtre configurée par `anth
 (`five-hour` par défaut, `weekly` ou `max-utilization`) lorsqu'elle dépasse `autoSwitchThreshold` ; `round-robin`
 répartit les sessions uniformément (`stickyLimit`, `1` par défaut) ; `fill-first` utilise le compte actif jusqu'à
 un délai de récupération, une réauthentification ou le seuil, puis passe au suivant. Cette fonction est
-**désactivée par défaut**, affiche un avertissement dans l'interface et n'a pas été éprouvée en production.
-Anthropic peut restreindre les comptes dont l'activité ressemble à une rotation automatisée ; la rotation ne
-protège pas contre l'application des règles du fournisseur.
+**désactivée par défaut** et reste expérimentale.
+
+Le tableau de bord indique les conditions prévues : des abonnements qui vous appartiennent ou que vous êtes
+autorisé à utiliser, le client Claude Code officiel et une personne qui supervise la session. Anthropic n'a pas
+approuvé le regroupement automatique de comptes, des comptes d'une même organisation peuvent partager un quota
+(un compte de plus n'ajoute alors pas forcément de capacité), et changer de compte ne protège pas contre
+l'application des règles du fournisseur. OpenCodex n'envoie aucune requête de maintien à chaud (keep-warm) et,
+par défaut, ne rafraîchit pas les jetons Claude et ne lit pas l'usage en arrière-plan : l'usage est lu quand le
+tableau de bord, l'app de la barre des menus ou une commande `ocx` le demande. Les seuils sont des préférences
+de sélection, pas des plafonds d'usage ou de facturation. Ces indications ne constituent pas un avis juridique ;
+consultez les conditions actuelles d'Anthropic.
 
 Comportement lorsque cette option est activée :
 
@@ -681,7 +689,7 @@ du débogage Claude efface immédiatement l'anneau.
 
 ## Interface graphique (page Claude)
 
-La barre latérale du tableau de bord comporte une page **Claude** dédiée (sous API) et une bascule **Claude ON**
+La barre latérale du tableau de bord comporte une page **Claude** dédiée (sous Connexion) et une bascule **Claude ON**
 (étiquette volontairement identique dans toutes les langues). La page affiche :
 
 - Interrupteur général des requêtes entrantes
@@ -738,3 +746,17 @@ Sur toutes les routes Chat traduites, les rappels de l’historique conservent l
 ### `anthropicAccountPool.routes`
 
 Les règles `anthropicAccountPool.routes` limitent la sélection et les reprises 429 aux comptes enregistrés du premier modèle correspondant lorsque le pool est activé. Sans compte éligible, la requête échoue localement; `fallback: true` autorise alors le pool ordinaire. Les règles ne prouvent pas l’accès du compte au modèle.
+
+### Forced Claude Code subagent model
+
+The Subagents page offers **Force all subagents onto one model**, off by default. Select an exposed roster-style id, such as `combo/tev-auto`, then enable the switch. The roster is offered first; unavailable saved roster entries cannot be force targets.
+
+`ocx agent subagents force combo/tev-auto` sets `claudeCode.subagentModelForce`; `ocx agent subagents force -` clears it. `ocx agent status` reports the setting. `GET /api/subagent-models` returns `force`, `forceAvailable`, and `forceStatus`; `PUT` accepts `{ "force": "combo/tev-auto" }` or `{ "force": null }` without changing the roster. Omitting `force` leaves it unchanged. Invalid or unexposed targets are rejected on write; stale targets are reported and skipped at launch.
+
+This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` only for an authoritative million-token window; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
+
+Claude Code **2.1.257 or newer** is required for FORCE. Plugin and built-in agents (including Explore/Plan) and per-call model arguments are overridden. Forks and subagent skills with `model: inherit` keep the main conversation model. The main loop and Haiku/small-fast sidecars are unaffected. Existing roster files remain available.
+
+The dashboard warns about old or unknown CLI versions, unavailable targets, and either variable already present in `settings.json` → `env` (which overrides launch env). Detection is read-only and server-local: it cannot inspect another launch shell, another machine, or project-local settings. An unknown result is not proof of force support.
+
+Explicit gateway selectors on a generated agent request take precedence over its legacy `ocx-route` fallback, even if the saved force setting changes after launch. For shell or settings overrides of generated roster agents, use an explicit gateway alias; bare Claude ids retain the older-client fallback behavior. Native aliases restore their bare model before the existing credential and model-map checks. Connected launches validate force targets against a fresh authenticated gateway catalog; failed discovery skips automatic force injection, and cached context windows alone never prove availability.

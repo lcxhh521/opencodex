@@ -293,6 +293,7 @@ for (const mutator of mutators) {
     expect(publishIndex).toBeGreaterThanOrEqual(0);
     expect(hardenIndex).toBeLessThan(publishIndex);
     if (isBackup) expect(result).toBe("written");
+    else expect(result).toEqual({ kind: "written" });
   });
 }
 
