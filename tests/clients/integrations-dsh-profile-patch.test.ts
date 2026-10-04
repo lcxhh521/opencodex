@@ -238,8 +238,8 @@ describe("DSH Desktop profile patch", () => {
   });
 
   test("a Desktop profile whose patch is missing is reported, never written to the settings file", () => {
-    // DSH has booted the profile (its manifest exists), so it imported settings.yaml already
-    // and will not read it again: a write there would be lost without a word.
+    // DSH manages the profile (its manifest exists) and renames settings.yaml to .imported on
+    // startup, so a write there would orphan the ownership record: refuse with the remedy.
     mkdirSync(dirname(storePath()), { recursive: true });
     writeFileSync(join(dirname(storePath()), "package.json"), "{}\n");
 

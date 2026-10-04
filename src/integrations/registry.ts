@@ -109,9 +109,9 @@ export interface IntegrationClientSpec {
      */
     lockFile?: (storePath: string) => string;
     /**
-     * A store the client still reads while it is missing: the config file was imported once and
-     * is never read again, so writing it would be lost. Such a store is reported as an
-     * ineffective write with this remedy instead of silently writing the config file.
+     * A missing store the client already manages. Writing the config file instead would not stay
+     * where opencodex records it, so the target is reported as an ineffective write with this
+     * remedy rather than silently writing the config file.
      */
     missingStore?: {
       readsStore: (storePath: string, statKind: (path: string) => string) => boolean;
@@ -330,8 +330,10 @@ export const INTEGRATION_CLIENTS: Record<IntegrationClientId, IntegrationClientS
       sourcePreservingYaml: { path: DSH_PROFILE_PROVIDER_PATH },
       // DSH's config editor serializes profile edits on the profile manifest's lock.
       lockFile: store => join(dirname(store), "package.json"),
-      // Once DSH has booted the Desktop profile (its manifest exists), it has imported
-      // `settings.yaml` and never reads it again, so a missing patch is no reason to write there.
+      // A Desktop profile manifest without its patch is a profile DSH manages. On each startup
+      // DSH's importLegacyDocument renames `settings.yaml` to `settings.yaml.imported` and imports
+      // it into the active profile, so a block written there would leave opencodex's ownership
+      // record pointing at a file that no longer exists. Refuse it and name the remedy instead.
       missingStore: {
         readsStore: (store, statKind) => statKind(join(dirname(store), "package.json")) === "file",
         remedy: "Create it containing `[]` (the empty patch DSH writes for a new profile), then enable the integration again.",

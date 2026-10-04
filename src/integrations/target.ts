@@ -67,9 +67,10 @@ export interface IneffectiveWrite {
    * we wrote the store leaves our block there, removable, and the file no
    * longer one we may merge into.
    *
-   * `missing-store` — the store does not exist, yet the client no longer reads the
-   * config file (DSH after its one-time `settings.yaml` import), so a write there
-   * would be lost. `remedy` says how to bring the store back.
+   * `missing-store` — the store does not exist, but the client already manages it
+   * (DSH: a Desktop profile manifest is present). DSH renames `settings.yaml` to
+   * `settings.yaml.imported` and imports it on startup, so a config-file write would
+   * orphan our ownership record. `remedy` says how to bring the store back.
    */
   readonly why: "owned-config-file" | "unestablished-schema" | "missing-store";
   readonly remedy?: string;

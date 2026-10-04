@@ -301,7 +301,7 @@ function applyOrRefreshIntegration(
       target.ineffective.why === "owned-config-file"
         ? `${clientId} now reads its providers from ${readsFrom}, and opencodex still has a block in ${configPath}, which it no longer reads. Disable the ${clientId} integration to remove that block, then enable it again to write ${readsFrom}.`
         : target.ineffective.why === "missing-store"
-          ? `${clientId} reads its providers from ${readsFrom}, which does not exist, so writing ${configPath} would change nothing it loads. ${target.ineffective.remedy ?? fallback}`
+          ? `${clientId} reads its providers from ${readsFrom}, which does not exist. ${clientId} renames ${configPath} away and imports it on its next start, so opencodex will not write there. ${target.ineffective.remedy ?? fallback}`
         : readsFrom === configPath
           ? `opencodex does not recognise the schema of ${readsFrom}, the file ${clientId} reads its providers from, so it will not merge into it. ${fallback}`
           : `${clientId} now reads its providers from ${readsFrom}, whose schema opencodex does not recognise, so writing ${configPath} would change nothing it loads. ${fallback}`);

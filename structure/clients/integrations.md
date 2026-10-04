@@ -436,7 +436,7 @@ keeps a sequence root, the source patcher rewrites that entry with its `- ` and 
 for byte, `[]` is the only flow form adopted or written back, and a created row pruned to its selector
 is removed. `IntegrationTarget` carries its own `sourcePreservingYaml`. Writes hold `settings.yaml.lock`,
 then the profile's `package.json.lock`, re-probing the profile after each revalidation await; refresh
-keeps the selected row in place, and restore refuses to recreate a missing profile directory unlocked. A booted profile (its `package.json` present) with no patch is reported, never written through `settings.yaml`, which DSH no longer reads.
+keeps the selected row in place, and restore refuses to recreate a missing profile directory unlocked. A profile with `package.json` but no patch is refused: DSH renames `settings.yaml` to `settings.yaml.imported` on startup, which would orphan the ownership record.
 
 ## Verification
 
