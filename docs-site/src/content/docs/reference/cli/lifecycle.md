@@ -416,6 +416,23 @@ same stale-`app-server` warning and optional restart flags as `ocx sync` apply.
 
 If the derived cache already has identical bytes, the command succeeds without rewriting it or restarting Codex. With `--json`, this is reported as `ok: true`, `wrote: false`, `skipped: true`, and `skippedReason: "unchanged"`; an invalid catalog or failed cache write still exits nonzero.
 
+### Catalog write diagnostics
+
+Catalog write auditing records bounded diagnostics in `opencodex-catalog-audit.jsonl` under
+`CODEX_HOME`. An unchanged catalog or cache produces no event; an audit failure does not fail
+catalog publication.
+
+On Windows, **at most the successful new-file creation event is recorded**. The file is created
+empty and hardened before diagnostic data is written. All later events skip the existing file,
+both in the same process and after restart. A hardening failure may leave an empty file, which
+later events also skip. Existing files and their ACLs are not changed for auditing, including
+when another OpenCodex home owns the catalog. This is a privacy-first fallback, not a complete
+Windows audit stream; native NTFS behavior for this audit path has not yet been validated.
+
+POSIX auditing continues to append and retain bounded records. The Windows limitation does not
+disable catalog protection or owner healing. Audit files in a separate `CODEX_HOME` remain
+cleanup residuals because the config uninstall manifest cannot claim paths outside its own root.
+
 ### `ocx catalog pull <https-url> [--auth-env <NAME>] [--json] [--restart-codex] [--restart-app-server-only]`
 
 Install a complete catalog served by another OpenCodex instance's `/v1/catalog` endpoint, then
@@ -700,6 +717,15 @@ or failing to claim a new root safely, therefore leaves the working proxy and it
 place. Existing or conflicting scheduler registrations continue to fail closed rather than being
 deleted as an unsafe best-effort rollback.
 
+If startup reports `another process owns the runtime mutation lease` or `ocx service status` shows
+`Runtime mutation lease busy`, the lease is blocking startup or service changes even if the
+proxy is not running. The message includes the lock path, recorded PID, current liveness,
+executable name when available, and lease age. The process identity is unverified: the PID
+may have been reused, so liveness and executable name describe whichever process occupies
+that PID now. Wait for the operation to finish and retry; do not delete the lock or stop a
+process based only on this PID. A later mutation attempt can reclaim a stale lease once its
+age exceeds 30 seconds and the recorded PID is no longer alive; status only inspects it.
+
 ### `ocx codex-shim <install|status|uninstall|remove>`
 
 Wrap a script-based `codex` launcher on PATH with a lightweight autostart script. Real `codex.exe`
@@ -711,8 +737,10 @@ For Windows installations that expose only `codex.exe`, use `ocx service install
 For fnm-managed Codex, installation resolves the temporary multishell directory to the durable
 Node installation while preserving the launcher filename. If that directory cannot be resolved,
 installation refuses instead of wrapping a temporary path. When Codex is selected, `ocx connect`
-also reports shim readiness. This readiness check skips special-file PATH entries while preserving
-the order of regular launchers, including npm and fnm symlinks. If a different PATH wrapper hides a healthy shim, fix PATH order;
+also reports shim readiness. This readiness check skips special-file PATH entries and, on macOS
+and Linux, files without execute permission, including symlink targets. It preserves the order of
+regular executable launchers, including npm and fnm symlinks. Windows keeps its PATHEXT lookup.
+If a different PATH wrapper hides a healthy shim, fix PATH order;
 reinstalling the same shim does not change which command your shell finds first. If the tracked shim
 is healthy but no `codex` command is found, connect reports it as inactive and asks you to add its
 directory to PATH. A failed PATH inspection reports activation as unverified instead of claiming
