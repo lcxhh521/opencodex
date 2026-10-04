@@ -1,7 +1,6 @@
 /**
  * Run the GUI TypeScript build when this push includes gui/ changes.
- * Run it directly (`bun scripts/typecheck-gui-if-changed.ts`); wiring it into "bun run prepush"
- * touches the root package.json, a sponsored surface, so that lands separately.
+ * Used by "bun run prepush".
  *
  * Mirrors "scripts/lint-gui-if-changed.ts" so local push validation stays in
  * one shape: root "typecheck" cannot see gui/ (no project references), so the

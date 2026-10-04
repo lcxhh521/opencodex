@@ -15,9 +15,20 @@ import { repoPath } from "../helpers/repo-root";
  * so the gui type gate reuses it and the tests below pin the checked-in files
  * rather than copies of them.
  */
+const rootPkg = readFileSync(repoPath("package.json"), "utf8");
+const prepush = rootPkg.match(/"prepush": "([^"]+)"/)![1]!;
 const typecheckGuiIfChangedScript = fileURLToPath(new URL("../../scripts/typecheck-gui-if-changed.ts", import.meta.url));
 
 describe("gui typecheck if-changed gate", () => {
+  test("root exposes the gui typecheck gate script", () => {
+    expect(rootPkg).toContain('"typecheck:gui:if-changed": "bun scripts/typecheck-gui-if-changed.ts"');
+  });
+
+  test("prepush runs the gui typecheck gate after the root typecheck", () => {
+    expect(prepush).toContain("bun run typecheck:gui:if-changed");
+    expect(prepush.indexOf("bun run typecheck")).toBeLessThan(prepush.indexOf("bun run typecheck:gui:if-changed"));
+  });
+
   test("the if-changed gate runs on gui/ changes, skips otherwise, and fails the push on a compile error", () => {
     const dryRun = (files: string): string => {
       const probe = Bun.spawnSync([process.execPath, typecheckGuiIfChangedScript], {
