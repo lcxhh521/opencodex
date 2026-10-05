@@ -14,10 +14,10 @@ description: 대시보드에서 OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, 
 | OpenClaw | `~/.openclaw/openclaw.json` | JSON5 | 실행 중인 게이트웨이에 즉시 | `OPENCODEX_OPENCLAW_API_KEY` |
 | Kimi Code | `~/.kimi-code/config.toml` | TOML | 재시작 또는 `/reload` 시 | 루프백 자리표시자 |
 | gjc | `~/.gjc/agent/models.yml` | YAML | 새 세션 또는 `/model` 열 때 | 비밀 정보가 아닌 루프백 자리표시자 |
-| DeepSeek Harness (DSH) | `$DSH_HOME/settings.yaml` (기본값 `~/.dsh/settings.yaml`) | YAML | 즉시 다시 읽음 | 비밀 정보가 아닌 루프백 bearer 자리표시자 |
+| DeepSeek Harness (DSH) | `$DSH_HOME/profiles/desktop/cordis.patch.yml` (기본값 `~/.dsh/profiles/desktop/cordis.patch.yml`); DSH Desktop이 이 profile을 만들기 전에는 `$DSH_HOME/settings.yaml` | YAML | 즉시 다시 읽음 | 비밀 정보가 아닌 루프백 bearer 자리표시자 |
 | MiniMax Code | `~/.minimax/config.yaml` | YAML | 새 세션 또는 모델 선택기 열 때 | 루프백 자리표시자 |
 | Prime Agent | `~/.prime/agent/models.json` | JSON | 새 세션에서 | 루프백 자리표시자 |
-| ZCode | `~/.zcode/v2/config.json` | JSON | 재시작 시 | 루프백 자리표시자 |
+| ZCode | `~/.zcode/v2/provider_config.json` (schemaVersion 1); 레거시 대체 경로: `~/.zcode/v2/config.json` | JSON | 재시작 시 | 루프백 자리표시자 |
 | Aside | `~/.aside/u/<account>/models.json` | JSON | Aside를 완전히 종료하고 다시 열 때 | 루프백 자리표시자 |
 | Raycast | `~/.config/raycast/ai/providers.yaml` | YAML | 저장 즉시 — Raycast가 파일을 감시함 | 없음 — 루프백 전용 |
 | omo | `~/.omo/agent/models.json` | JSON | 새 세션에서 | 루프백 자리표시자 |
