@@ -1,4 +1,6 @@
 /** `ocx account` — list and switch provider credentials (issue #180). */
+import { apiKeyQuotaText } from "./account-key-quota";
+import { emptyAccountNextAction, recoveryAccountLabel } from "./account-next-actions";
 import { loadConfig } from "../config";
 import { explainCodexUseOutcome, reportCodexAccountTargetError, resolveCodexUseTarget } from "./account-target";
 import { providerCodexAccountMode } from "../providers/registry";
@@ -63,7 +65,11 @@ const ACCOUNT_USAGE = `Usage:
   ocx account add-key <provider> [--label <label>] [--json]
   ocx account import <provider> --format <format> (--file <path>|--stdin) [--json]
   ocx account import-orca --source <orca-data-directory> --registry <orca-data.json> [--apply] [--json]
-  ocx account login <provider> [--id <account-id>] [--reauth] [--code -] [--no-wait] [--json]
+  ocx account login <provider> [--id <account-id>] [--reauth] [--open-browser on|off] [--add-account on|off] [--code -] [--no-wait] [--json]
+  ocx account pool <provider> [--enabled on|off] [--threshold N] [--strategy NAME] [--sticky N] [--quota-window W] [--json]
+  ocx account credits openai <ID on|off|--all on|off> [--json]
+  ocx account quota-activation openai ID --window fiveHour|weekly <on|off> [--json]
+  ocx account anthropic-reset-grants [ID] [--json]
   ocx account code <provider> [--flow <flow-id>] [--json]   (reads the code from stdin)
   ocx account cancel <provider> [--flow <flow-id>] [--json] (--flow required for codex)
   ocx account reset-credits <account-id|main> [--consume --yes] [--json]
@@ -117,6 +123,8 @@ function statusText(row: AccountRow): string {
   if (row.provider === "kiro" && row.autoSelectable === false && !(row.paused && row.skipReason === "paused"))
     parts.push(row.skipReason ? `not-auto-selected(${row.skipReason})` : "not-auto-selected");
   if (row.validationPending) parts.push("validation-pending");
+  if (row.health && row.health !== "Healthy" && !row.needsReauth && !row.validationPending) parts.push(row.health.toLowerCase());
+  if (row.creditsAfterLimit === true) parts.push("paid-credits: on");
   if (row.selectionExcludedReason === "plan_excluded") {
     parts.push(`not-auto-selected(plan=${row.selectionExcludedPlan ?? row.plan ?? "unknown"})`);
   }
@@ -134,6 +142,7 @@ function priorityText(row: AccountRow): string {
  * decides on before a long session. The full breakdown stays in `--json`.
  */
 function quotaText(row: AccountRow): string {
+  if (row.type === "api-key") return apiKeyQuotaText(row);
   if (row.quotaUnavailable) return row.quotaFailure ? `unavailable (${row.quotaFailure})` : "unavailable";
   const quota = row.quota;
   if (!quota) return "-";
@@ -167,7 +176,8 @@ export function formatAccountTable(rows: AccountRow[], withQuota = false): strin
   });
   const widths = header.map((h, i) => Math.max(h.length, ...data.map(d => d[i]!.length)));
   const line = (cols: string[]) => cols.map((c, i) => c.padEnd(widths[i]!)).join("  ").trimEnd();
-  return [line(header), ...data.map(line)].join("\n");
+  const actions = rows.flatMap(row => row.healthAction ? [`${row.provider} ${recoveryAccountLabel(row.id, displayId(row.id))}: ${row.health?.toLowerCase() ?? "needs attention"}. Next: ${row.healthAction}`] : []);
+  return [line(header), ...data.map(line), ...actions].join("\n");
 }
 
 async function cmdList(rest: string[], deps: AccountDeps): Promise<number> {
@@ -237,7 +247,7 @@ async function cmdList(rest: string[], deps: AccountDeps): Promise<number> {
       return apiError(r.errorJson, `failed to list ${t.name}`, r.status);
     }
     if (r.rows.length === 0) {
-      if (showAll) notes.push(`${t.name}: no stored accounts or keys`);
+      if (showAll || name) notes.push(`${t.name}: no stored accounts or keys`, emptyAccountNextAction(t.name, t.type));
       continue;
     }
     rows.push(...r.rows);
@@ -252,6 +262,7 @@ async function cmdList(rest: string[], deps: AccountDeps): Promise<number> {
     }
   }
 
+  if (rows.length === 0 && !name) notes.push("No stored accounts or keys.", emptyAccountNextAction());
   if (wantsJson) {
     console.log(JSON.stringify({ accounts: rows, notes }, null, 2));
     return 0;
@@ -403,6 +414,12 @@ async function cmdClear(rest: string[], deps: AccountDeps): Promise<number> {
 export async function cmdAccount(args: string[], deps: AccountDeps = {}): Promise<number> {
   const [sub, ...rest] = args;
   try {
+    if (["pool", "credits", "quota-activation", "anthropic-reset-grants"].includes(sub ?? "")
+      || (sub === "auto-switch" && rest[0]?.trim().toLowerCase() === "openai"
+        && rest.some(arg => arg === "--account" || arg.startsWith("--account=")))) {
+      const { handleAccountPolicyCommand } = await import("./account-policy");
+      return handleAccountPolicyCommand(sub as "pool" | "auto-switch" | "credits" | "quota-activation" | "anthropic-reset-grants", rest, deps);
+    }
     if (sub === "list") return await cmdList(rest, deps);
     if (sub === "history") {
       const { cmdAccountHistory } = await import("./account-history");

@@ -1060,6 +1060,50 @@ describe("doctor refuses --json rather than printing prose as success", () => {
   });
 });
 
+describe("codex-shim status argument validation", () => {
+  test.each(["--json", "--json=true", "--nope", "unexpected"])("rejects %s with stderr-only usage and exit 2", async extra => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const logSpy = spyOn(console, "log").mockImplementation(value => { out.push(String(value)); });
+    const errorSpy = spyOn(console, "error").mockImplementation(value => { err.push(String(value)); });
+    try {
+      const args = ["codex-shim", "status", extra];
+      expect(await dispatchCommand(
+        { kind: "command", command: "codex-shim", args }, { ...fakeDeps, args },
+      )).toBe(2);
+      expect(out).toEqual([]);
+      expect(err).toContain("Usage: ocx codex-shim status");
+      expect(err[0]).toBe(extra.startsWith("--json")
+        ? "ocx codex-shim status does not support --json; use ocx status --json (codexShim)."
+        : "ocx codex-shim status does not accept arguments or options.");
+      expect(err.join("\n")).not.toContain(extra === "unexpected" ? extra : "Codex autostart shim:");
+    } finally {
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
+  test("bare status still prints the local diagnosis and exits 0", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ocx-shim-status-"));
+    const previous = process.env.OPENCODEX_HOME;
+    const out: string[] = [];
+    const logSpy = spyOn(console, "log").mockImplementation(value => { out.push(String(value)); });
+    try {
+      process.env.OPENCODEX_HOME = home;
+      const args = ["codex-shim", "status"];
+      expect(await dispatchCommand(
+        { kind: "command", command: "codex-shim", args }, { ...fakeDeps, args },
+      )).toBe(0);
+      expect(out).toEqual(["Codex autostart shim is not installed."]);
+    } finally {
+      logSpy.mockRestore();
+      if (previous === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previous;
+      removeTreeWithRetry(home);
+    }
+  });
+});
+
 describe("GUI command delegation", () => {
   const config = {
     port: 10100,
@@ -1171,7 +1215,7 @@ describe("login routes the Codex account names instead of printing the provider 
     for (const name of ["codex", "chatgpt", "openai", "CODEX", " codex "]) {
       const result = await runLogin([name]);
       expect(result.code, `${name} must route to the account login`).toBe(1);
-      expect(result.err).toContain("Proxy is not running");
+      expect(result.err).toContain("Management API is unavailable");
       expect(result.err).not.toContain("Usage: ocx login <provider>");
     }
   });
@@ -1215,7 +1259,8 @@ describe("login routes the Codex account names instead of printing the provider 
   test("an unsupported flag is still rejected as a usage error", async () => {
     const result = await runLogin(["codex", "--nope"]);
     expect(result.code).toBe(2);
-    expect(result.err).toContain("Unexpected argument(s): --nope");
+    expect(result.err).toContain("Unexpected arguments or repeated options");
+    expect(result.err).toContain("ocx account login");
   });
 
   test("a name that is not a Codex spelling still gets the provider wall, not the account path", async () => {
