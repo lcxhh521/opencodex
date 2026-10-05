@@ -1,4 +1,5 @@
 import { resolveHelpPath } from "./help-catalog";
+import type { Capability } from "./capabilities";
 import { MODELS_CONTEXT_DETAILS, MODELS_CONTEXT_USAGE } from "./help-models-context";
 import { renderRootHelp } from "./help-navigation";
 import { formatHelpRecovery } from "./help-recovery";
@@ -40,7 +41,7 @@ Usage:
   ocx recover-history --ocx-compaction <thread-id> --yes
                                Back up and make one ocx1-compacted thread replayable by native Codex
   ocx uninstall               Remove service/shim/config and restore native Codex (alias: remove)
-  ocx service [sub]           Run as a background service (default: install/update/start)
+  ocx service [sub]           Run as a background service (default: install if absent, otherwise repair)
   ocx codex-shim <sub>        Auto-start proxy when \`codex\` launches (install|status|uninstall|remove)
   ocx tray <sub>              Windows status tray (install|start|stop|status|uninstall)
   ocx ensure                  Ensure the proxy is running and Codex config/cache are current
@@ -96,7 +97,7 @@ Usage:
   ocx system <sub>            Runtime settings, startup, sync, OpenCodex updates, and Codex CLI inspection
   ocx config [sub]            Validated configuration show/get/set/import/export
   ocx companion <show|set|reset>  Menu-bar and widget companion usage settings
-  ocx lab <sub>               Read-only Compatibility Lab projection inspection
+  ocx lab <sub>               Inspect Lab evidence and control local automation
   ocx chatgpt <sub>          Experimental app-server shim: launch|restore|status (macOS)
   ocx claude [args...]        Launch Claude Code wired to the proxy (model discovery on)
   ocx claude desktop [sub]    Manage and apply Claude Desktop's four-family profile
@@ -122,6 +123,17 @@ export function hasHelpFlag(values: string[]): boolean {
   return values.some(value => value === "--help" || value === "-h" || value === "help");
 }
 
+function printCapabilityDetails(capability: Capability, write: (text: string) => void, shown: readonly string[] = []): void {
+  if (capability.flags.length) {
+    write("\nDeclared flags:");
+    for (const flag of capability.flags) {
+      write(`  ${flag.name}${flag.value && flag.value !== "boolean" ? ` <${flag.value}>` : ""}${flag.required ? " (required)" : ""}  ${flag.summary}`);
+    }
+  }
+  const details = capability.details?.filter(detail => !shown.includes(detail));
+  if (details?.length) write(`\n${details.join("\n")}`);
+}
+
 export function printSubcommandUsage(
   name: string | undefined,
   path?: readonly string[],
@@ -142,6 +154,7 @@ export function printSubcommandUsage(
   if (result.kind === "entry") {
     write(`Usage: ${result.entry.usage}\n\n${result.entry.summary}`);
     if (result.entry.details?.length) write(`\n${result.entry.details.join("\n")}`);
+    if (result.capability) printCapabilityDetails(result.capability, write, result.entry.details);
     if (result.children.length) {
       write("\nDeclared commands (incomplete):");
       for (const child of result.children) write(`  ocx help ${child.command.join(" ")}  ${child.summary}`);
@@ -154,15 +167,16 @@ export function printSubcommandUsage(
     write(`Usage:\n${MODELS_CONTEXT_USAGE}\n\n${MODELS_CONTEXT_DETAILS.join("\n")}`);
   } else if (result.kind === "capability") {
     const { capability } = result;
-    write(`Command: ocx ${result.path.join(" ")}\n\n${capability.summary}`);
-    if (capability.flags.length) {
-      write("\nDeclared flags:");
-      for (const flag of capability.flags) {
-        write(`  ${flag.name}${flag.value && flag.value !== "boolean" ? ` <${flag.value}>` : ""}${flag.required ? " (required)" : ""}  ${flag.summary}`);
-      }
+    const heading = capability.usage !== undefined ? `Usage: ${capability.usage}` : `Command: ocx ${result.path.join(" ")}`;
+    write(`${heading}\n\n${capability.summary}`);
+    printCapabilityDetails(capability, write);
+    if (result.children.length) {
+      write("\nDeclared commands (incomplete):");
+      for (const child of result.children) write(`  ocx help ${child.command.join(" ")}  ${child.summary}`);
     }
-    if (capability.details?.length) write(`\n${capability.details.join("\n")}`);
-    write("\nCapability metadata is incomplete; this is not the full operand grammar.");
+    if (capability.usage === undefined) {
+      write("\nCapability metadata is incomplete; this is not the full operand grammar.");
+    }
   } else {
     write(`Command group: ocx ${result.path.join(" ")}\n\nDeclared commands (incomplete):`);
     for (const child of result.children) write(`  ocx ${child.command.join(" ")}  ${child.summary}`);
