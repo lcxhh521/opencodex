@@ -10,6 +10,8 @@ konuştuğunu ve isteklerin nasıl doğrulandığını söyler.
 
 Model penceresi bildirilmemiş veya yapılandırılmamışsa sırasıyla Azure meta verisi, model kimliğiyle bulunan yerleşik üretici/toplayıcı meta verisi, etkin Context cap ve 128k kullanılır. Bildirilen ve yapılandırılan değerlerin küçüğü korunur; cap üst sınır olmaya devam eder. Yerleşik sağlayıcılar değişmez. Tam kimlik önceliklidir; büyük/küçük harf ve nokta/tire varyantları yalnızca belirsiz değilse kabul edilir. Tahmin, Codex sıkıştırmasını ve Claude dahil istemci kataloglarını etkiler ancak yönlendirme için doğrulanmış kapasite sayılmaz. Aynı model adı aracının gerçek kapasitesini garanti etmez; modelContextWindows veya Context cap ile gerçek sınırı belirtin. Cap otomatik açılmaz ve modele test isteği gönderilmez. OpenAI API sınırları Codex abonelik sınırları değildir.
 
+Bu tahmin varsayılan olarak kapalıdır; sağlayıcı başına `inferContextWindow: true` ile açılır. Ayarlanmazsa penceresi olmayan model etkin Context cap'i, ardından 128k'yı kullanır.
+
 ## İlk kayıtta model seçimi
 
 Yeni OAuth dışı bağlantılar, modelleri göstermeden önce güvenilir bir model listesini bekler. Models sekmesinde en az 20 benzersiz model satırı varsa tüm model anahtarları başlangıçta OFF olur; sağlayıcının kendisi ACTIVE kalır. Gerçekte OAuth veya ChatGPT girişi kullanan bağlantılar varsayılanlarını korur.
@@ -118,6 +120,7 @@ alanlı seçilmiş kimlikleri yalın kimliklere yeniden yazar.
 | `selectedModels?` | `string[]` | Keşiften sonra katalog izin listesi. Boş olmaması yalnızca bu kimlikleri gösterir; boş veya atlanmış olması keşfedilen tüm modelleri gösterir. |
 | `contextWindow?` | `number` | Yukarı akış meta verileri olmadığında sağlayıcı genelinde bağlam geri dönüşü; aksi takdirde daha küçük canlı meta verileri koruyan bir sınır. Modeller kontrol paneli bunu `providerContextCaps` alanından ayrı olarak gösterir. |
 | `modelContextWindows?` | `Record<string, number>` | Model başına bağlam geri dönüşleri/sınırları. Bunlar `contextWindow`'u geçersiz kılar: bilinmeyen bir pencere yapılandırılmış değeri kullanırken, daha küçük canlı meta veriler yetkili kalır. |
+| `inferContextWindow?` | `boolean` | Yalnızca özel sağlayıcılar, varsayılan kapalı. `true`, eksik pencereyi yerleşik model meta verisinden doldurur; bu bir tahmindir, aracının doğrulanmış kapasitesi değildir. |
 | `modelInputModalities?` | `Record<string, string[]>` | Model başına girdi ipuçları, örn. `["text"]` veya `["text", "image"]`. |
 | `modelMaxInputTokens?` | `Record<string, number>` | Katalog otomatik sıkıştırma ipuçları için kullanılan pozitif model başına maksimum girdi sınırları. |
 | `modelAutoCompactTokenLimits?` | `Record<string, number>` | Model başına pozitif güvenli tamsayı biçiminde yumuşak otomatik sıkıştırma bütçeleri. Değerler yalnızca bağlamın veya maksimum girdinin etkin %90 zarfını düşürebilir ve etkin bir bağlam penceresi çözümlenemiyorsa yayımlanmaz. Canonical `openai` için anahtarlar, sağlayıcı veya hesap seçici öneki olmadan desteklenen tam yerel model kimlikleri olmalıdır. Sağlayıcı PATCH girdileri birleştirir; bir anahtarı `null` yapmak o anahtarı siler, alanın tamamını `null` yapmak haritayı temizler. Bu `null` silme işaretleri yalnızca PATCH içindir. |

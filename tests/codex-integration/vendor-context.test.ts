@@ -11,13 +11,32 @@ import { buildClaudeContextWindows } from "../../src/claude/context-windows";
 import type { CatalogModel } from "../../src/codex/catalog/parsing";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 
-const provider: OcxProviderConfig = { adapter: "anthropic", baseUrl: "https://relay.invalid/v1" };
+const provider: OcxProviderConfig = { adapter: "anthropic", baseUrl: "https://relay.invalid/v1", inferContextWindow: true };
+const optedOut: OcxProviderConfig = { adapter: "anthropic", baseUrl: "https://relay.invalid/v1" };
 const id = "claude-opus-5-5";
 const row = (extra: Partial<CatalogModel> = {}): CatalogModel => ({ provider: "custom-relay", id, ...extra });
 const hint = (model = row(), config = provider, cap?: number) => applyProviderConfigHints("custom-relay", config, model, cap);
 const catalog = (model: CatalogModel) => buildCatalogEntries(null, [], [model])[0]!;
 
 describe("vendor context fallback", () => {
+  test("inference is opt-in; an unset or false flag keeps the #1073 cap/128k fallback", async () => {
+    for (const config of [optedOut, { ...optedOut, inferContextWindow: false }]) {
+      expect(canInferVendorContext("custom-relay", config)).toBe(false);
+      const model = hint(row(), config);
+      expect(model.contextWindow).toBeUndefined();
+      expect(model.contextWindowInference).toBeUndefined();
+      expect(catalog(model).context_window).toBe(128_000);
+      const capped = hint(row(), config, 350_000);
+      expect(capped.contextWindow).toBe(350_000);
+      expect(capped.contextWindowInference).toBeUndefined();
+      const gathered = (await gatherRoutedModels({
+        providers: { "custom-relay": { ...config, liveModels: false, models: [] } },
+        customModels: [{ provider: "custom-relay", modelId: id }],
+      } as OcxConfig)).find(m => m.id === id)!;
+      expect(gathered.contextWindowInference).toBeUndefined();
+    }
+    expect(canInferVendorContext("custom-relay", provider)).toBe(true);
+  });
   for (const [model, expected] of [[id, 1_000_000], ["claude-sonnet-5", 1_000_000],
     ["gemini-3.1-pro-preview", 1_048_576], ["kimi-k3", 1_048_576]] as const) {
     test(`fills ${model} from the bundled model identity`, () => {
@@ -44,8 +63,8 @@ describe("vendor context fallback", () => {
   });
   test("all built-in names remain outside inference, even those without metadata aliases", () => {
     for (const builtin of PROVIDER_REGISTRY) {
-      expect(canInferVendorContext(builtin.id)).toBe(false);
-      expect(canInferVendorContext(builtin.id.toUpperCase())).toBe(false);
+      expect(canInferVendorContext(builtin.id, provider)).toBe(false);
+      expect(canInferVendorContext(builtin.id.toUpperCase(), provider)).toBe(false);
       const result = applyProviderConfigHints(builtin.id, provider, { provider: builtin.id, id });
       expect(result.contextWindowInference).toBeUndefined();
     }

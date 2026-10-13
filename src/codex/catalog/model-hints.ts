@@ -328,7 +328,7 @@ export function applyProviderConfigHints(
     ...(typeof model.maxInputTokens === "number" && model.maxInputTokens > 0 ? { maxInputTokens: model.maxInputTokens } : {}),
   });
   const azureWindow = positiveSafeInteger(azureMetadata?.contextWindow);
-  const inferredWindow = projectedLimits.contextWindow === undefined && azureWindow === undefined && canInferVendorContext(name)
+  const inferredWindow = projectedLimits.contextWindow === undefined && azureWindow === undefined && canInferVendorContext(name, prov)
     ? vendorContextInference(model.id) : undefined;
   const hintedWindow = projectedLimits.contextWindow
     ?? azureWindow

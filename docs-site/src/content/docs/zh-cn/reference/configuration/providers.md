@@ -9,6 +9,8 @@ description: 提供者条目、身份验证、端点、模型目录、配额、�
 
 自定义渠道未报告或配置模型窗口时，OpenCodex 依次使用 Azure 元数据、按模型 ID 查询的内置厂商/聚合元数据、已启用的 Context cap，最后回退到 128k。已有发现值与配置值取较小者，Context cap 仍会向下限制窗口，内置渠道行为不变。精确 ID 优先，大小写或点号/短横线变体仅在无冲突时匹配；未知或浮动别名不猜测。推断会影响 Codex 压缩预算和其他客户端目录（含 Claude 长上下文选择），但不作为中转实测能力供路由使用。同名模型不保证中转支持官方窗口；请用 modelContextWindows 或 Context cap 设置中转实际上限。不会自动开启 cap，也不会调用模型探测。OpenAI API 窗口不代表 Codex 订阅窗口。
 
+该推断默认关闭，需要按渠道设置 `inferContextWindow: true` 开启。未开启时，缺少窗口的模型使用已启用的 Context cap，否则回退到 128k。
+
 ## 首次注册时的模型选择
 
 新的非 OAuth 连接会等待可靠的模型列表，再公开模型。如果 Models 标签页中去重后的模型行达到20个，所有模型开关初始为 OFF，但提供者本身保持 ACTIVE。实际认证方式为 OAuth 或 ChatGPT 登录的连接保留默认设置。
@@ -105,6 +107,7 @@ selector，而不是分配一个新名称。
 | `modelDisplayNames?` | `Record<string, string>` | 持久的仅显示名称，以此提供者的精确原生模型 id 为键。键区分大小写。名称优先于提供者目录元数据，并且不会改变身份验证、适配器、路由、计费或上游请求。该映射最多可包含 2,000 个条目，与发现上限相同。 |
 | `contextWindow?` | `number` | 上游缺少元数据时使用的提供者级上下文数值；有元数据时作为上限，保留更小的实时数值。Models 面板中与 `providerContextCaps` 分开设置。 |
 | `modelContextWindows?` | `Record<string, number>` | 按模型设置的上下文数值与上限。优先于 `contextWindow`：窗口未知时采用所配置的数值，而更小的实时元数据仍然优先。 |
+| `inferContextWindow?` | `boolean` | 仅限自定义渠道，默认关闭。设为 `true` 时用内置模型元数据补全缺失窗口；这是估计值，不代表中转的实测容量。 |
 | `modelInputModalities?` | `Record<string, string[]>` | 按模型设置的输入提示，例如 `["text"]` 或 `["text", "image"]`。 |
 | `modelMaxInputTokens?` | `Record<string, number>` | 正数型、按模型设置的最大输入限制，用于目录自动压缩提示。 |
 | `modelAutoCompactTokenLimits?` | `Record<string, number>` | 按模型设置的正安全整数软自动压缩预算。该值只能降低“上下文或最大输入的 90%”这一有效上限；无法解析出有效上下文窗口时不会输出。对于规范 `openai`，键必须是受支持的精确原生模型 ID，且不得包含提供者或账户选择器前缀。提供者 PATCH 会合并条目；将某个键设为 `null` 会删除该键，将整个字段设为 `null` 会清空映射。这些 `null` 删除标记仅适用于 PATCH。 |

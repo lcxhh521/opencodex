@@ -1,5 +1,6 @@
 import { listModelMetadata, resolveMetadataProvider, type ModelMetadata } from "../../generated/model-metadata";
 import { PROVIDER_REGISTRY } from "../../providers/registry";
+import type { OcxProviderConfig } from "../../types";
 
 /** A bundled model-window estimate, not evidence of the serving gateway's capacity. */
 export interface VendorContextInference {
@@ -15,8 +16,13 @@ const VENDORS = ["anthropic", "openai", "google", "moonshot", "minimax", "deepse
 const AGGREGATORS = ["openrouter", "opencode-go"];
 // Snapshot names once, never consult the mutable registry after gather flight admission.
 const BUILTIN_NAMES = new Set(PROVIDER_REGISTRY.map(entry => entry.id.toLowerCase()));
-export function canInferVendorContext(provider: string): boolean {
-  return !BUILTIN_NAMES.has(provider.toLowerCase()) && !resolveMetadataProvider(provider);
+/**
+ * Opt-in only (#1073): an id-only custom row keeps the conservative fallback unless the
+ * operator sets `inferContextWindow: true`. Built-in names stay excluded even when set.
+ */
+export function canInferVendorContext(provider: string, config: Pick<OcxProviderConfig, "inferContextWindow"> | undefined): boolean {
+  return config?.inferContextWindow === true
+    && !BUILTIN_NAMES.has(provider.toLowerCase()) && !resolveMetadataProvider(provider);
 }
 
 const normalize = (id: string): string => id.toLowerCase().replaceAll(".", "-");

@@ -1,7 +1,9 @@
 # Custom-provider context estimates
 
 `src/codex/catalog/vendor-context.ts` supplies a missing-window estimate from bundled
-`src/generated/model-metadata.ts` rows only for custom provider names. Registry names and metadata
+`src/generated/model-metadata.ts` rows only for custom provider names whose config sets
+`inferContextWindow: true`. The flag is off by default so id-only custom rows keep the #1073
+conservative fallback (enabled cap as the window, else 128k). Registry names and metadata
 aliases are excluded; the registry-name set is captured at module initialization, not after a gather
 await. `src/codex/catalog/model-hints.ts` keeps observed/configured limits (the smaller value wins),
 then Azure metadata, then this estimate, then an enabled context cap as the window, then the existing

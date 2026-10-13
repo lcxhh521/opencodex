@@ -707,7 +707,7 @@ async function gatherRoutedModelsUncached(
     } : base;
     // A custom-only model may never appear in /models or the provider's configured roster.
     // Fill only its absent context; a full hint overlay would overwrite custom capabilities.
-    const customContextHints = merged.contextWindow === undefined && effectiveProvider && canInferVendorContext(cm.provider)
+    const customContextHints = merged.contextWindow === undefined && effectiveProvider && canInferVendorContext(cm.provider, effectiveProvider)
       ? applyProviderConfigHints(cm.provider, effectiveProvider, { provider: cm.provider, id: cm.modelId },
         providerContextCap(config, cm.provider), metadataModelIdCaseFoldByProvider.get(cm.provider),
         undefined, metadataConfigDirByProvider.get(cm.provider))

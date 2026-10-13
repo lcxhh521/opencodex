@@ -9,9 +9,15 @@ authenticated.
 ## Context windows on custom providers
 
 When a custom provider omits a model's context window, OpenCodex can infer it from the bundled
-model metadata. The order is: discovered/configured limits (the smaller wins), Azure metadata,
-model-ID metadata, enabled Context cap as the window, then the 128k compatibility fallback.
-An enabled Context cap still limits the result. Built-in providers keep their existing behavior.
+model metadata. This is off by default: set `inferContextWindow: true` on the provider to turn it
+on. Without it, a model with no window uses the enabled Context cap as its window, then the 128k
+compatibility fallback. With it, the order is: discovered/configured limits (the smaller wins),
+Azure metadata, model-ID metadata, enabled Context cap as the window, then 128k. An enabled
+Context cap still limits the result. Built-in providers keep their existing behavior and ignore the flag.
+
+```json
+{ "providers": { "my-relay": { "adapter": "anthropic", "baseUrl": "https://relay.example/v1", "inferContextWindow": true } } }
+```
 
 Original-vendor API tables take precedence over aggregator tables. Exact IDs are preferred;
 case and dot/hyphen variants are accepted only when unambiguous. Unknown IDs, floating `~` aliases
@@ -269,6 +275,7 @@ Providers can expose a built-in shorthand, such as `agy` for `google-antigravity
 | `modelDisplayNames?` | `Record<string, string>` | Durable labels used only for display, keyed by this provider's exact upstream model id. Labels win over provider catalog metadata, survive discovery refreshes and provider edits, and never change authentication, adapter behavior, routing, billing, upstream request construction, the routed `provider/model` selector, or the upstream wire model. Keys are exact and case sensitive. Unknown model ids are kept so a temporarily missing model receives its label when it returns. The map accepts at most 2,000 entries, matching the discovery limit. |
 | `contextWindow?` | `number` | Provider-wide context fallback when upstream metadata is absent; otherwise a cap that retains smaller live metadata. The Models dashboard exposes this separately from `providerContextCaps`. |
 | `modelContextWindows?` | `Record<string, number>` | Per-model context fallbacks/caps. These override `contextWindow`: an unknown window uses the configured value, while smaller live metadata remains authoritative. |
+| `inferContextWindow?` | `boolean` | Custom providers only, default off. `true` fills a missing window from bundled model-ID metadata ([details](#context-windows-on-custom-providers)); the value is an estimate, not verified relay capacity. |
 | `modelContextTiers?` | `Record<string, "default" \| "long_context">` | Per-model upstream tier for `github-copilot`. `long_context` sends `contextTier: "long_context"`. Catalog metadata grows only with an exact per-model `modelContextWindows` value that documents the supported window; that value wins before the provider cap. An unknown model keeps its observed window. Unconfigured passthrough requests retain a caller-supplied `contextTier` field on any provider. |
 | `modelInputModalities?` | `Record<string, string[]>` | Per-model input hints such as `["text"]` or `["text", "image"]`. |
 | `modelMaxInputTokens?` | `Record<string, number>` | Positive per-model max input limits used for catalog auto-compaction hints. |
