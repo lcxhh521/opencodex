@@ -576,7 +576,7 @@
     "codex-home-owner-lifecycle.test.ts": "codex-integration",
     "codex-catalog-write-serialization.test.ts": "codex-integration",
     "codex-catalog-writer.test.ts": "codex-integration",
-    "codex-catalog.test.ts": "codex-integration",
+    "vendor-context.test.ts": "codex-integration", "codex-catalog.test.ts": "codex-integration",
     "codex-cli-install-provenance.test.ts": "codex-integration",
     "codex-cli-installation-identity.test.ts": "codex-integration",
     "codex-cli-installation-targets.test.ts": "codex-integration",
