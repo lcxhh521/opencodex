@@ -1,3 +1,5 @@
+import { anthropicDeclaredTools } from "./anthropic-tool-catalog";
+import { anthropicReplayContent, createAnthropicReplayCapture } from "./anthropic-replay";
 import type { IncomingMeta, ProviderAdapter } from "./base";
 import { createAdapterTierMetadata, type AdapterTierMetadata } from "../providers/fastwire";
 import { ANTHROPIC_FAST_MODE_BETA, mergeAnthropicBetaHeader } from "../providers/anthropic-fast";
@@ -16,7 +18,7 @@ import type {
   OcxToolResultMessage,
   OcxUsage,
 } from "../types";
-import { isAllowedToolChoice, namespacedToolName, resolveToolChoiceWireName, toolChoiceToolPredicate } from "../types";
+import { isAllowedToolChoice, namespacedToolName, resolveToolChoiceWireName } from "../types";
 import { ANTHROPIC_OAUTH_BETA, CLAUDE_CODE_SYSTEM_INSTRUCTION, applyClaudeToolPrefix, stripClaudeToolPrefix } from "../oauth/anthropic";
 import { parseDataUrl } from "./image";
 import { enforceAnthropicImageLimits } from "./anthropic-image-guard";
@@ -738,8 +740,8 @@ function messagesToAnthropicFormat(
     }
   }
   const toolCatalogNudge = buildNonOpenAIToolCatalogNudgeForTools(
-    parsed.context.tools,
-    parsed.options.toolChoice,
+    anthropicDeclaredTools(parsed),
+    undefined,
     tool => toolNames.toWire(namespacedToolName(tool.namespace, tool.name)),
   );
   const systemParts = [...(parsed.context.systemPrompt ?? []), ...(toolCatalogNudge ? [toolCatalogNudge] : [])];
@@ -769,6 +771,7 @@ function messagesToAnthropicFormat(
       case "assistant": {
         const aMsg = msg as OcxAssistantMessage;
         const preface: unknown[] = [];
+
         const toolUses: unknown[] = [];
         const toolUseIds: string[] = [];
         for (const part of aMsg.content) {
@@ -806,7 +809,17 @@ function messagesToAnthropicFormat(
         }
         // Anthropic treats text/thinking after tool_use as ending the tool turn, which makes
         // earlier tool_use ids look unpaired (#620 / common multi-step history shape).
-        const content = [...preface, ...toolUses];
+        const captured = anthropicReplayContent(aMsg);
+        if (captured) {
+          const expected = toolUses as Array<{ id: string; name: string }>;
+          const actual = captured.filter(block => block.type === "tool_use");
+          if (actual.length !== expected.length || actual.some((block, index) => block.id !== expected[index]?.id || block.name !== expected[index]?.name)) {
+            throw new Error("Anthropic search replay tool identity changed");
+          }
+        }
+        const content = captured
+          ? captured.filter(block => parsed._stripReasoningEncryptedContent !== true || (block.type !== "thinking" && block.type !== "redacted_thinking"))
+          : [...preface, ...toolUses];
         if (content.length === 0) break;
         messages.push({ role: "assistant", content });
         if (toolUseIds.length > 0) {
@@ -869,9 +882,7 @@ function messagesToAnthropicFormat(
 
 function toolsToAnthropicFormat(parsed: OcxParsedRequest, toolNames: { toWire: (name: string) => string }): unknown[] | undefined {
   if (!parsed.context.tools || parsed.context.tools.length === 0) return undefined;
-  const tools = isAllowedToolChoice(parsed.options.toolChoice)
-    ? parsed.context.tools.filter(toolChoiceToolPredicate(parsed.options.toolChoice, parsed.context.tools))
-    : parsed.context.tools;
+  const tools = anthropicDeclaredTools(parsed);
   if (tools.length === 0) return undefined;
   const converted = tools.map(t => ({
     name: toolNames.toWire(namespacedToolName(t.namespace, t.name)),
@@ -1196,6 +1207,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
         return;
       }
 
+      const replayCapture = createAnthropicReplayCapture(response, budget);
       const budgetEncoder = new TextEncoder();
       let currentBlockType = "";
       let currentToolCallId = "";
@@ -1228,11 +1240,13 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
           yield anthropicContentFilterIncomplete(pendingStopReason, usageFromAnthropic(pendingUsage));
           return;
         }
-        yield {
+        const done: AdapterEvent = {
           type: "done",
           usage: usageFromAnthropic(pendingUsage),
           ...(pendingStopReason ? { stopReason: pendingStopReason } : {}),
         };
+        replayCapture?.finish(done);
+        yield done;
       };
 
       try {
@@ -1252,6 +1266,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
         try {
           parsed = JSON.parse(payload);
         } catch {
+          replayCapture?.invalidate();
           debugDroppedFrame("anthropic", payload);
           continue;
         }
@@ -1259,10 +1274,12 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
         // it and the `data.type` read below crashed the stream. Drop a non-record frame the same
         // way an unparseable one is dropped, so the message_stop check still governs the outcome.
         if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+          replayCapture?.invalidate();
           debugDroppedFrame("anthropic", payload);
           continue;
         }
         const data = parsed as Record<string, unknown>;
+        replayCapture?.accept({ ...data, type: record.event || data.type });
 
         switch (record.event || data.type) {
               case "message_start": {
@@ -1275,6 +1292,9 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
               case "content_block_start": {
                 const block = data.content_block as { type: string; id?: string; name?: unknown; data?: string; thinking?: string } | undefined;
                 if (!block) break;
+                // Even an unmodeled server tool or empty block is semantic progress.
+                // Fence replays before a later refusal; unknown blocks must not look like pings.
+                yield { type: "heartbeat", replayUnsafe: true };
                 currentBlockType = block.type;
                 if (block.type === "thinking") {
                   // Preserve even a display:omitted block boundary. The bridge can then
@@ -1396,6 +1416,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
         // one-terminal-event contract for consumers that keep draining the generator.
         return;
       } finally {
+        replayCapture?.discard();
         if (currentToolCallId) budget.closeCall(currentToolCallId);
       }
       if (!emittedDone) {

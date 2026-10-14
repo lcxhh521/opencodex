@@ -1,3 +1,6 @@
+import { anthropicDeclaredTools } from "../adapters/anthropic-tool-catalog";
+import { enableAnthropicReplayCapture, takeAnthropicReplay, bindAnthropicReplay, type AnthropicReplaySnapshot } from "../adapters/anthropic-replay";
+import { anthropicSearchAssistantContent } from "./anthropic-history";
 import type { createAnthropicThinkingRecovery } from "../server/responses/anthropic-thinking-recovery";
 import type { AdapterRequest, IncomingMeta, ProviderAdapter } from "../adapters/base";
 import type { AdapterEvent, OcxConfig, OcxMessage, OcxParsedRequest, OcxProviderConfig, OcxProviderOpaqueToolCallMetadata, OcxThinkingContent, OcxUsage, RateLimitRetryPolicy } from "../types";
@@ -190,6 +193,9 @@ function extractIterationThinking(events: AdapterEvent[]): OcxThinkingContent[] 
   };
 
   for (const e of events) {
+    // Match the bridge: consecutive signature snapshots update one block. The next
+    // semantic event (including an empty thinking-block start) closes that block.
+    if (signature !== undefined && e.type !== "thinking_signature" && e.type !== "heartbeat") flushVisible();
     if (e.type === "thinking_delta") {
       flushRaw();
       thinking += e.thinking;
@@ -198,7 +204,6 @@ function extractIterationThinking(events: AdapterEvent[]): OcxThinkingContent[] 
       rawReasoning += e.text;
     } else if (e.type === "thinking_signature") {
       signature = e.signature;
-      flushVisible();
     } else if (e.type === "redacted_thinking") {
       flushVisible();
       flushRaw();
@@ -216,8 +221,8 @@ function normalizeQuery(q: string): string {
 }
 
 /**
- * Transient developer-role nudge appended ONLY to the forced-answer pass's request (never the
- * persisted `messages`). It tells the model to ground its final answer in the web results already
+ * Developer nudge for the forced-answer pass. Anthropic keeps its first sent position in the
+ * request-local history; other providers append it only for that iteration. It tells the model to ground its final answer in the web results already
  * gathered this turn. Citation wording is conditional — a failed/empty search still wants an answer,
  * just without fabricated sources.
  */
@@ -234,10 +239,8 @@ function forcedAnswerNudge(): OcxMessage {
 }
 
 /**
- * Transient developer-role nudge for the ONE recovery pass after a forced answer came back empty.
- * The recovery also removes every tool, so the model has nothing to call and can only return text;
- * this turn says so explicitly rather than relying on the removal alone. Like {@link forcedAnswerNudge}
- * it is iteration-local and never touches the persisted `messages`.
+ * Developer nudge for the ONE recovery pass after an empty forced answer. Tool calls are disabled;
+ * Anthropic retains its declared catalog and this nudge in request-local history for prefix fidelity.
  */
 function forcedAnswerRetryNudge(): OcxMessage {
   return {
@@ -386,8 +389,11 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
     : 300_000;
 
   const messages: OcxMessage[] = [...parsed.context.messages];
+  const replaySnapshots = new Set<AnthropicReplaySnapshot>();
   const loopT0 = Date.now();
-  const allTools = parsed.context.tools ?? [];
+  const allTools = adapter.name === "anthropic" ? anthropicDeclaredTools(parsed) : parsed.context.tools ?? [];
+  let forcedNudgeAdded = false;
+  let emptyNudgeAdded = false;
   let searchesExecuted = 0;
   let executedSearchCount = 0;
   // Queries whose search already failed this turn — repeats are short-circuited so a model that keeps
@@ -419,6 +425,8 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
     recover?: (error: WebSearchAdapterEventError) => Promise<IterationResponse | undefined>;
   }
   type IterationSplit = ReturnType<typeof scanEventsForWebSearch> & {
+    events: AdapterEvent[];
+    anthropicReplay?: AnthropicReplaySnapshot;
     /**
      * How many leading passthrough events were already delivered live this iteration. They are
      * exactly the first N passthrough entries (live delivery stops before the first event that
@@ -474,24 +482,30 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
    * restart) before the `on429` key rotation.
    */
   const prepareIterationEvents = async function* (forceAnswer: boolean): AsyncGenerator<AdapterEvent, IterationResponse> {
-    // On the forced-answer pass the model is asked to answer from the results already in
-    // `messages`. A weak model can still produce a thin answer that
-    // ignores what the search found, which reads to the user as "the search did nothing". Nudge it
-    // (iteration-locally — never mutate the shared `messages`) to actually use the gathered results.
-    // Only when a REAL search ran (executedSearchCount, not empty-query/limit/repeat placeholders).
-    let iterMessages: OcxMessage[] = forceAnswer && executedSearchCount > 0
-      ? [...messages, forcedAnswerNudge()]
-      : messages;
-    // #1001 follow-up: the recovery pass for an empty forced answer. Removing every tool leaves the
-    // model nothing to call, and the extra developer turn asks it for the text it just failed to
-    // produce. `toolChoice: "none"` is what drops those definitions in the adapter, so the retry
-    // cannot repeat the same empty or tool-shaped response.
     const recoveringEmptyAnswer = forceAnswer && emptyAnswerRetries > 0;
-    if (recoveringEmptyAnswer) iterMessages = [...iterMessages, forcedAnswerRetryNudge()];
+    const preserveAnthropicPrefix = adapter.name === "anthropic";
+    let iterMessages = messages;
+    if (preserveAnthropicPrefix) {
+      // Once sent, each nudge is part of subsequent signatures' bound prefix. Keep its
+      // original position even when a forced-answer response makes another tool call.
+      if (forceAnswer && executedSearchCount > 0 && !forcedNudgeAdded) {
+        const nudge = forcedAnswerNudge();
+        if (nudge.role === "developer" && typeof nudge.content === "string") nudge.content = [{ type: "text", text: nudge.content }];
+        messages.push(nudge); forcedNudgeAdded = true;
+      }
+      if (recoveringEmptyAnswer && !emptyNudgeAdded) {
+        const nudge = forcedAnswerRetryNudge();
+        if (nudge.role === "developer" && typeof nudge.content === "string") nudge.content = [{ type: "text", text: nudge.content }];
+        messages.push(nudge); emptyNudgeAdded = true;
+      }
+    } else {
+      if (forceAnswer && executedSearchCount > 0) iterMessages = [...messages, forcedAnswerNudge()];
+      if (recoveringEmptyAnswer) iterMessages = [...iterMessages, forcedAnswerRetryNudge()];
+    }
     const iterParsed: OcxParsedRequest = {
       ...parsed, stream: true,
       ...(recoveringEmptyAnswer ? { options: { ...parsed.options, toolChoice: "none" as const } } : {}),
-      context: { ...parsed.context, messages: iterMessages, tools: recoveringEmptyAnswer ? [] : allTools },
+      context: { ...parsed.context, messages: iterMessages, tools: recoveringEmptyAnswer && !preserveAnthropicPrefix ? [] : allTools },
     };
     // One cumulative header deadline spans key rotations and reset sends, excluding local pacing.
     // clear() stops only its timer after final headers; the direct turn signal remains attached to
@@ -717,14 +731,23 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
     const events: AdapterEvent[] = [];
     let liveWindowOpen = deps.streamRoutedModelOutput === true;
     let streamedPassthroughCount = 0;
+    let anthropicReplay: AnthropicReplaySnapshot | undefined;
+    let releaseCapture = () => {};
     try {
-      const parse = prepared.responseAdapter.parseStream.bind(prepared.responseAdapter);
+      const parse: ProviderAdapter["parseStream"] = (response, budget) => {
+        if (prepared.responseAdapter.name === "anthropic") releaseCapture = enableAnthropicReplayCapture(response);
+        return prepared.responseAdapter.parseStream(response, budget);
+      };
       for await (const event of parseStreamWithProgress(prepared.response, parse, {
         signal,
         inactivityTimeoutMs: routedModelStallTimeoutMs,
         translatorBudget,
         preserveAdapterError: deps.thinkingRecovery !== undefined,
       })) {
+        if (event.type === "done") {
+          anthropicReplay = takeAnthropicReplay(event);
+          if (anthropicReplay) replaySnapshots.add(anthropicReplay);
+        }
         if (event.type === "heartbeat") yield event;
         // Kiro's explicit-completion protocol marks ordinary assistant text as commentary while
         // it performs a bounded final-answer retry. That text is safe to surface immediately and
@@ -760,7 +783,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
       if (error instanceof RoutedModelInactivityError) throw new LoopError(504, error.message);
       if (error instanceof WebSearchStreamProtocolError) throw new LoopError(502, error.message);
       throw new LoopError(502, `Provider stream error: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    } finally { releaseCapture(); }
 
     const terminalIndexes = events.flatMap((event, index) =>
       event.type === "done" || event.type === "incomplete" || event.type === "error" ? [index] : []);
@@ -775,7 +798,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
       throw new LoopError(502, terminal.message);
     }
     deps.thinkingRecovery?.observeIteration(events);
-    return { ...scanEventsForWebSearch(events), streamedPassthroughCount };
+    return { ...scanEventsForWebSearch(events), streamedPassthroughCount, events, anthropicReplay };
   };
 
   // Execute one model-requested web_search call. The call may batch several queries (native
@@ -784,7 +807,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
   // valid, and surface as ONE search cell carrying every attempted query. A real search (one that
   // hits the sidecar) shows the spinner WHILE the batch runs. Empty/limit/repeat placeholders never
   // emit a cell (matching the prior single-query behavior).
-  async function* runSearchCall(call: WebSearchCall, precedingThinking: OcxThinkingContent[] = []): AsyncGenerator<AdapterEvent> {
+  async function* runSearchCall(call: WebSearchCall, precedingThinking: OcxThinkingContent[] = [], appendAssistant = true): AsyncGenerator<AdapterEvent> {
     const results: { query: string; outcome: SidecarOutcome }[] = [];
     let beganCell = false;
     if (call.queries.length === 0) {
@@ -861,7 +884,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
     const callArgs: Record<string, unknown> = call.queries.length > 1
       ? { queries: call.queries }
       : { query: call.queries[0] ?? "" };
-    messages.push({
+    if (appendAssistant) messages.push({
       role: "assistant",
       content: [
         // Signed thinking must precede tool_use on replay (Anthropic extended thinking), and
@@ -1001,7 +1024,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
                 }));
                 if (!split.hasMalformedToolCall && !split.hasRealToolCall && emptyAnswerRetries === 0) {
                   emptyAnswerRetries++;
-                  console.warn("[web-search-loop] empty forced answer — retrying once without tools");
+                  console.warn("[web-search-loop] empty forced answer — retrying once with tool calls disabled");
                   yield { type: "heartbeat" };
                   continue;
                 }
@@ -1022,10 +1045,36 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
             return;
           }
           // The thinking that led to the search belongs to the FIRST call's assistant replay turn.
-          const iterationThinking = extractIterationThinking(split.passthrough);
+          const preserveAnthropicHistory = prepared.responseAdapter.name === "anthropic";
+          if (preserveAnthropicHistory) {
+            if (!split.anthropicReplay) throw new LoopError(502, "Anthropic search history cannot be replayed losslessly");
+            const message = { role: "assistant" as const,
+              content: anthropicSearchAssistantContent(split.events), timestamp: Date.now() };
+            const originalCalls = split.anthropicReplay.content.filter(block => block.type === "tool_use");
+            const priorIds = new Set(messages.flatMap(message => message.role === "assistant"
+              ? message.content.filter(part => part.type === "toolCall").map(part => part.id)
+              : message.role === "toolResult" ? [message.toolCallId] : []));
+            if (originalCalls.some(block => priorIds.has(block.id as string))) {
+              throw new LoopError(502, "Anthropic search replay tool identity changed");
+            }
+            const calls = message.content.filter(part => part.type === "toolCall");
+            if (originalCalls.length !== calls.length || originalCalls.some((block, index) => block.id !== calls[index]?.id)) {
+              throw new LoopError(502, "Anthropic search replay tool identity changed");
+            }
+            // The raw input is authoritative, including non-empty content_block_start input.
+            for (const [index, call] of calls.entries()) call.arguments = originalCalls[index]!.input as Record<string, unknown>;
+            for (const call of split.calls) {
+              const original = originalCalls.find(block => block.id === call.id);
+              if (!original) throw new LoopError(502, "Anthropic search replay tool identity changed");
+              call.queries = parseQueries(JSON.stringify(original.input));
+            }
+            bindAnthropicReplay(message, split.anthropicReplay);
+            messages.push(message);
+          }
+          const iterationThinking = preserveAnthropicHistory ? [] : extractIterationThinking(split.passthrough);
           for (const [callIndex, call] of split.calls.entries()) {
             accountRefusalOutputStarted = true;
-            yield* runSearchCall(call, callIndex === 0 ? iterationThinking : []);
+            yield* runSearchCall(call, callIndex === 0 ? iterationThinking : [], !preserveAnthropicHistory);
           }
         } catch (e) {
           if (isTranslatorBudgetExceededError(e)) {
@@ -1049,6 +1098,8 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
       }
       yield { type: "error", message: "web-search loop exceeded its iteration cap" };
     } finally {
+      for (const snapshot of replaySnapshots) snapshot.release();
+      replaySnapshots.clear();
       if (abortSignal) abortSignal.removeEventListener("abort", linkAbort);
     }
   }

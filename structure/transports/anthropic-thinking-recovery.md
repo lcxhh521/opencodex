@@ -29,6 +29,10 @@ pins heartbeat/side-effect fences, exact classification, iterator cleanup and me
 
 ## Hosted search iterations
 
+Search history uses the bridge's signature snapshot semantics: consecutive signature updates,
+including intervening heartbeats, replace one block's signature. The next semantic event closes
+that block, so a genuine empty thinking-block start remains a separate signed block.
+
 `src/server/responses/sidecar-execution.ts` supplies the same request-owned policy to
 `src/web-search/loop.ts`. Only the current routed-model iteration is rebuilt; completed searches,
 tool results, and history remain intact. Request caches are invalidated and the root strip flags
@@ -50,3 +54,35 @@ cancellation and unchanged serving scope. Replacement HTTP errors keep status/ty
 non-replayable diagnostics remain withheld. A failed repair is terminal, including a replacement
 429; it does not start another credential/rate-limit ladder. The actual-adapter hosted-search contract lives in
 `tests/responses/responses-web-search-thinking-signature-recovery.test.ts`.
+
+## Lossless in-memory search continuations
+
+`src/adapters/anthropic-replay.ts` captures known Anthropic assistant content blocks from the
+original SSE frames only for search streams explicitly opted in by the loop. Private WeakMaps
+bind complete snapshots to terminal events and then to loop-owned assistant messages; request
+parsers, clients, response persistence and logs cannot supply or receive this metadata. The
+collector validates ordered start/delta/stop indices and message completion, charges retained
+bytes incrementally, and releases unclaimed attempts on cancellation and claimed snapshots when
+the loop exits. Unknown blocks/deltas, dropped malformed frames and incomplete histories make
+continuation fail before any hosted search executes. Every block start fences signature retries,
+including server tools that have no public adapter-event representation.
+
+`src/web-search/anthropic-history.ts` supplies canonical tool identities while the raw snapshot
+preserves text-block boundaries, citations, original input objects, opaque thinking and block
+order on the wire. Parallel calls stay in one assistant turn; their results keep the existing
+search budgets and duplicate-query suppression. Tool-name/id rewrites must agree with the raw
+snapshot or serialization fails closed. This is request-local search fidelity, not a durable
+cross-request transcript format or a guarantee for unsupported provider block types.
+
+Anthropic forced-answer nudges are appended once to request-local history and remain in their
+original sent positions. An empty-answer retry retains the same declared tool catalog and changes
+only `tool_choice` to `none`; it does not remove definitions. `src/adapters/anthropic-tool-catalog.ts`
+shares the effective advertised catalog between serializer, system guidance and search-loop setup,
+including `allowed_tools` restrictions and Opus 5.5 named-tool compatibility narrowing. This avoids
+changing bound tools/system or widening permissions during the retry. Other adapters keep their
+existing empty-answer policy. Hosted search disabled by the incoming choice remains disabled.
+
+`tests/adapters/anthropic/anthropic-replay.test.ts` pins opt-in ownership, cancellation, malformed
+indices, bounded admission, forged/expired snapshot rejection and idempotent budget release.
+Nonconforming or repeated tool IDs fail before search execution, including IDs already present
+in the request-local history, rather than waiting for the next serializer to reject normalization.

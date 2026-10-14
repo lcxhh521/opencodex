@@ -538,3 +538,174 @@ describe("hosted web search Anthropic thinking-signature recovery", () => {
     expect(failure?.error.message).toContain("diagnostic withheld");
   });
 });
+
+// Signature deltas are replacement snapshots (Anthropic MessageStream), not new blocks.
+for (const separateEmptyBlock of [false, true]) test(`search replay keeps latest signature without merging real blocks (empty next block=${separateEmptyBlock})`, async () => {
+  const replacementSignature = "SyntheticUpdatedSearchSignature123456==";
+  const secondSignature = "SyntheticSecondSearchSignature123456==";
+  const initial = (await search().text()).replaceAll('"index":1', separateEmptyBlock ? '"index":2' : '"index":1');
+  const marker = frame("content_block_stop", { index: 0 });
+  const extra = frame("ping")
+    + frame("content_block_delta", { index: 0, delta: { type: "signature_delta", signature: replacementSignature } })
+    + marker
+    + (separateEmptyBlock
+      ? frame("content_block_start", { index: 1, content_block: { type: "thinking", thinking: "" } })
+        + frame("content_block_delta", { index: 1, delta: { type: "signature_delta", signature: secondSignature } })
+        + frame("content_block_stop", { index: 1 }) : "");
+  const { bodies, queries } = transport(index => index === 1 ? sse(initial.replace(marker, extra)) : success());
+  const result = await send();
+  expect(result.text).toContain("response.completed");
+  expect(bodies).toHaveLength(2);
+  expect(queries).toHaveLength(1);
+  const replayed = JSON.parse(bodies[1]).messages.find((message: { role: string; content: unknown }) =>
+    message.role === "assistant" && Array.isArray(message.content)
+      && message.content.some((part: { type: string; id: string }) => part.type === "tool_use" && part.id === "ws_fixture"));
+  const blocks = replayed.content.filter((part: { type: string }) => part.type === "thinking");
+  expect(blocks).toEqual([
+    { type: "thinking", thinking: "search reasoning", signature: replacementSignature },
+    ...(separateEmptyBlock ? [{ type: "thinking", thinking: "", signature: secondSignature }] : []),
+  ]);
+});
+
+function originalBlockStream(blocks: Record<string, unknown>[], corrupt = ""): Response {
+  return sse(frame("message_start", { message: { usage: { input_tokens: 2 } } }),
+    ...blocks.flatMap((block, index) => [frame("content_block_start", { index, content_block: block }),
+      frame("content_block_stop", { index })]), corrupt,
+    frame("message_delta", { delta: { stop_reason: "tool_use" } }), frame("message_stop"));
+}
+
+test("search continuation preserves raw text boundaries, citations, opaque blocks and parallel original inputs", async () => {
+  const original = [
+    { type: "text", text: "first", citations: [{ type: "char_location", cited_text: "first", document_index: 0, start_char_index: 0, end_char_index: 5 }] },
+    { type: "text", text: "second" },
+    { type: "thinking", thinking: "", signature: SIGNATURE },
+    { type: "redacted_thinking", data: REDACTED },
+    { type: "tool_use", id: "raw_one", name: "web_search", input: { query: "first query", extra_context: { preserve: true } } },
+    { type: "tool_use", id: "raw_two", name: "web_search", input: { queries: ["second query"], original: 2 } },
+  ];
+  const { bodies, queries } = transport(index => index === 1 ? originalBlockStream(original) : success());
+  const result = await send();
+  expect(result.text).toContain("response.completed");
+  expect(queries).toHaveLength(2);
+  expect(bodies).toHaveLength(2);
+  const messages = JSON.parse(bodies[1]).messages;
+  const assistant = messages.findIndex((m: { content: unknown[] }) => Array.isArray(m.content)
+    && m.content.some((b: any) => b.id === "raw_one"));
+  expect(messages[assistant].content).toEqual(original);
+  expect(messages[assistant + 1].content.map((b: any) => b.tool_use_id)).toEqual(["raw_one", "raw_two"]);
+});
+
+for (const malformed of ["unknown block", "unknown delta", "missing stop", "duplicate index", "malformed JSON", "missing message stop", "unexpected initial content"]) {
+  test(`invalid raw search history fails before search execution: ${malformed}`, async () => {
+    let initial = await search().text();
+    if (malformed === "unknown block") initial = initial.replace('"type":"thinking","thinking":""', '"type":"server_tool_use","id":"server_side_effect","name":"web_search","input":{}');
+    if (malformed === "unknown delta") initial = initial.replace('"type":"thinking_delta"', '"type":"unknown_delta"');
+    if (malformed === "missing message stop") initial = initial.replace(frame("message_stop"), "");
+    if (malformed === "unexpected initial content") initial = initial.replace('"message":{"usage":{"input_tokens":2}}', '"message":{"content":[{"type":"text","text":"unobserved"}]}');
+    if (malformed === "missing stop") initial = initial.replace(frame("content_block_stop", { index: 0 }), "");
+    if (malformed === "duplicate index") initial = initial.replaceAll('"index":1', '"index":0');
+    if (malformed === "malformed JSON") initial = initial.replace(frame("content_block_stop", { index: 0 }), 'event: content_block_delta\ndata: {broken\n\n' + frame("content_block_stop", { index: 0 }));
+    const { bodies, queries } = transport(() => sse(initial));
+    const result = await send();
+    expect(result.text).toContain("response.failed");
+    expect(result.text).toContain("cannot be replayed losslessly");
+    expect(bodies).toHaveLength(1);
+    expect(queries).toHaveLength(0);
+  });
+}
+
+test("server tool start fences thinking repair before message completion", async () => {
+  const { bodies, queries } = transport(index => index === 1 ? streamRejection(
+    frame("message_start", { message: {} }),
+    frame("content_block_start", { index: 0, content_block: { type: "server_tool_use", id: "opaque", name: "web_search", input: {} } }),
+    frame("content_block_stop", { index: 0 }),
+  ) : success());
+  const result = await send();
+  expect(result.text).toContain("response.failed");
+  expect(bodies).toHaveLength(1);
+  expect(queries).toHaveLength(0);
+});
+
+for (const failedSearch of [false, true]) test(`parallel repeated queries retain original tool turns and existing execution counts (failed=${failedSearch})`, async () => {
+  const original = [{ type: "thinking", thinking: "parallel", signature: SIGNATURE },
+    ...["repeat_one", "repeat_two"].map(id => ({ type: "tool_use", id, name: "web_search", input: { query: "identical query", extra: id } }))];
+  const { bodies, queries } = transport(index => index === 1 ? originalBlockStream(original) : success());
+  const installedFetch = globalThis.fetch;
+  let failedCount = 0;
+  if (failedSearch) globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) === "https://api.exa.ai/search") { failedCount++; return Response.json({ error: "synthetic failure" }, { status: 400 }); }
+    return installedFetch(input, init);
+  }) as typeof fetch;
+  const result = await send();
+  expect(result.text).toContain("response.completed");
+  expect(failedSearch ? failedCount : queries.length).toBe(failedSearch ? 1 : 2);
+  expect(bodies).toHaveLength(2);
+  const messages = JSON.parse(bodies[1]).messages;
+  const index = messages.findIndex((m: any) => m.role === "assistant" && m.content.some((b: any) => b.id === "repeat_one"));
+  expect(messages[index].content).toEqual(original);
+  expect(messages[index + 1].content.map((b: any) => b.tool_use_id)).toEqual(["repeat_one", "repeat_two"]);
+});
+
+test("forced-answer tool calls and empty retry retain bound catalog and nudge positions", async () => {
+  const { bodies, queries } = transport(index => index <= 3 ? search(`forced_${index}`, `query ${index}`)
+    : index === 4 ? success("") : success());
+  const result = await send();
+  expect(result.text).toContain("response.completed");
+  expect(bodies).toHaveLength(5);
+  expect(queries).toHaveLength(2);
+  const requests = bodies.map(body => JSON.parse(body));
+  for (const current of requests) {
+    expect(current.tools).toEqual(requests[0].tools);
+    expect(current.system).toEqual(requests[0].system);
+  }
+  expect(requests[4].tool_choice).toEqual({ type: "none" });
+  const withoutCache = (value: unknown) => JSON.parse(JSON.stringify(value, (key, item) => key === "cache_control" ? undefined : item));
+  const prefix = withoutCache(requests[2].messages);
+  expect(withoutCache(requests[3].messages).slice(0, prefix.length)).toEqual(prefix);
+  expect(withoutCache(requests[4].messages).slice(0, prefix.length)).toEqual(prefix);
+  for (const current of requests.slice(2)) {
+    expect(JSON.stringify(current.messages).match(/Answer the user's question now using/g)).toHaveLength(1);
+  }
+});
+
+for (const choice of ["auto", "none", { type: "function", name: "web_search" },
+  { type: "allowed_tools", mode: "auto", tools: [{ type: "web_search" }] }]) {
+  test(`Opus search wire catalog remains authorized and stable: ${JSON.stringify(choice)}`, async () => {
+    const cfg = config(); cfg.providers["anthropic-test"].models = ["claude-opus-5-5"];
+    const data = await request().json();
+    data.model = "anthropic-test/claude-opus-5-5";
+    data.reasoning = { effort: "high" };
+    data.tool_choice = choice;
+    const req = new Request("http://localhost/v1/responses", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(data) });
+    const { bodies, queries } = transport(index => choice === "none" ? success() : index <= 2 ? search(`choice_${index}`, `query ${index}`)
+      : index === 3 ? success("") : success());
+    const result = await send({}, cfg, req);
+    expect(result.text).toContain("response.completed");
+    expect(bodies).toHaveLength(choice === "none" ? 1 : 4);
+    expect(queries).toHaveLength(choice === "none" ? 0 : 2);
+    const requests = bodies.map(body => JSON.parse(body));
+    const names = requests[0].tools.map((tool: any) => tool.name);
+    if (choice === "none") expect(names).not.toContain("web_search");
+    else expect(names).toContain("web_search");
+    if (typeof choice === "object") expect(names).not.toContain("lookup");
+    else expect(names).toContain("lookup");
+    for (const current of requests) {
+      expect(current.tools).toEqual(requests[0].tools);
+      expect(current.system).toEqual(requests[0].system);
+      expect(current.thinking).toEqual({ type: "adaptive", display: "summarized" });
+    }
+    expect(requests.at(-1).tool_choice).toEqual({ type: "none" });
+  });
+}
+
+for (const identity of ["unsafe id", "duplicate", "prior collision"]) test(`search refuses non-replayable tool IDs before execution: ${identity}`, async () => {
+  const id = identity === "unsafe id" ? identity : "collision";
+  const { bodies, queries } = transport(index => identity === "duplicate" ? originalBlockStream([
+    { type: "tool_use", id, name: "web_search", input: { query: "one" } },
+    { type: "tool_use", id, name: "web_search", input: { query: "two" } },
+  ]) : search(id, `query ${index}`));
+  const result = await send();
+  expect(result.text).toContain("response.failed");
+  expect(bodies).toHaveLength(identity === "prior collision" ? 2 : 1);
+  expect(queries).toHaveLength(identity === "prior collision" ? 1 : 0);
+});
