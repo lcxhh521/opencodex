@@ -970,6 +970,8 @@
   "response-log-inspection.test.ts": "server", "response-model-identity.test.ts": "server",
   "responses-4546-incident-regression.test.ts": "responses", "responses-account-change-scrub.test.ts": "responses",
   "responses-account-label.test.ts": "responses", "responses-anthropic-fast-downgrade.test.ts": "responses",
+  "responses-anthropic-thinking-signature-recovery.test.ts": "responses",
+  "responses-anthropic-thinking-recovery.test.ts": "responses",
   "responses-azure-opaque-blob-recovery.test.ts": "responses", "responses-bare-echo-helper-fence.test.ts": "responses",
   "responses-canonical-only-top-level-fields.test.ts": "responses",
   "responses-chatgpt-web-replay-metadata.test.ts": "responses", "responses-code-mode-goal-helpers.test.ts": "responses",

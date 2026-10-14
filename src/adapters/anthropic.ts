@@ -282,7 +282,7 @@ function normalizeTtlOrdering(body: Record<string, unknown>): void {
   }
 }
 
-function isLikelyRealAnthropicThinkingSignature(signature: string | undefined): signature is string {
+export function isLikelyRealAnthropicThinkingSignature(signature: string | undefined): signature is string {
   if (typeof signature !== "string" || signature.length < 16) return false;
   if (/^(fc|call|msg|rs|resp|reasoning|item|ws|tool|func|function)[-_]/i.test(signature)) return false;
   return /^[A-Za-z0-9+/_=-]+$/.test(signature);

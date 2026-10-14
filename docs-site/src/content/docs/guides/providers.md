@@ -76,6 +76,18 @@ modalities are declared; Kimi omits `capabilities` for unknown or text-only mode
 a supported capability field keep their existing configuration shape. After updating opencodex,
 regenerate or refresh the client configuration managed by opencodex to receive the updated metadata.
 
+## Replayed Anthropic thinking signatures
+
+On the Responses endpoint, an Anthropic-compatible upstream can reject a replayed thinking
+signature because it belongs to a different conversation prefix. When the error explicitly
+identifies this signature-binding problem, opencodex can remove replayed signed/redacted thinking
+and retry once within the request's send budget. This covers HTTP 400 refusals and initial stream
+errors before output or tool activity. Other errors keep their existing handling.
+
+Only a successful, nonempty completion remembers the rejection for that conversation and serving
+identity for five minutes. Plaintext history remains available; a failed or cancelled retry does
+not disable thinking replay on later requests.
+
 ## Auth modes
 
 Provider configs accept three `authMode` values (`key` is the default). The built-in registry also
