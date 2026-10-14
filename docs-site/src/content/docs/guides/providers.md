@@ -84,7 +84,8 @@ identifies this signature-binding problem, opencodex can remove replayed signed/
 and retry once within the request's send budget. This covers HTTP 400 refusals and initial stream
 errors before output or tool activity. Hosted web search uses the same one-recovery limit for
 all model iterations: only the rejected iteration is resent, while completed searches and tool
-results are retained. The strip policy continues into later iterations. A failed replacement is
+results are retained. Older rejected thinking stays excluded in later iterations; newly observed
+complete thinking blocks from the repaired request can be retained. A failed replacement is
 returned without another signature retry. Other errors keep their existing handling.
 
 Search recovery is disabled when enforced spend accounting cannot establish receipts for earlier
@@ -93,6 +94,24 @@ ordinary search sends. It never increases a caller or Combo send allowance.
 Only a successful, nonempty completion remembers the rejection for that conversation and serving
 identity for five minutes. Plaintext history remains available; a failed or cancelled retry does
 not disable thinking replay on later requests.
+
+When the rejected request's opaque payloads were fully captured, this memo can remember only those
+payload fingerprints. Compatible new thinking from the successful repair can then survive later
+requests after its full prefix checks. Already rejected payloads remain excluded even if their
+visible text or metadata changes. Legacy/unrecognized blocks retain conservative stripping while
+the memo is active. Old blanket memos or incomplete/oversized capture keep blanket behavior; the
+fingerprint set is capped at 256, stays within the existing cache limits, and does not grant another
+signature retry or persist across restarts.
+
+New reasoning envelopes also carry optional prefix-consistency observations. When comparable,
+these let the adapter remove only thinking whose recorded context no longer matches, while
+preserving compatible newer thinking, plaintext and tool results. They do not change the reasoning
+mode or increase the retry allowance. A manual-thinking tool continuation that would lose required
+thinking fails with an incompatible-history error before sending. Legacy or unrecognized metadata
+keeps existing compatibility behavior. No client update or new persistent store is required; a
+repair that produces no new signed/redacted thinking has no durable omission marker, and legacy
+rejections can recur after restart. See the [architecture notes](/reference/architecture/#anthropic-thinking-prefix-continuity)
+for the complete-block, scope and replay-shape limits.
 
 ## Auth modes
 

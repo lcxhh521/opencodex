@@ -1,3 +1,4 @@
+import { aliasAnthropicPrefixResponse } from "../../adapters/anthropic-prefix";
 import type { ResponsesRequestContext } from "./core-options";
 import type { PreparedResponsesRequest } from "./request-prepare";
 import type { ResponsesTransport } from "./request-transport";
@@ -99,10 +100,10 @@ export async function deliverAdapterResponse(
       try {
         const retryEvents = upstreamRequestsStream
           ? readResponseStreamWithInactivity(response, upstream.signal, bodyInactivityMs,
-            guarded => transportState.activeAdapter.parseStream(guarded, translatorBudget, logCtx.activeTierMetadata))
+            guarded => { aliasAnthropicPrefixResponse(response, guarded); return transportState.activeAdapter.parseStream(guarded, translatorBudget, logCtx.activeTierMetadata); })
           : (async function* () {
               yield* await readResponseBodyWithInactivity(response, upstream.signal, bodyInactivityMs,
-                guarded => transportState.activeAdapter.parseResponse!(guarded, translatorBudget, logCtx.activeTierMetadata));
+                guarded => { aliasAnthropicPrefixResponse(response, guarded); return transportState.activeAdapter.parseResponse!(guarded, translatorBudget, logCtx.activeTierMetadata); });
             })();
         for await (const event of retryEvents) {
           options.onCompactionRecoveryAdapterEvent?.(event);
@@ -113,7 +114,7 @@ export async function deliverAdapterResponse(
         yield { type: "error", message: "Upstream recovery response body stalled before completing",
           status: 504, errorType: "upstream_error" };
       }
-    }, () => transportState.activeAdapter.name, !isNonReplayableResponse(upstreamResponse));
+    }, () => transportState.activeAdapter.name, !isNonReplayableResponse(upstreamResponse), upstreamResponse);
 
 
 
@@ -126,7 +127,7 @@ export async function deliverAdapterResponse(
           upstreamResponse,
           upstream.signal,
           bodyInactivityMs,
-          response => transportState.activeAdapter.parseStream(response, translatorBudget, logCtx.activeTierMetadata),
+          response => { aliasAnthropicPrefixResponse(upstreamResponse, response); return transportState.activeAdapter.parseStream(response, translatorBudget, logCtx.activeTierMetadata); },
         )) {
           options.onCompactionRecoveryAdapterEvent?.(event);
           yield event;
@@ -270,14 +271,14 @@ export async function deliverAdapterResponse(
           upstreamResponse,
           upstream.signal,
           bodyInactivityMs,
-          response => transportState.activeAdapter.parseStream(response, translatorBudget, logCtx.activeTierMetadata),
+          response => { aliasAnthropicPrefixResponse(upstreamResponse, response); return transportState.activeAdapter.parseStream(response, translatorBudget, logCtx.activeTierMetadata); },
         )) initialEvents.push(event);
       } else {
         initialEvents.push(...await readResponseBodyWithInactivity(
           upstreamResponse,
           upstream.signal,
           bodyInactivityMs,
-          response => transportState.activeAdapter.parseResponse!(response, translatorBudget, logCtx.activeTierMetadata),
+          response => { aliasAnthropicPrefixResponse(upstreamResponse, response); return transportState.activeAdapter.parseResponse!(response, translatorBudget, logCtx.activeTierMetadata); },
         ));
       }
       for (const event of initialEvents) options.onCompactionRecoveryAdapterEvent?.(event);

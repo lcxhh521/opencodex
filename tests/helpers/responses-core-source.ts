@@ -23,6 +23,7 @@ export const RESPONSES_CORE_MODULES = [
   "core-replay.ts",
   "core-errors.ts",
   "core-opaque-recovery.ts",
+  "anthropic-thinking-recovery.ts",
   "core-codex-account.ts",
   "core-combo-failure.ts",
   "core-auth.ts",

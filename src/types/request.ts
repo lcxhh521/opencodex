@@ -291,6 +291,17 @@ export interface OcxDocumentContent {
 /** A user/developer message content part: text, native media, or an attached document. */
 export type OcxContentPart = OcxTextContent | OcxImageContent | OcxVideoContent | OcxDocumentContent;
 
+/** Versioned observation of the exact Anthropic prefix at one completed thinking block. */
+export interface AnthropicPrefixHint {
+  v: 1;
+  scheme: "anthropic-prefix-v1";
+  /** Digests use exactly 64 lowercase hexadecimal characters. */
+  scope: string;
+  prefix: string;
+  parent: string;
+  block: string;
+}
+
 export interface OcxThinkingContent {
   type: "thinking";
   thinking: string;
@@ -298,6 +309,8 @@ export interface OcxThinkingContent {
   itemId?: string;
   /** Raw Anthropic redacted_thinking block payloads to replay verbatim (order preserved). */
   redacted?: string[];
+  /** Internal replay hint; not evidence of final response success or a provider attestation. */
+  anthropicPrefix?: AnthropicPrefixHint;
 }
 
 export interface OcxToolCall {

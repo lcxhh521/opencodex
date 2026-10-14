@@ -219,9 +219,13 @@
       "path": "transports/anthropic-thinking-recovery.md",
       "tier": 3,
       "title": "Anthropic Thinking-Signature Recovery",
-      "scope": "One-shot exact signature-binding recovery before output, and successful-retry memo boundaries.",
+      "scope": "Anthropic prefix-consistency observations, one-shot signature-binding recovery and successful-retry memo boundaries.",
       "documents": [
-        "src/server/responses/anthropic-thinking-recovery.ts"
+        "src/server/responses/anthropic-thinking-recovery.ts",
+        "src/adapters/anthropic-prefix.ts",
+        "src/adapters/anthropic-prefix-observer.ts",
+        "src/adapters/anthropic-prefix-hints.ts",
+        "src/adapters/anthropic-rejection-memo.ts"
       ]
     },
     {

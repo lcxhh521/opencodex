@@ -44,6 +44,7 @@ import {
 import { adapterFailureFromEvent, emptyChunks, joinChunks, responsesUsage, toolCallArgumentsUsable, uuid, webSearchAction } from "./internal";
 import type { OutputItem, StringChunks } from "./internal";
 import { bridgeToResponsesSSE } from "./sse";
+import { getAnthropicPrefixHint } from "../adapters/anthropic-prefix-hints";
 
 /** Build a buffered Responses result within a caller-owned or temporary translator budget. */
 export function buildResponseJSON(
@@ -211,6 +212,7 @@ function buildResponseJSONWithBudget(
   let batchSignatureBytes = 0;
   let batchRedacted: string[] = [];
   let batchRedactedBytes = 0;
+  let batchAnthropicPrefix: ReasoningEnvelope["ap"];
   // Kiro reasoning blob, held until after the trailing flushes so it lands AFTER the assistant
   // message (see the streaming path). Retained because it outlives releaseTranslatedEvent.
   let batchKiroRedacted: string | undefined;
@@ -268,6 +270,7 @@ function buildResponseJSONWithBudget(
     const envelope: ReasoningEnvelope = {};
     if (batchSignature) envelope.sig = batchSignature;
     if (batchRedacted.length > 0) envelope.red = batchRedacted;
+    if (batchAnthropicPrefix && Number(!!batchSignature) + batchRedacted.length === 1) envelope.ap = batchAnthropicPrefix;
     const hidden = options?.hideThinkingSummary === true;
     if (hidden && summaryText && (envelope.sig || envelope.red)) envelope.txt = summaryText;
     const encrypted = envelope.sig || envelope.red || envelope.txt ? encodeReasoningEnvelope(envelope, budget) : undefined;
@@ -276,6 +279,7 @@ function buildResponseJSONWithBudget(
     batchSignatureBytes = 0;
     batchRedacted = [];
     batchRedactedBytes = 0;
+    batchAnthropicPrefix = undefined;
     if (hidden && !encrypted) {
       budget?.releaseRetained(sourceBytes, { kind: "reasoning" });
       currentSummaryReasoning = emptyChunks();
@@ -425,6 +429,7 @@ function buildResponseJSONWithBudget(
         // event. Flushing every update would manufacture signature-only siblings.
         batchSignatureBytes = replaceBatchRetainedString(batchSignatureBytes, e.signature, "reasoning");
         batchSignature = e.signature;
+        batchAnthropicPrefix = getAnthropicPrefixHint(e);
         break;
       case "redacted_thinking":
         flushText("commentary");
@@ -437,6 +442,7 @@ function buildResponseJSONWithBudget(
           batchRedactedBytes += dataBytes;
         }
         batchRedacted.push(e.data);
+        batchAnthropicPrefix = getAnthropicPrefixHint(e);
         flushSummaryReasoning();
         break;
       case "kiro_redacted_reasoning":

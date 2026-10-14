@@ -1,3 +1,7 @@
+import { captureAnthropicRejectionPayloads } from "./anthropic-rejection-memo";
+import { createAnthropicPrefixObserver } from "./anthropic-prefix-observer";
+import { prepareAnthropicPrefix, rememberAnthropicPrefixRequest, isCurrentAnthropicPrefixHint } from "./anthropic-prefix";
+import { setAnthropicPrefixHint, getAnthropicPrefixHint } from "./anthropic-prefix-hints";
 import { anthropicDeclaredTools } from "./anthropic-tool-catalog";
 import { anthropicReplayContent, createAnthropicReplayCapture } from "./anthropic-replay";
 import type { IncomingMeta, ProviderAdapter } from "./base";
@@ -786,10 +790,14 @@ function messagesToAnthropicFormat(
             // Redacted blocks replay verbatim FIRST (they preceded the visible thinking block
             // in the original stream order preserved by the bridge envelope).
             for (const data of t.redacted ?? []) {
-              preface.push({ type: "redacted_thinking", data });
+              const block = { type: "redacted_thinking", data };
+              if (t.anthropicPrefix && (t.redacted?.length ?? 0) === 1 && !isLikelyRealAnthropicThinkingSignature(t.signature)) setAnthropicPrefixHint(block, t.anthropicPrefix);
+              preface.push(block);
             }
             if (isLikelyRealAnthropicThinkingSignature(t.signature)) {
-              preface.push({ type: "thinking", thinking: t.thinking, signature: t.signature });
+              const block = { type: "thinking", thinking: t.thinking, signature: t.signature };
+              if (t.anthropicPrefix && !t.redacted?.length) setAnthropicPrefixHint(block, t.anthropicPrefix);
+              preface.push(block);
             }
           } else if (part.type === "toolCall") {
             const tc = part as OcxToolCall;
@@ -818,7 +826,7 @@ function messagesToAnthropicFormat(
           }
         }
         const content = captured
-          ? captured.filter(block => parsed._stripReasoningEncryptedContent !== true || (block.type !== "thinking" && block.type !== "redacted_thinking"))
+          ? captured.filter(block => parsed._stripReasoningEncryptedContent !== true || (block.type !== "thinking" && block.type !== "redacted_thinking") || (getAnthropicPrefixHint(block) && isCurrentAnthropicPrefixHint(getAnthropicPrefixHint(block)!, parsed)))
           : [...preface, ...toolUses];
         if (content.length === 0) break;
         messages.push({ role: "assistant", content });
@@ -1181,7 +1189,8 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
       enforceCacheControlLimit(body, explicitLimit);
       normalizeTtlOrdering(body);
 
-      return {
+      const prefixSeed = prepareAnthropicPrefix(body, parsed, incoming?.translatorBudget);
+      const request = {
         url,
         method: "POST",
         headers,
@@ -1195,6 +1204,9 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
           fastSpeed?.value ?? null,
         ),
       };
+      rememberAnthropicPrefixRequest(request, prefixSeed);
+      captureAnthropicRejectionPayloads(request, body, incoming?.translatorBudget);
+      return request;
     },
 
     async *parseStream(
@@ -1208,6 +1220,9 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
       }
 
       const replayCapture = createAnthropicReplayCapture(response, budget);
+      const prefixObserver = createAnthropicPrefixObserver(response, budget);
+      let pendingRedactedPrefix: { data: string } | undefined;
+      let pendingRedactedBytes = 0;
       const budgetEncoder = new TextEncoder();
       let currentBlockType = "";
       let currentToolCallId = "";
@@ -1267,6 +1282,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
           parsed = JSON.parse(payload);
         } catch {
           replayCapture?.invalidate();
+          prefixObserver?.invalidate();
           debugDroppedFrame("anthropic", payload);
           continue;
         }
@@ -1275,11 +1291,23 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
         // way an unparseable one is dropped, so the message_stop check still governs the outcome.
         if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
           replayCapture?.invalidate();
+          prefixObserver?.invalidate();
           debugDroppedFrame("anthropic", payload);
           continue;
         }
         const data = parsed as Record<string, unknown>;
         replayCapture?.accept({ ...data, type: record.event || data.type });
+        const observedBlock = prefixObserver?.accept({ ...data, type: record.event || data.type });
+        if (observedBlock) replayCapture?.annotate(observedBlock.index, observedBlock.hint);
+        const frameType = record.event || data.type;
+        if (pendingRedactedPrefix && (frameType === "content_block_stop" || frameType === "content_block_start"
+          || frameType === "error" || frameType === "message_stop")) {
+          yield observedBlock?.event.type === "redacted_thinking" ? observedBlock.event
+            : { type: "redacted_thinking", data: pendingRedactedPrefix.data };
+          pendingRedactedPrefix = undefined;
+          budget.releaseRetained(pendingRedactedBytes, { kind: "reasoning" }); pendingRedactedBytes = 0;
+        }
+        if (observedBlock?.event.type === "thinking_signature") yield observedBlock.event;
 
         switch (record.event || data.type) {
               case "message_start": {
@@ -1310,7 +1338,13 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
                 }
                 if (block.type === "redacted_thinking" && typeof block.data === "string") {
                   // Opaque redacted block: replay verbatim later or tool-use turns 400.
-                  yield { type: "redacted_thinking", data: block.data };
+                  if (prefixObserver) {
+                    const retainedBytes = Buffer.byteLength(block.data);
+                    budget.chargeRetained(retainedBytes, { kind: "reasoning" });
+                    pendingRedactedBytes = retainedBytes;
+                    pendingRedactedPrefix = { data: block.data };
+                  }
+                  else yield { type: "redacted_thinking", data: block.data };
                 }
                 break;
               }
@@ -1402,6 +1436,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
               }
         }
       }
+      if (pendingRedactedPrefix) yield { type: "redacted_thinking", data: pendingRedactedPrefix.data };
       } catch (error) {
         if (!isTranslatorBudgetExceededError(error)) throw error;
         yield {
@@ -1417,6 +1452,8 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
         return;
       } finally {
         replayCapture?.discard();
+        prefixObserver?.dispose();
+        budget.releaseRetained(pendingRedactedBytes, { kind: "reasoning" }); pendingRedactedBytes = 0;
         if (currentToolCallId) budget.closeCall(currentToolCallId);
       }
       if (!emittedDone) {
@@ -1496,6 +1533,8 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
         }];
       }
       const json = parsed;
+      const prefixObserver = createAnthropicPrefixObserver(response, budget);
+      prefixObserver?.accept({ type: "message_start" });
       const responseBytes = Buffer.byteLength(JSON.stringify(json), "utf8");
       budget.chargeRetained(responseBytes, { kind: "retained_collectors" });
       try {
@@ -1532,18 +1571,20 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
       }
       const content = rawContent as { type: string; text?: string; id?: string; name?: unknown; input?: unknown; thinking?: string; reasoning?: string; signature?: string; data?: string }[] | undefined;
       if (content) {
-        for (const block of content) {
+        for (const [index, block] of content.entries()) {
+          prefixObserver?.accept({ type: "content_block_start", index, content_block: block });
+          const observed = prefixObserver?.accept({ type: "content_block_stop", index });
           if (block.type === "text" && block.text) {
             events.push({ type: "text_delta", text: block.text });
           } else if (block.type === "thinking" && typeof block.thinking === "string") {
             events.push({ type: "thinking_delta", thinking: block.thinking });
             if (typeof block.signature === "string" && block.signature) {
-              events.push({ type: "thinking_signature", signature: block.signature });
+              events.push(observed?.event ?? { type: "thinking_signature", signature: block.signature });
             }
           } else if (block.type === "reasoning" && typeof block.reasoning === "string") {
             events.push({ type: "thinking_delta", thinking: block.reasoning });
           } else if (block.type === "redacted_thinking" && typeof block.data === "string") {
-            events.push({ type: "redacted_thinking", data: block.data });
+            events.push(observed?.event ?? { type: "redacted_thinking", data: block.data });
           } else if (block.type === "tool_use") {
             const id = usableToolUseId(block.id);
             events.push({ type: "tool_call_start", id, name: toolNames.fromWire(typeof block.name === "string" ? block.name : "") });
@@ -1587,6 +1628,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
       retainTranslatedEventBatch(events, budget);
       return events;
       } finally {
+        prefixObserver?.dispose();
         budget.releaseRetained(responseBytes, { kind: "retained_collectors" });
       }
     },

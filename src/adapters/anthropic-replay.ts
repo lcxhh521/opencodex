@@ -1,3 +1,5 @@
+import { getAnthropicPrefixHint, setAnthropicPrefixHint } from "./anthropic-prefix-hints";
+import type { AnthropicPrefixHint } from "../types";
 import { isConformingToolCallId } from "./tool-call-id";
 import type { AdapterEvent, OcxAssistantMessage } from "../types";
 import type { TranslatorBudget } from "../lib/translator-budget";
@@ -27,7 +29,7 @@ export function bindAnthropicReplay(message: OcxAssistantMessage, snapshot: Anth
 export function anthropicReplayContent(message: OcxAssistantMessage): Block[] | undefined {
   const snapshot = messages.get(message);
   if (snapshot && !issued.has(snapshot)) throw new Error("Expired Anthropic replay snapshot");
-  return snapshot?.content.map(block => ({ ...block }));
+  return snapshot?.content.map(block => { const copy = { ...block }; const hint = getAnthropicPrefixHint(block); if (hint) setAnthropicPrefixHint(copy, hint); return copy; });
 }
 
 /** Capture only explicitly opted-in search streams; no client data can manufacture a snapshot. */
@@ -48,6 +50,7 @@ export function createAnthropicReplayCapture(response: Response, budget: Transla
   };
   return {
     invalidate,
+    annotate(index: number, hint: AnthropicPrefixHint): void { const block = blocks[index]; if (block) setAnthropicPrefixHint(block.value, hint); },
     accept(data: Record<string, unknown>): void {
       if (!valid) return;
       const type = data.type;

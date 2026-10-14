@@ -14,6 +14,8 @@ Only harmless heartbeats may precede a streamed recovery: text, thinking, bounda
 activity and replay-unsafe heartbeats fence replay. The rejected iterator closes before refetch.
 
 Recovery uses the existing opaque-state strip/drop flags and leaves plaintext history intact.
+It invalidates the request-local observation generation: older opaque blocks are stripped, while
+complete blocks observed on the repaired request can survive later search iterations.
 A replacement HTTP refusal retains its status, safe error message/type and code; its body is
 not parsed as SSE. Cancellation, budget exhaustion and a second rejection cannot trigger another
 signature recovery. No Anthropic `runTurn` or continuation recovery is introduced.
@@ -26,6 +28,99 @@ durable-serving-identity key and five-minute TTL are unchanged.
 `tests/responses/responses-anthropic-thinking-signature-recovery.test.ts` exercises the actual
 Anthropic adapter with synthetic HTTP/SSE; `tests/responses/responses-anthropic-thinking-recovery.test.ts`
 pins heartbeat/side-effect fences, exact classification, iterator cleanup and memo boundaries.
+
+## Selective rejection memos
+
+`src/adapters/anthropic-rejection-memo.ts` captures the complete opaque-payload fingerprint set
+from the final Anthropic request body after normalization and prefix filtering. Private WeakMaps
+bind that set to the actual adapter request and its exact upstream `Response`; recovery does not
+infer what was sent from a later rebuilt request or a caller-supplied hint. Each fingerprint is a
+64-character lowercase SHA-256 digest of the block type, a separator, and the signature bytes for
+`thinking` or data bytes for `redacted_thinking`. The domains are separate even when their opaque
+bytes are identical. Plaintext and `ap` metadata do not participate, so editing either cannot make
+an already rejected opaque payload appear new. Only a complete, nonempty, reliable set of at most
+256 distinct fingerprints permits selective memoization; absent/incomplete capture falls back to
+the existing blanket policy.
+
+`src/responses/reasoning-replay-cache.ts` retains these fingerprints in the existing rejection
+memo after the same validated successful-repair gate. Repeated selective entries union their sets;
+invalid, empty or overflowing input becomes blanket, and an existing blanket entry cannot be
+narrowed before expiry. Each retained fingerprint adds 64 bytes to the existing 256 KiB rejection
+memo budget; the 64-entry oldest-first bound, durable scope, five-minute TTL and clear behavior are
+unchanged. Getter results contain defensive set copies. No raw opaque payload is stored by this
+memo, and no new cache, persistent key or database is introduced.
+
+An active selective memo removes the captured rejected payloads, even if their visible text or
+hint changed. Legacy blocks and blocks without a comparable recognized prefix observation retain
+the conservative strip behavior under an active memo. A different opaque payload with a recognized
+same-scope observation is only a candidate for retention: its block, non-thinking prefix and parent
+chain must still pass the normal prefix-consistency checks. Older/blanket memos and unreliable or
+oversized captures keep the existing blanket behavior; other adapters are unchanged. An active
+memo never opens another signature-recovery attempt or increases the request send budget. The
+memo is still process-local and does not change the legacy/no-new-thinking restart limitations.
+
+`tests/adapters/reasoning-replay-identity.test.ts` covers selective union, blanket fallback,
+defensive copies, byte/count eviction, expiry and scope isolation.
+
+## Portable prefix-consistency observations
+
+`src/adapters/anthropic-prefix.ts` compares replay observations against the final normalized
+Anthropic body, after effective system guidance, advertised tools, message/tool normalization and
+cache annotations have been applied. It hashes the effective system and tool definitions, message
+boundaries and ordered non-thinking content. Signed/redacted blocks have a separate ordered
+parent/block digest chain, so removing an incompatible opaque segment does not itself change the
+non-thinking prefix. Assistant containers containing only opaque blocks do not contribute to it.
+Object-key order is canonicalized; array, message and content-block order remains significant.
+Only `cache_control` annotations at protocol system-block, tool-definition and message-content-block
+positions are excluded. A field with that name inside a tool input, schema or other nested content
+remains significant.
+
+The existing `ocxr1` reasoning envelope can carry optional `ap` metadata with `v: 1`,
+`scheme: "anthropic-prefix-v1"`, and four 64-character lowercase SHA-256 hex digests: `scope`,
+`prefix`, `parent`, and `block`. Scope binds the durable provider destination, physical credential
+identity and model. The envelope remains transparent base64 JSON, not encryption; the hashes are
+consistency observations, not authentication, local verification of Anthropic's signature, or a
+claim that Anthropic accepts every field in this comparison as its own signing contract.
+
+`src/adapters/anthropic-prefix-observer.ts` observes ordered complete blocks from the response
+associated with that request. Streaming hints are issued only after the matching `content_block_stop`;
+JSON blocks are observed through equivalent start/stop processing. The final signature event, or
+one complete redacted event, receives private metadata through `src/adapters/anthropic-prefix-hints.ts`.
+SSE and JSON bridges copy it into that block's envelope without adding public adapter-event fields.
+An unfinished or invalidated redacted observation retains its original payload without a hint when
+normal error/EOF processing can emit it; cancellation releases pending buffers without minting one.
+A complete-block hint remains an observation even if the response later fails or is incomplete.
+It cannot authorize a retry, establish final success, or commit the rejection memo.
+
+Recognized same-scope prefix/block mismatches remove only the incompatible opaque blocks. A retained
+block must also match the surviving opaque parent chain; a root parent can establish a new empty
+chain and retire older opaque predecessors after an omission. An unresolved parent-chain mismatch
+fails before sending rather than inventing a predecessor. Fresh observations from the current
+post-recovery generation remain eligible during later search iterations despite the older strip
+flag. Plaintext, tool calls, executed tool results, advertised tools and reasoning mode are preserved.
+If omission would leave a manual `thinking: enabled` tool-result continuation without its required
+assistant thinking, the adapter reports incompatible history before sending; it does not disable
+thinking or re-execute the tool.
+
+Missing/malformed metadata, unknown versions and unknown scopes are not themselves evidence of
+invalidity; the original payload remains governed by legacy policies, including an active rejection
+memo's conservative stripping. If an
+already-pruned chain cannot be reconciled with a later unrecognized block, the guard fails closed.
+No comparable durable scope means no new observation. The client-facing bridge cannot preserve the
+original assistant-message shape for thinking after text/tool content, so those blocks remain
+legacy, without a client hint. Opted-in raw search snapshots preserve that shape and may retain the
+private observation. Unsupported block shapes likewise do not acquire an invented client hint.
+
+No client change, new signing key, database or persistent store is introduced. Comparable hints
+travel with existing reasoning items and work independently of process caches. This does not add a
+durable omission marker to responses with no newly observed signed/redacted thinking: such repairs,
+and legacy histories without comparable hints, can still depend on the existing five-minute
+in-memory rejection memo and encounter the original refusal again after restart.
+
+`tests/responses/responses-anthropic-prefix-consistency.test.ts` covers replay across fresh cache
+state, prefix edits, selective omission, repaired generations, manual-tool refusal, unknown metadata,
+complete/incomplete blocks and later failures. `tests/responses/reasoning-envelope-prefix.test.ts`
+and `tests/adapters/bridge-anthropic-prefix.test.ts` cover bounded decoding and private propagation.
 
 ## Hosted search iterations
 
@@ -86,3 +181,7 @@ existing empty-answer policy. Hosted search disabled by the incoming choice rema
 indices, bounded admission, forged/expired snapshot rejection and idempotent budget release.
 Nonconforming or repeated tool IDs fail before search execution, including IDs already present
 in the request-local history, rather than waiting for the next serializer to reject normalization.
+
+Request-local fingerprint capture charges 256 retained translation-budget bytes per unique digest,
+including conservative Set/copy overhead, until the existing turn budget is disposed. Partial
+capture is refunded on invalid input, admission denial or overflow and cannot narrow the memo.

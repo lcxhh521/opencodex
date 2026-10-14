@@ -14,6 +14,7 @@
 
 import { createTranslatorBudget, type TranslatorBudget } from "../lib/translator-budget";
 import { jsonUtf8Bytes } from "../lib/json-byte-size";
+import type { AnthropicPrefixHint } from "../types";
 
 export const OCX_REASONING_PREFIX = "ocxr1:";
 
@@ -27,6 +28,8 @@ export interface ReasoningEnvelope {
    * so replay needs it even though the visible summary was suppressed.
    */
   txt?: string;
+  /** Optional exact-prefix observation for one completed Anthropic thinking block. */
+  ap?: AnthropicPrefixHint;
   /**
    * Kiro's reasoning blob from `reasoningContentEvent`: a KMS-encrypted value that is opaque to the
    * proxy (the GPT-5.6 family sends it as `signature`, other models as the base64
@@ -62,6 +65,15 @@ function decodeNativeReasoning(value: unknown): NativeReasoning | undefined {
   const { enc, model, id, tag } = value as { enc?: unknown; model?: unknown; id?: unknown; tag?: unknown };
   if (typeof enc !== "string" || enc.length === 0 || typeof model !== "string" || model.length === 0 || typeof tag !== "string" || tag.length === 0) return undefined;
   return typeof id === "string" && id.length > 0 ? { enc, model, tag, id } : { enc, model, tag };
+}
+
+function decodeAnthropicPrefixHint(value: unknown): AnthropicPrefixHint | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const { v, scheme, scope, prefix, parent, block } = value as Record<string, unknown>;
+  const digest = (part: unknown): part is string => typeof part === "string" && part.length === 64 && /^[0-9a-f]{64}$/.test(part);
+  if (v !== 1 || scheme !== "anthropic-prefix-v1"
+    || !digest(scope) || !digest(prefix) || !digest(parent) || !digest(block)) return undefined;
+  return { v, scheme, scope, prefix, parent, block };
 }
 
 export function encodeReasoningEnvelope(envelope: ReasoningEnvelope, budget?: TranslatorBudget): string {
@@ -144,6 +156,9 @@ export function decodeReasoningEnvelope(encryptedContent: string, budget?: Trans
       if (typeof krc === "string" && krc.length > 0) envelope.krc = krc;
       const nat = decodeNativeReasoning((parsed as { nat?: unknown }).nat);
       if (nat) envelope.nat = nat;
+      // Future/malformed hints never invalidate the original provider payload.
+      const ap = decodeAnthropicPrefixHint((parsed as { ap?: unknown }).ap);
+      if (ap) envelope.ap = ap;
       return envelope.sig || envelope.red || hasTxt || envelope.krc || envelope.nat ? envelope : null;
     } catch {
       return null;

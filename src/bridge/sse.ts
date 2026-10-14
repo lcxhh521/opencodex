@@ -27,6 +27,7 @@ import { compileCodeModeHelperInput, resolveCodeModeHelperName } from "../respon
 import { mayBecomeCodeModeShellInput } from "../responses/code-mode-shell-input";
 import { isTruncatedStopReason, truncationReasonFor } from "../responses/truncated-stop-reason";
 import { encodeReasoningEnvelope, type ReasoningEnvelope } from "../responses/reasoning-envelope";
+import { getAnthropicPrefixHint } from "../adapters/anthropic-prefix-hints";
 import { rememberReasoningForCall } from "../responses/reasoning-replay-cache";
 import {
   rememberAndSerializeExtraContent,
@@ -372,12 +373,14 @@ export function bridgeToResponsesSSE(
       let pendingSignature: string | undefined;
       let pendingSignatureBytes = 0;
       let pendingRedacted: string[] = [];
+      let pendingAnthropicPrefix: ReasoningEnvelope["ap"];
       let hiddenThinking = emptyChunks();
       const takeReasoningEnvelope = (hiddenText?: string): string | undefined => {
         if (!pendingSignature && pendingRedacted.length === 0) return undefined;
         const envelope: ReasoningEnvelope = {};
         if (pendingSignature) envelope.sig = pendingSignature;
         if (pendingRedacted.length > 0) envelope.red = pendingRedacted;
+        if (pendingAnthropicPrefix && Number(!!pendingSignature) + pendingRedacted.length === 1) envelope.ap = pendingAnthropicPrefix;
         if (hiddenText) envelope.txt = hiddenText;
         const previousBytes = pendingSignatureBytes
           + pendingRedacted.reduce((sum, value) => sum + bytesOf(value), 0)
@@ -387,6 +390,7 @@ export function bridgeToResponsesSSE(
         pendingSignature = undefined;
         pendingSignatureBytes = 0;
         pendingRedacted = [];
+        pendingAnthropicPrefix = undefined;
         reservation?.commitRetained();
         budget?.releaseRetained(previousBytes, { kind: "reasoning" });
         return encoded;
@@ -963,6 +967,7 @@ export function bridgeToResponsesSSE(
             case "thinking_signature": {
               pendingSignatureBytes = replaceRetainedString(pendingSignatureBytes, event.signature, "reasoning");
               pendingSignature = event.signature;
+              pendingAnthropicPrefix = getAnthropicPrefixHint(event);
               // Delay closing until the next semantic event so a signature update cannot
               // create another block or become attached to the following thinking text.
               break;
@@ -975,7 +980,8 @@ export function bridgeToResponsesSSE(
               if (currentToolCall) closeCurrentToolCall();
               budget?.chargeRetained(bytesOf(event.data), { kind: "reasoning" });
               pendingRedacted.push(event.data);
-              // A redacted block is complete at content_block_start. Emit it here,
+              pendingAnthropicPrefix = getAnthropicPrefixHint(event);
+              // A redacted event carries one complete block. Emit it here,
               // not with a later thinking block or after a tool call at turn end.
               flushHiddenReasoningEnvelope();
               break;

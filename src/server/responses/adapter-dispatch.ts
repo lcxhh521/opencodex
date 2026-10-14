@@ -1,3 +1,4 @@
+import { bindAnthropicPrefixResponse } from "../../adapters/anthropic-prefix";
 import { deferPhysicalSendReporter } from "./deferred-send-reporter";
 import { spendLedgerStorageErrorResponse } from "./spend-storage-error";
 import { classifyAnthropic429 } from "../../oauth/anthropic-rate-limit-policy";
@@ -867,9 +868,11 @@ export async function prepareAdapterExchange(
         return { failed: formatErrorResponse(502, "upstream_error", msg) };
       }
     };
-    const refetchThinkingSignature = () => {
+    const refetchThinkingSignature = async () => {
       invalidateSameTargetRequest();
-      return rebuildAndRefetch("opaque-blob-rejection");
+      const result = await rebuildAndRefetch("opaque-blob-rejection");
+      if (!("failed" in result)) bindAnthropicPrefixResponse(transportState.sameTargetRequest, result);
+      return result;
     };
   if (!upstreamResponse.ok) {
     const rotateAntigravityAuth = async (
@@ -929,6 +932,7 @@ export async function prepareAdapterExchange(
           return await sanitizeNonReplayableUpstreamError(upstreamResponse, upstream.signal);
         } finally { cleanupUpstreamAbort(); }
       }
+      bindAnthropicPrefixResponse(transportState.sameTargetRequest, upstreamResponse);
       if (await thinkingSignatureRecovery.prepareHttp(
         upstreamResponse, transportState.activeAdapter.name,
       )) {
@@ -1904,6 +1908,7 @@ export async function prepareAdapterExchange(
     }
   }
 
+  bindAnthropicPrefixResponse(transportState.sameTargetRequest, upstreamResponse);
   cancelBodyOnAbort(upstreamResponse.body, upstream.signal);
 
   return {

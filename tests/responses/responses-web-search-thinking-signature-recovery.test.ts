@@ -90,11 +90,11 @@ function success(text = "Recovered search answer", stopReason = "end_turn"): Res
     ...(text ? [textFrame(text)] : []),
     frame("message_delta", { delta: { stop_reason: stopReason }, usage: { output_tokens: 3 } }), frame("message_stop"));
 }
-function search(id = "ws_fixture", query = "fixture"): Response {
+function search(id = "ws_fixture", query = "fixture", signature = SIGNATURE): Response {
   return sse(frame("message_start", { message: { usage: { input_tokens: 2 } } }),
     frame("content_block_start", { index: 0, content_block: { type: "thinking", thinking: "" } }),
     frame("content_block_delta", { index: 0, delta: { type: "thinking_delta", thinking: "search reasoning" } }),
-    frame("content_block_delta", { index: 0, delta: { type: "signature_delta", signature: SIGNATURE } }),
+    frame("content_block_delta", { index: 0, delta: { type: "signature_delta", signature } }),
     frame("content_block_stop", { index: 0 }),
     frame("content_block_start", { index: 1, content_block: { type: "tool_use", id, name: "web_search", input: {} } }),
     frame("content_block_delta", { index: 1, delta: { type: "input_json_delta", partial_json: JSON.stringify({ query }) } }),
@@ -184,28 +184,37 @@ describe("hosted web search Anthropic thinking-signature recovery", () => {
     });
   }
 
-  test("stripping persists when a recovered iteration asks for another search", async () => {
+  test("old stripping persists while newly issued search thinking remains replayable", async () => {
+    const firstFresh = "SyntheticFreshFirstSignature123456==";
+    const secondFresh = "SyntheticFreshSecondSignature123456==";
     const { bodies, queries } = transport(index => index === 1 ? rejection()
-      : index === 2 ? search("ws_first", "first fixture")
-        : index === 3 ? search("ws_second", "second fixture") : success());
+      : index === 2 ? search("ws_first", "first fixture", firstFresh)
+        : index === 3 ? search("ws_second", "second fixture", secondFresh) : success());
     const result = await send();
     expect(result.text).toContain("Recovered search answer");
     expect(bodies).toHaveLength(4);
     expect(queries).toHaveLength(2);
-    bodies.slice(1).forEach(expectStripped);
+    expectStripped(bodies[1]);
+    for (const body of bodies.slice(2)) { expect(body).not.toContain(SIGNATURE); expect(body).not.toContain(REDACTED); }
+    expect(bodies[2]).toContain(firstFresh);
+    expect(bodies[3]).toContain(firstFresh);
+    expect(bodies[3]).toContain(secondFresh);
     expect(bodies[3]).toContain("ws_first");
     expect(bodies[3]).toContain("ws_second");
     expect(result.log.activeAttempt?.recoveryKinds).toEqual(["opaque-blob-rejection"]);
   });
   for (const firstSse of [false, true]) {
     test(`HTTP and SSE refusals share one request-wide guard across rounds (first SSE=${firstSse})`, async () => {
+      const fresh = "SyntheticFreshGuardSignature123456==";
       const { bodies, queries } = transport(index => index === 1 ? firstSse ? streamRejection() : rejection()
-        : index === 2 ? search() : index === 3 ? firstSse ? rejection() : streamRejection() : success());
+        : index === 2 ? search("ws_fixture", "fixture", fresh) : index === 3 ? firstSse ? rejection() : streamRejection() : success());
       const result = await send();
       expect(bodies).toHaveLength(3);
       expect(queries).toHaveLength(1);
       expectStripped(bodies[1]);
-      expectStripped(bodies[2]);
+      expect(bodies[2]).not.toContain(SIGNATURE);
+      expect(bodies[2]).not.toContain(REDACTED);
+      expect(bodies[2]).toContain(fresh);
       expect(result.text).toContain("response.failed");
       expect(result.text).toContain(REJECTION);
       await send();

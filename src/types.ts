@@ -53,6 +53,7 @@ export type {
   OcxDocumentContent,
   OcxContentPart,
   OcxThinkingContent,
+  AnthropicPrefixHint,
   OcxToolCall,
   OcxProviderOpaqueToolCallMetadata,
   OcxAssistantContentPart,

@@ -1,3 +1,4 @@
+import { bindAnthropicPrefixResponse, aliasAnthropicPrefixResponse } from "../adapters/anthropic-prefix";
 import { anthropicDeclaredTools } from "../adapters/anthropic-tool-catalog";
 import { enableAnthropicReplayCapture, takeAnthropicReplay, bindAnthropicReplay, type AnthropicReplaySnapshot } from "../adapters/anthropic-replay";
 import { anthropicSearchAssistantContent } from "./anthropic-history";
@@ -586,12 +587,13 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         } finally {
           request.releaseBodyObservation?.();
         }
+        bindAnthropicPrefixResponse(request, response);
         return { response, responseAdapter: requestAdapter };
       };
 
       const recover = async (error: WebSearchAdapterEventError): Promise<IterationResponse | undefined> => {
         if (signal.aborted || !error.replaySafe || isNonReplayableResponse(prepared.response)
-          || !deps.thinkingRecovery?.prepareEvent(error.event.message, prepared.responseAdapter.name, iterParsed)) return;
+          || !deps.thinkingRecovery?.prepareEvent(error.event.message, prepared.responseAdapter.name, iterParsed, prepared.response)) return;
         cachedRequest = undefined;
         cachedAdapter = undefined;
         // The successful headers ended the previous timer; the replacement owns a fresh deadline.
@@ -735,6 +737,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
     let releaseCapture = () => {};
     try {
       const parse: ProviderAdapter["parseStream"] = (response, budget) => {
+        aliasAnthropicPrefixResponse(prepared.response, response);
         if (prepared.responseAdapter.name === "anthropic") releaseCapture = enableAnthropicReplayCapture(response);
         return prepared.responseAdapter.parseStream(response, budget);
       };

@@ -405,12 +405,14 @@ export function parseRequest(
             thinking: thinkingText,
             signature: envelope?.sig ?? JSON.stringify(reasoning),
             ...(envelope?.red ? { redacted: envelope.red } : {}),
+            ...(envelope?.ap ? { anthropicPrefix: envelope.ap } : {}),
             ...(reasoning.id ? { itemId: reasoning.id } : {}),
           };
           const envelopeSigned = typeof envelope?.sig === "string";
           const previous = pendingReasoning[pendingReasoning.length - 1];
 
-          if (!envelopeSigned && !part.redacted && previous && !previous.envelopeSigned && !previous.part.redacted) {
+          if (!envelopeSigned && !part.redacted && !part.anthropicPrefix
+            && previous && !previous.envelopeSigned && !previous.part.redacted && !previous.part.anthropicPrefix) {
             previous.part = {
               ...part,
               thinking: `${previous.part.thinking}\n${part.thinking}`,
