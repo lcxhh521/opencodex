@@ -82,7 +82,13 @@ On the Responses endpoint, an Anthropic-compatible upstream can reject a replaye
 signature because it belongs to a different conversation prefix. When the error explicitly
 identifies this signature-binding problem, opencodex can remove replayed signed/redacted thinking
 and retry once within the request's send budget. This covers HTTP 400 refusals and initial stream
-errors before output or tool activity. Other errors keep their existing handling.
+errors before output or tool activity. Hosted web search uses the same one-recovery limit for
+all model iterations: only the rejected iteration is resent, while completed searches and tool
+results are retained. The strip policy continues into later iterations. A failed replacement is
+returned without another signature retry. Other errors keep their existing handling.
+
+Search recovery is disabled when enforced spend accounting cannot establish receipts for earlier
+ordinary search sends. It never increases a caller or Combo send allowance.
 
 Only a successful, nonempty completion remembers the rejection for that conversation and serving
 identity for five minutes. Plaintext history remains available; a failed or cancelled retry does

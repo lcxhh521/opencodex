@@ -1,3 +1,4 @@
+import { createAnthropicThinkingRecovery } from "./anthropic-thinking-recovery";
 import { rotateAnthropicAccountOnResponseForInstance } from "../../oauth/anthropic-account-refusal";
 import type { ResponsesRequestContext } from "./core-options";
 import type { PreparedResponsesRequest } from "./request-prepare";
@@ -32,7 +33,7 @@ import {
   failoverAccountSnapshot,
 } from "../../oauth/generic-account-failover";
 import { classifyKiroRefusal } from "../../adapters/kiro-refusal";
-import { isNonReplayableResponse } from "../../lib/upstream-retry";
+import { isNonReplayableResponse, SendBudgetExhaustedError } from "../../lib/upstream-retry";
 import { unwrapUpstreamRetryEvidenceError } from "../../codex/auth-context";
 import { AdmissionModelDeniedError, admissionModelDeniedResponse } from "../admission-model-scope";
 import { noteKiroMonthlyRefusal, noteKiroServedSuccess } from "../../providers/kiro-usage";
@@ -98,7 +99,7 @@ export async function executeResponsesSidecars(
     | "notifyResponseComplete"
     | "cancelResponseCompletion"
   >,
-  sendBudgetState: Pick<ResponsesSendBudget, "reserveCredentialHop" | "refundableAdapterDispatchBudget" | "adapterDispatchBudget" | "noteInitialDispatch" | "noteAdapterPhysicalSend" | "noteAdapterRecoveryWithheld" | "pendingHopPermit">,
+  sendBudgetState: Pick<ResponsesSendBudget, "sendBudgetExhausted" | "reserveCredentialHop" | "refundableAdapterDispatchBudget" | "adapterDispatchBudget" | "noteInitialDispatch" | "noteAdapterPhysicalSend" | "noteAdapterRecoveryWithheld" | "pendingHopPermit">,
 ) {
   const { config, options, logCtx } = requestContext;
   const antigravityPoolActivated = requestState.route.providerName === "google-antigravity"
@@ -377,7 +378,7 @@ export async function executeResponsesSidecars(
       recoveryKind = "oauth-account-429";
       if (!options.comboInitialSend && canRunWebSearch && route.providerName === "google-antigravity")
         sendBudgetState.pendingHopPermit = hop.permit;
-      else sidecarBudget.ownCredentialHop(hop.permit);
+      else sidecarBudget.ownCredentialHop(hop.permit, canRunWebSearch && transportState.adapter.name === "anthropic");
     } else if (
       // Anthropic's pool is excluded from generic failover, so without this arm a 429 inside a
       // web-search or image-bridge turn was terminal even with the pool fully enabled -- while
@@ -418,7 +419,7 @@ export async function executeResponsesSidecars(
         return null;
       }
       recoveryKind = originalResponse?.status === 401 ? "oauth-401" : "anthropic-oauth-429";
-      sidecarBudget.ownCredentialHop(hop.permit);
+      sidecarBudget.ownCredentialHop(hop.permit, canRunWebSearch && transportState.adapter.name === "anthropic");
     } else {
       // No key pool, no generic OAuth roster, no Anthropic pool could produce a replacement
       // credential. The 429 is terminal for this sidecar turn.
@@ -592,6 +593,13 @@ export async function executeResponsesSidecars(
   // Placed BEFORE the runTurn early-return for non-runTurn adapters so dual-tool turns dispatch
   // through web-search instead of being swallowed. runTurn adapters never enter this branch.
   if (canRunWebSearch && wsPlan) {
+    // The legacy direct-search lane has no authoritative receipt for earlier sends under
+    // enforced spend. Fail closed for recovery there instead of granting unproven headroom.
+    const thinkingRecovery = createAnthropicThinkingRecovery(parsed,
+      options.abortSignal ?? new AbortController().signal, { attempted: false },
+      () => !sendBudgetState.sendBudgetExhausted()
+        && !!sendBudgetState.adapterDispatchBudget
+        && sendBudgetState.adapterDispatchBudget.spendEnforced !== true);
     parsed.context.tools = [...(parsed.context.tools ?? []), buildWebSearchTool()];
     // Resolve the mutable route at send time: a 429 rotation replaces route.provider, so retaining
     // one pre-rotation providerFetch would keep the old credential and transport pin.
@@ -603,10 +611,30 @@ export async function executeResponsesSidecars(
       })(input, init)) as typeof globalThis.fetch;
     const loopResponse = await runWithWebSearch({
       parsed, adapter: transportState.adapter,
+      ...(transportState.adapter.name === "anthropic" ? { thinkingRecovery } : {}),
       onIterationEnd: sidecarBudget.releaseUnsentHop,
-      fetchForRequest: (request, iterParsed, adapter) => providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+      fetchForRequest: (request, iterParsed, adapter, recovery) => providerFetch(route.provider, options.codexWsRuntimeIdentity, {
         dispatchOverride: oauthDispatch(request, iterParsed),
         providerName: route.providerName, modelId: route.modelId, ...sidecarBudget.fetchOptions(adapter),
+        ...(adapter.name === "anthropic" ? { onPhysicalDispatch: () => {
+          if (recovery === "opaque-blob-rejection") {
+            if (sendBudgetState.adapterDispatchBudget?.spendEnforced) throw new SendBudgetExhaustedError("web-search thinking recovery");
+            const decision = sendBudgetState.adapterDispatchBudget?.reserveDispatch({
+              sendClass: "repair", targetKey: `${route.providerName}|${request.url}|${route.modelId}`,
+            });
+            if (!decision?.allowed) throw new SendBudgetExhaustedError("web-search thinking recovery");
+            try { sendBudgetState.noteInitialDispatch(decision.permit); }
+            finally { decision.permit.release(); }
+          } else {
+            const existing = sidecarBudget.fetchOptions(adapter).onPhysicalDispatch;
+            if (existing) existing();
+            else {
+              const prepaid = sendBudgetState.pendingHopPermit;
+              sendBudgetState.pendingHopPermit = undefined;
+              sendBudgetState.noteInitialDispatch(prepaid);
+            }
+          }
+        } } : {}),
       }),
       incomingMeta: {
         headers: requestState.selectedForwardHeaders,
@@ -665,6 +693,7 @@ export async function executeResponsesSidecars(
         if (route.providerName === "kiro" && response.status === "completed" && served
           && noteKiroServedSuccess(served.accountId, served.generation)) persistKiroAccountState();
         commitReasoningReplayServingRoute();
+        if (!options.abortSignal?.aborted) thinkingRecovery.rememberSuccess(response);
         notifyResponseComplete(response);
       },
     });

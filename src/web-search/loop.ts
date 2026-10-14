@@ -1,3 +1,4 @@
+import type { createAnthropicThinkingRecovery } from "../server/responses/anthropic-thinking-recovery";
 import type { AdapterRequest, IncomingMeta, ProviderAdapter } from "../adapters/base";
 import type { AdapterEvent, OcxConfig, OcxMessage, OcxParsedRequest, OcxProviderConfig, OcxProviderOpaqueToolCallMetadata, OcxThinkingContent, OcxUsage, RateLimitRetryPolicy } from "../types";
 import { namespacedToolName, toolChoiceToolPredicate } from "../types";
@@ -15,7 +16,7 @@ import type { WebSearchBackendId } from "./index";
 import { pacingHeaderDeadline } from "./header-deadline";
 import { redactSecretString } from "../lib/redact";
 import { readBoundedResponseBody } from "../lib/bounded-body";
-import { applyUpstreamRecoveryInit, fetchWithResetRetry, prepareSameTarget429Wait } from "../lib/upstream-retry";
+import { applyUpstreamRecoveryInit, fetchWithResetRetry, prepareSameTarget429Wait, isNonReplayableResponse, SendBudgetExhaustedError } from "../lib/upstream-retry";
 import { rateLimitRetryDelayMs } from "../providers/key-failover";
 import {
   isTranslatorBudgetExceededError,
@@ -23,7 +24,7 @@ import {
   TranslatorBudgetExceededError,
 } from "../lib/translator-budget";
 import { formatWebSearchResults } from "./format-result";
-import { parseStreamWithProgress, RoutedModelInactivityError, WebSearchStreamProtocolError } from "./progress-stream";
+import { parseStreamWithProgress, RoutedModelInactivityError, WebSearchStreamProtocolError, WebSearchAdapterEventError } from "./progress-stream";
 import { WEB_SEARCH_TOOL_NAME } from "./synthetic-tool";
 
 const SSE_HEADERS = {
@@ -250,17 +251,17 @@ function forcedAnswerRetryNudge(): OcxMessage {
   };
 }
 
-function jsonError(status: number, message: string): Response {
-  return new Response(JSON.stringify({ error: { message, type: "upstream_error", code: null } }), {
+function jsonError(status: number, message: string, event?: Extract<AdapterEvent, { type: "error" }>): Response {
+  return new Response(JSON.stringify({ error: { message, type: event?.errorType ?? "upstream_error", code: event?.code ?? null, ...(event?.retryable === false ? { retryable: false } : {}) } }), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(event?.retryable === false ? { "x-should-retry": "false" } : {}) },
   });
 }
 
 /** Hard provider/parse failure inside an iteration. The eager first iteration converts it to a
  *  non-200 jsonError; later (already-streaming) iterations surface it as an in-stream error event. */
 class LoopError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(readonly status: number, message: string, readonly event?: Extract<AdapterEvent, { type: "error" }>) {
     super(message);
     this.name = "LoopError";
   }
@@ -323,7 +324,8 @@ export interface WebSearchLoopDeps {
   /** Observe the exact adapter request selected for each routed-model iteration. */
   onRequestBuilt?: (request: AdapterRequest) => void;
   /** Request-scoped executor retains the core's selection binding across loop retries. */
-  fetchForRequest?: (request: AdapterRequest, parsed: OcxParsedRequest, adapter: ProviderAdapter) => typeof globalThis.fetch;
+  thinkingRecovery?: ReturnType<typeof createAnthropicThinkingRecovery>;
+  fetchForRequest?: (request: AdapterRequest, parsed: OcxParsedRequest, adapter: ProviderAdapter, recovery?: AttemptRecoveryKind) => typeof globalThis.fetch;
   /** Called before each routed-model dispatch in the loop, for attempt telemetry. Same-target 429 replays pass the `rate-limit-429` recovery kind. */
   onAttemptSend?: (recovery?: AttemptRecoveryKind) => void;
   /**
@@ -414,6 +416,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
   interface IterationResponse {
     response: Response;
     responseAdapter: ProviderAdapter;
+    recover?: (error: WebSearchAdapterEventError) => Promise<IterationResponse | undefined>;
   }
   type IterationSplit = ReturnType<typeof scanEventsForWebSearch> & {
     /**
@@ -429,6 +432,38 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
   // configured replay count in total (a per-round reset would multiply it by maxSearches).
   const rateLimitRetryPolicy = deps.retryOn429Policy ?? null;
   let rateLimitRetries = 0;
+
+  const requireSuccessfulHeaders = async (prepared: IterationResponse): Promise<void> => {
+    if (!prepared.response.ok) {
+      if (deps.thinkingRecovery && prepared.responseAdapter.name === "anthropic") {
+        const event = await deps.thinkingRecovery.projectHttpFailure(prepared.response, signal);
+        throw new LoopError(event.status ?? prepared.response.status, event.message, event);
+      }
+      let body: Awaited<ReturnType<typeof readBoundedResponseBody>>;
+      try {
+        body = await readBoundedResponseBody(prepared.response, { signal });
+      } catch {
+        // The response status is authoritative even when its untrusted error body fails while
+        // being read (including a synchronous getReader() failure). Never route that failure
+        // through the adapter formatter or the generic transport error, which could expose its
+        // raw message. A parent/client cancellation still owns the request lifecycle as 499.
+        if (signal.aborted) throw new LoopError(499, "client closed request during web-search");
+        throw new LoopError(prepared.response.status, `Provider error ${prepared.response.status}`);
+      }
+      let formatted = "";
+      if (body.displaySafe && !body.truncated && body.text.trim() && prepared.responseAdapter.formatErrorBody) {
+        try {
+          formatted = prepared.responseAdapter.formatErrorBody(
+            prepared.response.status,
+            prepared.response.headers,
+            body.text,
+          ).trim();
+        } catch { /* formatter hooks are best-effort; unsafe raw text is never the fallback */ }
+      }
+      const suffix = formatted ? `: ${formatted.slice(0, 400)}` : "";
+      throw new LoopError(prepared.response.status, `Provider error ${prepared.response.status}${suffix}`);
+    }
+  };
 
   // Acquire one iteration's final response headers. The first call is drained eagerly so an initial
   // connect/header/HTTP failure stays a non-2xx JSON response. Its successful BODY is deliberately
@@ -494,7 +529,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
           cachedRequest = request;
           cachedAdapter = requestAdapter;
         }
-        const requestFetch = headerDeadline.pacedFetch(deps.fetchForRequest?.(request, iterParsed, requestAdapter) ?? routedProviderFetch);
+        const requestFetch = headerDeadline.pacedFetch(deps.fetchForRequest?.(request, iterParsed, requestAdapter, recovery) ?? routedProviderFetch);
         let response: Response;
         try {
           if (requestAdapter.fetchResponse) {
@@ -540,6 +575,29 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         return { response, responseAdapter: requestAdapter };
       };
 
+      const recover = async (error: WebSearchAdapterEventError): Promise<IterationResponse | undefined> => {
+        if (signal.aborted || !error.replaySafe || isNonReplayableResponse(prepared.response)
+          || !deps.thinkingRecovery?.prepareEvent(error.event.message, prepared.responseAdapter.name, iterParsed)) return;
+        cachedRequest = undefined;
+        cachedAdapter = undefined;
+        // The successful headers ended the previous timer; the replacement owns a fresh deadline.
+        headerDeadline = pacingHeaderDeadline(connectTimeoutMs, signal);
+        try {
+          const replacement = await fetchOnce(prepared.responseAdapter, "opaque-blob-rejection");
+          headerDeadline.clear();
+          await requireSuccessfulHeaders(replacement);
+          return replacement;
+        } catch (error) {
+          if (signal.aborted) throw new LoopError(499, "client closed request during web-search");
+          if (headerDeadline.didExpire()) throw new LoopError(504,
+            `Provider response-header timeout after ${connectTimeoutMs}ms during web-search`);
+          if (error instanceof LoopError || error instanceof SendBudgetExhaustedError || isTranslatorBudgetExceededError(error)) throw error;
+          throw new LoopError(502, `Provider unreachable: ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          headerDeadline.clear();
+          deps.onIterationEnd?.();
+        }
+      };
       let prepared = await fetchOnce(adapter);
       // Same-target 429 wait-and-retry (opt-in `retryOn429`) BEFORE key rotation: a primary-key
       // rate-limit blip replays on the SAME key; rotation only runs after attempts exhaust.
@@ -609,36 +667,20 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         prepared = replacement;
       }
 
+      if (await deps.thinkingRecovery?.prepareHttp(prepared.response, prepared.responseAdapter.name, iterParsed)) {
+        try { void prepared.response.body?.cancel().catch(() => {}); } catch { /* closed */ }
+        cachedRequest = undefined;
+        cachedAdapter = undefined;
+        prepared = await fetchOnce(adapter, "opaque-blob-rejection");
+      }
+
+
       // Final headers have arrived. Clear only the deadline timer before ANY body read.
       headerDeadline.clear();
-      if (!prepared.response.ok) {
-        let body: Awaited<ReturnType<typeof readBoundedResponseBody>>;
-        try {
-          body = await readBoundedResponseBody(prepared.response, { signal });
-        } catch {
-          // The response status is authoritative even when its untrusted error body fails while
-          // being read (including a synchronous getReader() failure). Never route that failure
-          // through the adapter formatter or the generic transport error, which could expose its
-          // raw message. A parent/client cancellation still owns the request lifecycle as 499.
-          if (signal.aborted) throw new LoopError(499, "client closed request during web-search");
-          throw new LoopError(prepared.response.status, `Provider error ${prepared.response.status}`);
-        }
-        let formatted = "";
-        if (body.displaySafe && !body.truncated && body.text.trim() && prepared.responseAdapter.formatErrorBody) {
-          try {
-            formatted = prepared.responseAdapter.formatErrorBody(
-              prepared.response.status,
-              prepared.response.headers,
-              body.text,
-            ).trim();
-          } catch { /* formatter hooks are best-effort; unsafe raw text is never the fallback */ }
-        }
-        const suffix = formatted ? `: ${formatted.slice(0, 400)}` : "";
-        throw new LoopError(prepared.response.status, `Provider error ${prepared.response.status}${suffix}`);
-      }
-      return prepared;
+      await requireSuccessfulHeaders(prepared);
+      return { ...prepared, recover };
     } catch (error) {
-      if (isTranslatorBudgetExceededError(error)) throw error;
+      if (isTranslatorBudgetExceededError(error) || error instanceof SendBudgetExhaustedError) throw error;
       if (headerDeadline.didExpire()) {
         throw new LoopError(504, `Provider response-header timeout after ${connectTimeoutMs}ms during web-search`);
       }
@@ -681,6 +723,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         signal,
         inactivityTimeoutMs: routedModelStallTimeoutMs,
         translatorBudget,
+        preserveAdapterError: deps.thinkingRecovery !== undefined,
       })) {
         if (event.type === "heartbeat") yield event;
         // Kiro's explicit-completion protocol marks ordinary assistant text as commentary while
@@ -703,8 +746,17 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         }
       }
     } catch (error) {
-      if (isTranslatorBudgetExceededError(error)) throw error;
+      if (isTranslatorBudgetExceededError(error) || error instanceof SendBudgetExhaustedError) throw error;
       if (signal.aborted) throw new LoopError(499, "client closed request during web-search");
+      if (error instanceof WebSearchAdapterEventError) {
+        const replacement = await prepared.recover?.(error);
+        if (replacement) return yield* consumeIterationEvents(replacement);
+        const event = isNonReplayableResponse(prepared.response)
+          ? { ...error.event, message: "Provider stream error: upstream diagnostic withheld for a non-replayable failure", retryable: false as const }
+          : error.event;
+        throw new LoopError(event.status ?? 502, event.message, event);
+      }
+      if (error instanceof LoopError) throw error;
       if (error instanceof RoutedModelInactivityError) throw new LoopError(504, error.message);
       if (error instanceof WebSearchStreamProtocolError) throw new LoopError(502, error.message);
       throw new LoopError(502, `Provider stream error: ${error instanceof Error ? error.message : String(error)}`);
@@ -722,6 +774,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
       }
       throw new LoopError(502, terminal.message);
     }
+    deps.thinkingRecovery?.observeIteration(events);
     return { ...scanEventsForWebSearch(events), streamedPassthroughCount };
   };
 
@@ -867,7 +920,9 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
     firstPrepared = await prepareIterationDrained(false);
   } catch (e) {
     if (abortSignal) abortSignal.removeEventListener("abort", linkAbort);
-    if (e instanceof LoopError) return jsonError(e.status, e.message);
+    if (e instanceof LoopError) return jsonError(e.status, e.message, e.event);
+    if (e instanceof SendBudgetExhaustedError) return jsonError(429, e.message,
+      { type: "error", message: e.message, errorType: "rate_limit_error", code: e.code, retryable: false });
     throw e;
   }
 
@@ -982,7 +1037,12 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
               message: "upstream translation buffer exceeded the safe limit",
             };
           } else {
-            yield { type: "error", message: e instanceof LoopError ? e.message : (e instanceof Error ? e.message : String(e)) };
+            if (e instanceof SendBudgetExhaustedError) yield { type: "error", status: 429,
+              errorType: "rate_limit_error", code: e.code, message: e.message, retryable: false };
+            else yield e instanceof LoopError && e.event ? e.event
+              : e instanceof LoopError && deps.thinkingRecovery
+                ? { type: "error", status: e.status, errorType: "upstream_error", message: e.message }
+                : { type: "error", message: e instanceof Error ? e.message : String(e) };
           }
           return;
         }

@@ -1,3 +1,5 @@
+import { normalizeUpstreamErrorText, readDisplaySafeErrorText } from "./core-errors";
+import { sanitizeNonReplayableUpstreamError } from "./non-replayable-error";
 import { isLikelyRealAnthropicThinkingSignature } from "../../adapters/anthropic";
 import type { AdapterEvent, OcxParsedRequest } from "../../types";
 import { upstreamErrorMessageFromPayload } from "../../lib/errors";
@@ -33,27 +35,28 @@ export function createAnthropicThinkingRecovery(
   let failed = false;
   let remembered = false;
 
-  const prepare = (message: string, adapterName: string): boolean => {
+  const prepare = (message: string, adapterName: string, attempt = parsed): boolean => {
     if (signal.aborted || !canRetry() || adapterName !== "anthropic" || guard.attempted
-      || parsed._stripReasoningEncryptedContent === true || !carriesThinkingState(parsed)
+      || parsed._stripReasoningEncryptedContent === true || !carriesThinkingState(attempt)
       || !isAnthropicThinkingSignatureBindingRejectionMessage(message)) return false;
     guard.attempted = true;
     armed = true;
     const scope = parsed._reasoningReplayScope;
     rejectedScope = scope ? { ...scope, current: scope.current ? { ...scope.current } : undefined } : undefined;
     prepareOpaqueBlobRecovery(parsed);
+    if (attempt !== parsed) prepareOpaqueBlobRecovery(attempt);
     return true;
   };
 
-  const prepareHttp = async (response: Response, adapterName: string): Promise<boolean> => {
+  const prepareHttp = async (response: Response, adapterName: string, attempt = parsed): Promise<boolean> => {
     if (signal.aborted || !canRetry() || response.status !== 400 || isNonReplayableResponse(response)
       || adapterName !== "anthropic" || guard.attempted
-      || parsed._stripReasoningEncryptedContent === true || !carriesThinkingState(parsed)) return false;
+      || parsed._stripReasoningEncryptedContent === true || !carriesThinkingState(attempt)) return false;
     try {
       const body = await readBoundedResponseBody(response.clone(), { signal });
       if (!body.displaySafe || body.truncated) return false;
       const message = upstreamErrorMessageFromPayload(JSON.parse(body.text) as unknown);
-      return typeof message === "string" && prepare(message, adapterName);
+      return typeof message === "string" && prepare(message, adapterName, attempt);
     } catch {
       return false;
     }
@@ -112,5 +115,20 @@ export function createAnthropicThinkingRecovery(
     remembered = true;
     rememberReasoningReplayOpaqueBlobRejection(rejectedScope);
   };
-  return { prepareHttp, wrap, rememberSuccess };
+  // The search owner supplies only a fully validated current iteration, never search-card output.
+  const observeIteration = (events: readonly AdapterEvent[]): void => {
+    outputSeen = false;
+    completed = false;
+    for (const event of events) observe(event);
+  };
+  const projectHttpFailure = async (response: Response, abortSignal: AbortSignal): Promise<Extract<AdapterEvent, { type: "error" }>> => {
+    const nonReplayable = isNonReplayableResponse(response);
+    if (nonReplayable) response = await sanitizeNonReplayableUpstreamError(response, abortSignal);
+    const text = await readDisplaySafeErrorText(response, abortSignal, `Provider error ${response.status}`);
+    const error = normalizeUpstreamErrorText(text, `Provider error ${response.status}`);
+    return { type: "error", status: response.status, message: error.message ?? error.safeText,
+      errorType: error.type ?? "upstream_error", ...(error.code ? { code: error.code } : {}),
+      ...(nonReplayable ? { retryable: false } : {}) };
+  };
+  return { prepareHttp, prepareEvent: prepare, observeIteration, projectHttpFailure, wrap, rememberSuccess };
 }
