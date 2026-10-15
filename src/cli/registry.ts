@@ -9,6 +9,12 @@ export interface CliCommandEntry {
 
 export const CLI_COMMANDS: CliCommandEntry[] = [
   {
+    name: "message",
+    usage: "ocx message <sessions|send> [options]",
+    summary: "Discover loaded local Codex sessions and submit one queued peer message.",
+    details: ["Local Unix transport only; starts no daemon. queued is submission, not processing; never replay an unknown send."],
+  },
+  {
     name: "chatgpt",
     usage: "ocx chatgpt <launch|restore|status|install-watcher|uninstall-watcher>",
     summary: "Experimental ChatGPT app-server shim and TLS intercept (macOS only, default off).",
@@ -138,14 +144,15 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   },
   {
     name: "link",
-    usage: "ocx link <port|issue|status|revoke>",
+    usage: "ocx link <port|issue|status|revoke|reconnect>",
     summary: "Allocate and manage a loopback remote home link.",
     details: [
       "Port: ocx link port [--json]",
       "Issue: ocx link issue --alias <alias> --tunnel-port <port> [--json]",
       "Status: ocx link status [--json]",
       "Revoke: ocx link revoke --link-id <id> [--force --yes] [--json]",
-      "Issue, status, and revoke use the running proxy's loopback management API and admin token.",
+      "Reconnect: ocx link reconnect --link-id <id> [--json]",
+      "Issue, status, revoke, and reconnect use the running proxy's loopback management API and admin token.",
     ],
   },
   {
@@ -239,8 +246,8 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   },
   {
     name: "hub",
-    usage: "ocx hub invite [--json] [--data-url <origin>] [--management-url <origin>] [--clients codex,claude]",
-    summary: "Hub-side commands. `invite` prints a ready-to-run `ocx connect` line for one more machine.",
+    usage: "ocx hub invite [--json] [--data-url <origin>] [--management-url <origin>] [--clients codex,claude]\n  ocx hub disable [--revoke-clients --client-key <id> ...] [--json]",
+    summary: "Invite another machine, or disable hub mode in one validated config write.",
     details: [
       "Topology: a hub serves ONE port. Remote machines dial `hostname:port` with their own per-client",
       "key; the hub's own local processes dial `127.0.0.1:<same port>` with no credential, through the",
@@ -372,6 +379,18 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
     summary: "Alias of ocx models.",
   },
   {
+    name: "advisor",
+    usage: "ocx advisor <status|on|off|consent|set> ...",
+    summary: "Inspect and configure the advisor sidecar (expert consultation for routed workers).",
+    details: [
+      "ocx advisor and ocx advisor status read the resolved settings; use --json for machine-readable output.",
+      "ocx advisor on requires current context-sharing consent. Pass --ack-context-sharing to record consent v1 and enable. ocx advisor off disables the sidecar without granting consent.",
+      "ocx advisor consent records consent v1 after printing the disclosure. ocx advisor consent --revoke removes it and stops task-context transfer.",
+      "ocx advisor set updates --model, --effort, --policy and --timeout-ms; the model may be any routable model string (bare native, provider/model, or account-qualified). set does not grant consent.",
+      "policy manual consults only when the worker calls the synthetic advisor tool; policy preflight also attempts one automatic consultation per task with a stable conversation identity, once the task shows orientation evidence. Without a stable identity, each eligible request may trigger another consultation. Both require current consent before any task context is sent.",
+    ],
+  },
+  {
     name: "companion",
     usage: "ocx companion <show|set|reset|usage|timeline> ...",
     summary: "Inspect companion settings, filtered usage and timeline, or change preferences.",
@@ -462,13 +481,13 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
       "protocols [--provider <name>]   Contract version, API surfaces, protocol settings and feature vocabulary.",
       "explain --model <id> --inbound <responses|chat|messages> [--feature <key>]...   Preview the request path; sends nothing upstream.",
       "policy                          Read the protocol policy; with --messages, --unrepresentable or --rollout <switch>=<on|off> it changes config.",
-      "Every rollout switch defaults off. `ocx api policy` writes only when a setting flag is given.",
+      "Every rollout switch defaults off except antigravityDirect. `ocx api policy` writes only when a setting flag is given.",
     ],
   },
   {
     name: "export",
-    usage: "ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime|aside|raycast|omo|cline|kilo|droid> [--json] [--out <path>] [--force]",
-    summary: "Print a client config (OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, gjc, DeepSeek Harness, MiniMax Code, ZCode, Prime Agent, Aside, Raycast, omo, Cline, Kilo, Factory Droid) wired to the running proxy.",
+    usage: "ocx export --client <qoder|opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|commandcode|prime|aside|raycast|omo|cline|kilo|droid> [--json] [--out <path>] [--force]",
+    summary: "Print a client config (OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, gjc, DeepSeek Harness, MiniMax Code, ZCode, Command Code, Prime Agent, Aside, Raycast, omo, Cline, Kilo, Factory Droid, Qoder) wired to the running proxy.",
     details: [
       "--json prints the generated document as JSON on stdout; use --out for the client's native format.",
       "--out <path> writes the native config there and refuses to replace an existing file without --force.",
@@ -597,6 +616,22 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
       "ZCode reads its config at startup — restart ZCode after enable/disable.",
       "Select OpenCodex Proxy/<provider>/<model> from ZCode's model picker.",
     ],
+  },
+  {
+    name: "commandcode",
+    usage: "ocx commandcode [status|show|list|enable|disable|history|journal|restore --op <opId>] [--json]",
+    summary: "Connect Command Code CLI to the proxy via its managed provider.",
+    details: [
+      "Alias of ocx integration client <sub> --client commandcode.",
+      "enable manages the opencodex block under the existing provider or providers root in ~/.commandcode/providers.json; disable removes only that block.",
+      "Command Code reads providers on startup.",
+      "`restore --op <opId>` replays the exact previous managed block; take the id from `ocx commandcode history`.",
+    ],
+  },
+  {
+    name: "cmd",
+    usage: "ocx cmd [status|show|list|enable|disable|history|journal|restore --op <opId>] [--json]",
+    summary: "Alias of ocx commandcode.",
   },
   {
     name: "restart",

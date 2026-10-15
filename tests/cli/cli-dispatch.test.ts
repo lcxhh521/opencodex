@@ -87,6 +87,23 @@ describe("CLI dispatch aliases", () => {
 });
 
 describe("dispatchCommand exit codes", () => {
+  test("uninstall aliases reject arguments without calling teardown", async () => {
+    const error = spyOn(console, "error").mockImplementation(() => {});
+    let teardowns = 0;
+    try {
+      for (const command of ["uninstall", "remove"]) {
+        for (const trailing of [["--dry-run"], ["extra"], ["--token=synthetic-private-value"]]) {
+          const args = [command, ...trailing];
+          expect(await dispatchCommand({ kind: "command", command, args }, {
+            ...fakeDeps, args, command, handleUninstall: async () => { teardowns++; },
+          })).toBe(2);
+        }
+      }
+      expect(teardowns).toBe(0);
+      expect(JSON.stringify(error.mock.calls)).not.toContain("synthetic-private-value");
+    } finally { error.mockRestore(); }
+  });
+
   test("Aside sync refuses a marker-only configured-port listener before sending credentials", async () => {
     const { refreshAsideProfilesThroughServer } = await import("../../src/cli/aside-profiles");
     const requests: Array<{ input: string; headers: Headers }> = [];
@@ -165,7 +182,7 @@ describe("dispatchCommand exit codes", () => {
       expect(code).toBe(0);
       expect(order).toEqual(["catalog", "refresh"]);
       expect(refresh).toHaveBeenCalledTimes(1);
-      expect(refresh.mock.calls[0]![1]).toEqual(["mcode", "pi", "raycast", "omo", "cline", "droid", "opencode", "kilo"]);
+      expect(refresh.mock.calls[0]![1]).toEqual(["mcode", "pi", "raycast", "omo", "cline", "commandcode", "droid", "opencode", "kilo", "qoder"]);
     } finally {
       sync.mockRestore(); refresh.mockRestore(); aside.mockRestore(); log.mockRestore();
     }
@@ -507,7 +524,10 @@ describe("a busy preferred port never becomes a second proxy (#5004)", () => {
 
     // Both refusals preserve the exit code through the caller's lease-cleanup boundary.
     expect(fn).toMatch(/decision === "refuse-live-proxy"[\s\S]{0,400}?StartCommandExit\(1\)/);
-    expect(fn).toContain("Use 'ocx stop' first.");
+    // The refusal text moved into the guidance leaf so a Desktop-supervised holder gets Desktop
+    // guidance; the ordinary holder still hears "Use 'ocx stop' first." from the same function.
+    expect(fn).toMatch(/decision === "refuse-live-proxy"[\s\S]{0,200}?duplicateRuntimeMessage\(holder\?\.pid, preferred\)/);
+    expect(readFileSync(repoPath("src/cli/desktop-runtime-guidance.ts"), "utf8")).toContain("Use 'ocx stop' first.");
     expect(fn).toMatch(/decision === "refuse-unidentified-holder"[\s\S]{0,700}?StartCommandExit\(1\)/);
     // The wrapper receives an explicit stay-out signal for a served port.
     expect(fn).toMatch(/decision === "service-stay-out"[\s\S]{0,500}?StartCommandExit\(serviceStayOutExitCode\(\)\)/);
@@ -1215,7 +1235,7 @@ describe("login routes the Codex account names instead of printing the provider 
     for (const name of ["codex", "chatgpt", "openai", "CODEX", " codex "]) {
       const result = await runLogin([name]);
       expect(result.code, `${name} must route to the account login`).toBe(1);
-      expect(result.err).toContain("Management API is unavailable");
+      expect(result.err).toContain("Proxy is not running. Start the intended proxy with: ocx start. No request was sent.");
       expect(result.err).not.toContain("Usage: ocx login <provider>");
     }
   });
@@ -1315,4 +1335,32 @@ describe("login routes the Codex account names instead of printing the provider 
     expect(details).toContain("ocx login codex");
     expect(details).toContain("openai-apikey");
   });
+});
+
+
+describe("CLI usage recovery contracts", () => {
+  test.each([["--wat"], ["--wat", "--json"], ["--json", "--json"], ["extra"]].map(args => [args]))(
+    "health rejects %j before liveness discovery", async healthArgs => {
+      const err = spyOn(console, "error").mockImplementation(() => {});
+      const out = spyOn(console, "log").mockImplementation(() => {});
+      let probes = 0;
+      const args = ["health", ...healthArgs];
+      const deps = { ...fakeDeps, args, findLiveProxy: async () => { probes++; return null; } } as CliDispatchDeps;
+      try {
+        expect(await dispatchCommand({ kind: "command", command: "health", args }, deps)).toBe(2);
+        expect(probes).toBe(0);
+        expect(out.mock.calls).toEqual([]);
+        expect(err.mock.calls.flat().join(" ")).toBe("Usage: ocx health [--json]\nSee: ocx help health");
+      } finally { err.mockRestore(); out.mockRestore(); }
+    },
+  );
+  test.each([["integration"], ["integration", "unknown"]].map(args => [args]))(
+    "integration %j names all families and the help command", async args => {
+      const err = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        expect(await dispatchCommand({ kind: "command", command: "integration", args }, { ...fakeDeps, args })).toBe(2);
+        expect(err.mock.calls.flat().join(" ")).toBe("Usage: ocx integration <claude|grok|client|native> <subcommand>\nSee: ocx help integration");
+      } finally { err.mockRestore(); }
+    },
+  );
 });

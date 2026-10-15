@@ -23,8 +23,10 @@ export const FILE_INTEGRATION_CLIENTS = [
   "raycast",
   "omo",
   "cline",
+  "commandcode",
   "kilo",
   "droid",
+  "qoder",
 ] as const;
 
 export const INTEGRATION_REFUSAL_REASONS: ReadonlySet<string> = new Set<IntegrationRefusalReason>([
@@ -64,6 +66,7 @@ const PLAN_SCHEMA_PATHS = new Set([
   "settings.providers.opencodex",
   "catalog.providers.opencodex",
   "customModels.*",
+  "modelConfigs.customModels.*",
   // ZCode reads its providers from a second file; a plan for it publishes that
   // file's templates, and a path missing here is rejected as an invalid preview.
   "config.providerConfigRules.providerRules.[providerId=opencodex]",

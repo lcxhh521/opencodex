@@ -18,7 +18,7 @@ import { shouldInjectApiAuthHeader } from "../codex/inject";
 import { detachedConfigSnapshot } from "../config/admitted-identity";
 import { copyPlainData } from "../lib/plain-data";
 import type { OcxConfig } from "../types";
-import { defaultIntegrationIO, loadTarget, parseConfig, type IntegrationIO } from "./config-io";
+import { IntegrationWriteSizeError, PARSE_FAILED, defaultIntegrationIO, loadTarget, parseConfig, type IntegrationIO } from "./config-io";
 import { inspectKiloCandidates } from "./kilo-candidates";
 import {
   fingerprint,
@@ -39,6 +39,7 @@ import {
   assertDroidPathsUnambiguous,
   isLoopbackOnly,
   resolveIntegrationPaths,
+  type ResolvedIntegrationPaths,
   restoreOwnershipCollision,
   type IntegrationClientId,
 } from "./registry";
@@ -161,6 +162,15 @@ function commit(args: CommitArgs): WriteOutcome {
     }
   } catch (error) {
     if (transactionStarted) return compensate(args, error, "could not write both Cline files");
+    if (error instanceof IntegrationWriteSizeError && args.snapshotPath) {
+      try {
+        args.store.discardUncommittedSnapshot(clientId, args.entry.opId);
+      } catch (cleanupError) {
+        return refuse(clientId, "write_failed", args.state,
+          `${messageOf(error)}; could not remove the unused backup: ${messageOf(cleanupError)}`, args.snapshotPath);
+      }
+      return refuse(clientId, "write_failed", args.state, messageOf(error));
+    }
     return refuse(clientId, "write_failed", args.state, messageOf(error), args.snapshotPath);
   }
   try {
@@ -643,8 +653,15 @@ export function restoreIntegration(input: IntegrationRestoreInput): WriteOutcome
   if (entry.clientId !== input.clientId) throw new Error("restore input names a different client than the operation");
 
   const clientId = entry.clientId;
-  const resolvedPath = input.resolvedPaths?.configPath
-    ?? INTEGRATION_CLIENTS[clientId].configPath(input.env, input.home);
+  let resolvedPath: string;
+  try {
+    resolvedPath = clientId === "zcode" || !input.resolvedPaths
+      ? resolveIntegrationPaths(clientId, input.env, input.home, undefined, io).configPath
+      : input.resolvedPaths.configPath;
+  } catch (error) {
+    if (!(error instanceof ClientPathError)) throw error;
+    return refuse(clientId, "unsafe", "unsafe", error.message);
+  }
   const configPath = entry.configPath;
   /*
    * Restore acts on the path the operation was journaled against. Resolving a
@@ -655,7 +672,7 @@ export function restoreIntegration(input: IntegrationRestoreInput): WriteOutcome
    * shape those bytes are in, which is what the state below is measured against.
    */
   const rowTarget = declaredIntegrationTarget({
-    clientId, configPath, resolvedConfigPath: resolvedPath, env: input.env, home: input.home,
+    clientId, configPath, resolvedConfigPath: resolvedPath, env: input.env, home: input.home, io,
   });
   if (rowTarget === null) {
     return refuse(clientId, "conflict", "conflict",
@@ -727,9 +744,15 @@ export function restoreIntegration(input: IntegrationRestoreInput): WriteOutcome
   // exact bytes when the snapshot was taken. Re-deriving it from the file would
   // mean guessing which entries are ours, and a wrong guess deletes a user's.
   const restoredRecord = entry.priorRecord;
+  let restoredDocument = clientId === "droid" && restoredText !== null ? parseConfig(restoredText, "json") : undefined;
+  if (clientId === "commandcode" && restoredText !== null) {
+    const parsed = parseConfig(restoredText, "json");
+    // Restoring raw snapshot bytes must remain possible even when they are not parseable.
+    restoredDocument = parsed === PARSE_FAILED ? undefined : parsed;
+  }
   const fresh = buildIntegrationContribution(
     { ...input, droidReasoningDefaults: undefined }, rowTarget,
-    clientId === "droid" && restoredText !== null ? parseConfig(restoredText, "json") : undefined,
+    restoredDocument,
     restoredRecord,
   );
   /*
@@ -795,6 +818,11 @@ export interface CoordinatedIntegrationOptions {
    * non-null result refuses without writing anything.
    */
   revalidate?: (frozen: IntegrationWriteInput) => Promise<WriteOutcome | null>;
+  /**
+   * Synchronous last word, evaluated with no await between it and the transaction (after
+   * `revalidate` and any lock acquisition). A non-null result refuses without writing.
+   */
+  guard?: (frozen: IntegrationWriteInput) => WriteOutcome | null;
 }
 
 /** Freeze all mutable resolution seams before the first lock await. */
@@ -803,7 +831,7 @@ type FrozenIntegrationInput = IntegrationWriteInput & {
   io: IntegrationIO;
   env: NodeJS.ProcessEnv;
   home: string;
-  resolvedPaths: { configPath: string; detectDir: string };
+  resolvedPaths: ResolvedIntegrationPaths;
 };
 
 /**
@@ -843,7 +871,7 @@ function freezeIntegrationInput(input: IntegrationWriteInput): FrozenIntegration
    */
   const resolvedPaths = input.resolvedPaths
     ? { ...input.resolvedPaths }
-    : resolveIntegrationPaths(input.clientId, env, home, exportContextOf({ ...input, config, models: models.value }));
+    : resolveIntegrationPaths(input.clientId, env, home, exportContextOf({ ...input, config, models: models.value }), io);
   /*
    * The configuration and the roster are seams like the others, and they were the two still held
    * by reference. A coordinated write plans from this input, awaits the writer lock and a
@@ -888,7 +916,7 @@ function storeLockFile(frozen: FrozenIntegrationInput): string | null {
   if (!declared?.lockFile) return null;
   let storePath: string;
   try {
-    storePath = declared.path(frozen.env, frozen.home);
+    storePath = declared.path(frozen.env, frozen.home, frozen.io);
   } catch (error) {
     if (error instanceof ClientPathError) return null;
     throw error;
@@ -936,21 +964,22 @@ async function coordinatedWrite(
   if (!prepared.ok) return prepared.refusal;
   const frozen = prepared.value;
   const spec = INTEGRATION_CLIENTS[frozen.clientId];
+  const guarded = (bound: IntegrationWriteInput) => options?.guard?.(bound) ?? operation(bound);
   if (!spec.writerLock) {
     const refused = await options?.revalidate?.(frozen);
-    return refused ?? operation(frozen);
+    return refused ?? guarded(frozen);
   }
 
   // An absent client home is not created merely to acquire a sibling lock.
   if (frozen.io.statKind(frozen.resolvedPaths.detectDir) !== "dir") {
     const refused = await options?.revalidate?.(frozen);
     if (refused) return refused;
-    if (frozen.io.statKind(frozen.resolvedPaths.detectDir) !== "dir") return operation(frozen);
+    if (frozen.io.statKind(frozen.resolvedPaths.detectDir) !== "dir") return guarded(frozen);
   }
   return withClientLocks(
     frozen,
     spec.writerLock.suffix,
-    () => operation(frozen),
+    () => guarded(frozen),
     options,
   );
 }

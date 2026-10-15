@@ -12,10 +12,13 @@ import { homedir } from "node:os";
 import { assertDroidSettingsUnambiguous } from "./droid-settings";
 import { readPath } from "./merge";
 import type { OwnershipRecord } from "./ownership";
+import type { IntegrationIO } from "./config-io";
 import { dirname, join } from "node:path";
 import {
   ClientPathError,
   buildDroidContribution,
+  qoderConfigPath,
+  qoderHomeDir,
   clineConfigPath,
   clineSettingsDir,
   droidConfigPath,
@@ -49,6 +52,8 @@ import {
   raycastConfigPath,
   zcodeConfigPath,
   zcodeHomeDir,
+  zcodeLegacyHomeDir,
+  ZcodeSettingsPathError,
   zcodeProviderStorePath,
   buildZcodeStoreContribution,
   zcodeStoreSchemaEstablished,
@@ -58,6 +63,8 @@ import {
   DSH_PROFILE_PROVIDER_PATH,
   type BuildContribution,
   type ConfigFormat,
+  commandCodeConfigPath,
+  commandCodeHomeDir,
   kiloConfigPath,
   kiloHomeDir,
   kiloCandidatePath,
@@ -73,12 +80,21 @@ import {
  */
 export type IntegrationClientId = ExportClientId;
 
+export interface ResolvedIntegrationPaths {
+  configPath: string;
+  detectDir: string;
+  /** Snapshot of a mutable store resolution from the same bootstrap read. */
+  storePath?: string;
+  /** The default config path is only a recovery hint when the active root is unknown. */
+  pathError?: string;
+}
+
 export interface IntegrationClientSpec {
   id: IntegrationClientId;
   /** The client's config file, honoring that client's own environment override. */
-  configPath: (env?: NodeJS.ProcessEnv, home?: string) => string;
+  configPath: (env?: NodeJS.ProcessEnv, home?: string, io?: Pick<IntegrationIO, "readText">) => string;
   /** Directory whose existence is the cheap "is it installed?" signal. */
-  detectDir: (env?: NodeJS.ProcessEnv, home?: string) => string;
+  detectDir: (env?: NodeJS.ProcessEnv, home?: string, io?: Pick<IntegrationIO, "readText">) => string;
   /**
    * The provider store this client reads INSTEAD of `configPath`.
    *
@@ -96,7 +112,7 @@ export interface IntegrationClientSpec {
    * client, never merged into on a guess.
    */
   currentStore?: {
-    path: (env?: NodeJS.ProcessEnv, home?: string) => string;
+    path: (env?: NodeJS.ProcessEnv, home?: string, io?: Pick<IntegrationIO, "readText">) => string;
     format: ConfigFormat;
     establishes: (parsed: unknown) => boolean;
     buildContribution: BuildContribution;
@@ -137,7 +153,7 @@ export interface IntegrationClientSpec {
    * Droid uses the same seam to check competing settings against the export
    * context before status, preview, or mutation proceeds.
    */
-  resolvePaths?: (env?: NodeJS.ProcessEnv, home?: string, exportContext?: ExportContext) => { configPath: string; detectDir: string };
+  resolvePaths?: (env?: NodeJS.ProcessEnv, home?: string, exportContext?: ExportContext, io?: Pick<IntegrationIO, "readText">) => ResolvedIntegrationPaths;
   /**
    * Where the client's config WOULD live, for a client whose real path cannot
    * be resolved yet.
@@ -181,10 +197,11 @@ export function resolveIntegrationPaths(
   env: NodeJS.ProcessEnv = process.env,
   home: string = homedir(),
   exportContext?: ExportContext,
-): { configPath: string; detectDir: string } {
+  io?: Pick<IntegrationIO, "readText">,
+): ResolvedIntegrationPaths {
   const spec = INTEGRATION_CLIENTS[clientId];
-  if (spec.resolvePaths) return spec.resolvePaths(env, home, exportContext);
-  return { configPath: spec.configPath(env, home), detectDir: spec.detectDir(env, home) };
+  if (spec.resolvePaths) return spec.resolvePaths(env, home, exportContext, io);
+  return { configPath: spec.configPath(env, home, io), detectDir: spec.detectDir(env, home, io) };
 }
 
 export function assertDroidPathsUnambiguous(root: string, exportContext?: ExportContext): void {
@@ -265,6 +282,11 @@ function xdgConfigHome(env: NodeJS.ProcessEnv, home: string): string {
 }
 
 export const INTEGRATION_CLIENTS: Record<IntegrationClientId, IntegrationClientSpec> = {
+  qoder: {
+    id: "qoder",
+    configPath: qoderConfigPath,
+    detectDir: (env = process.env, home = homedir()) => qoderHomeDir(env, home),
+  },
   opencode: {
     id: "opencode",
     // These take `home` explicitly. The export registry's `destination` reads
@@ -355,19 +377,41 @@ export const INTEGRATION_CLIENTS: Record<IntegrationClientId, IntegrationClientS
   },
   zcode: {
     id: "zcode",
-    configPath: (env = process.env, home = homedir()) => zcodeConfigPath(env, home),
-    detectDir: (env = process.env, home = homedir()) => zcodeHomeDir(env, home),
+    configPath: (env = process.env, home = homedir(), io) => zcodeConfigPath(env, home, io),
+    detectDir: (env = process.env, home = homedir(), io) => zcodeHomeDir(env, home, io),
+    resolvePaths: (env = process.env, home = homedir(), _context, io) => {
+      let root: string;
+      let pathError: string | undefined;
+      try { root = zcodeHomeDir(env, home, io); }
+      catch (error) {
+        if (!(error instanceof ZcodeSettingsPathError)) throw error;
+        root = zcodeLegacyHomeDir(env, home);
+        pathError = error.message;
+      }
+      // Passing the resolved root prevents a second bootstrap read. An explicit
+      // provider-file override outranks both the setting and ZCODE_DATA_DIR.
+      const storePath = zcodeProviderStorePath({ ...env, ZCODE_DATA_DIR: root }, home, io);
+      return { configPath: join(root, "v2", "config.json"), detectDir: root, storePath, ...(pathError ? { pathError } : {}) };
+    },
+    bindsDriftedRecord: (path, env = process.env, home = homedir()) =>
+      path === join(zcodeLegacyHomeDir(env, home), "v2", "config.json"),
     /*
      * ZCode 3.14 reads its providers from `v2/provider_config.json` and reaches
      * `v2/config.json` only through the import that seeded it. Where the new
      * file exists the import is spent, so our write is read by nobody (#5348).
      */
     currentStore: {
-      path: (env = process.env, home = homedir()) => zcodeProviderStorePath(env, home),
+      path: (env = process.env, home = homedir(), io) => zcodeProviderStorePath(env, home, io),
       format: "json",
       establishes: zcodeStoreSchemaEstablished,
       buildContribution: buildZcodeStoreContribution,
     },
+  },
+  commandcode: {
+    id: "commandcode",
+    configPath: (env = process.env, home = homedir()) => commandCodeConfigPath(env, home),
+    detectDir: (env = process.env, home = homedir()) => commandCodeHomeDir(env, home),
+    writerLock: { suffix: ".lock" },
   },
   prime: {
     id: "prime",
@@ -488,7 +532,7 @@ export function boundIntegrationConfigPath(input: {
   if (
     record && record.clientId === input.clientId &&
     record.configPath !== input.resolvedPath &&
-    input.statKind(record.configPath) === "file" &&
+    (input.clientId === "zcode" ? input.statKind(record.configPath) !== "missing" : input.statKind(record.configPath) === "file") &&
     INTEGRATION_CLIENTS[input.clientId].bindsDriftedRecord?.(record.configPath, input.env, input.home) === true
   ) {
     return record.configPath;
@@ -521,6 +565,11 @@ export function restoreOwnershipCollision(input: {
 }): string | null {
   const currentPath = input.currentPath;
   if (currentPath === null || currentPath === input.journaledPath) return null;
+  // A relocated ZCode store must not lose its single record to an older
+  // legacy undo, even when both journaled locations are legal for this home.
+  if (input.clientId === "zcode") {
+    return `that operation was recorded for ${input.journaledPath}, but ${currentPath} currently owns this integration`;
+  }
   const binds = INTEGRATION_CLIENTS[input.clientId].bindsDriftedRecord;
   if (!binds) return null;
   if (binds(input.journaledPath, input.env, input.home) !== true) return null;

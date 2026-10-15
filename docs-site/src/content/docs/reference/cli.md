@@ -81,6 +81,14 @@ fallback, capability JSON, and provider-specific error handling retain their exi
 
 ## Command families
 
+### `ocx message`
+
+`ocx message sessions [--json]` discovers loaded local Codex sessions.
+`ocx message send (--thread <uuid> | --name <exact-name>) --stdin [--json]`
+submits one correlated peer message, without starting a daemon or resuming a thread.
+See [Local Codex Messaging](/reference/cli/messaging/) for sender context, kinds,
+the tested runtime and `not_sent`/`queued`/`unknown` receipts. No remote transport is included.
+
 ### `ocx provider`
 
 `ocx provider`, `ocx help provider`, `ocx provider help`, `ocx provider --help`, and
@@ -194,7 +202,7 @@ CPU-heavy proxy can itself delay NORMAL-priority applications. The change is bes
 
 Successful commands exit 0. Invalid usage, unknown commands or resources, failed API operations,
 and unavailable required services exit nonzero. `ocx health` specifically exits 0 only when the
-proxy is healthy and 1 otherwise, so it can be used as a service probe. Scripts should test the exit
+proxy is healthy and 1 when no healthy proxy is found; invalid arguments exit 2, so it can be used as a service probe. Scripts should test the exit
 code instead of scraping human-readable output.
 
 Many management commands share these mappings; other CLI families retain their own exit contracts:
@@ -245,6 +253,8 @@ latter need a live target. Before live operations, run `ocx ready --json` and
 `ocx status --json`, inspect the target and `versionSkew.relation`, and resolve
 version mismatch. `unknown` does not confirm matching builds. Offline help,
 local configuration and local Lab inspection do not require startup.
+
+`ocx status --json` includes `cliCommand`: configured Desktop intent, the expected executable, observed PATH candidates, `pathFirst`, `desktopFirstOnPath`, issue codes, and `shellResolution: "unobserved"`. The human status report prints one command-selection line. `ocx doctor` adds an “ocx command selection” section: invalid, unsafe (`record-unsafe`) or enabled-pending records and missing/unusable Desktop targets fail the check, while disabled cleanup-pending records, PATH ordering conflicts and incomplete scans warn. `OCX_NO_DESKTOP_HANDOFF=1` suppresses package-launcher handoff for one invocation; it leaves the Desktop shim and PATH configuration in place. These read-only observations do not execute candidates, resolve parent-shell aliases/functions, or identify the proxy’s runtime owner. On Windows, package-launcher handoff is disabled; user `Path` order selects the Desktop `ocx.exe`. Status and doctor still read the record and report the first PATH candidate. A possible cmd current-directory candidate is reported separately from PATH order.
 
 Output flags are per command. `doctor` rejects `--json` with exit 2;
 [`v2` (family reference)](/reference/cli/agents/)
@@ -302,3 +312,21 @@ Integer options such as `--limit` require decimal whole numbers within JavaScrip
 ## Default alias listing
 
 `ocx alias --json` is equivalent to `ocx alias list --json`. The output flag can precede or follow an explicit alias action.
+
+## Local config output and validation
+
+`ocx config validate [path|-] [--json]` exits 1 when validation fails. JSON mode emits one `{ok:false,error}` payload; human mode names the validation failure.
+
+When saved config is invalid or unreadable, `ocx config`, `ocx config show`, and `ocx config get` warn on stderr that defaults are being shown for invalid settings and exit nonzero. Stdout retains its existing format. Run `ocx config validate` to inspect the error, or `ocx config show --source` for the config and source diagnostics. The explicit `--source` inspection exits 0 when it successfully reports a fallback and still emits the warning.
+
+`ocx config export <file> --json` writes the raw config to the file and emits only `{ok:true,path}` on stdout. Export to `-` always emits the raw config document, including credentials; keep it out of agent transcripts.
+
+Local `ocx provider add` validates the full candidate config before saving. A validation failure leaves the saved file unchanged. Intentionally local providers require `--allow-private-network` unless their registry entry already permits private destinations. The flag does not permit blocked metadata endpoints.
+
+`ocx health` accepts only one optional `--json` flag. Unknown arguments or repeated flags return exit 2 before probing. Alias usage errors also return exit 2 with a readable error; unknown actions name `ocx help alias`.
+
+### Log model selectors
+
+`ocx logs --model` accepts either a bare model ID or the full `provider/model` label printed in human rows, including models whose bare IDs contain slashes. Failover attempts are matched as complete destinations. Filtering occurs before `--limit`, and `--follow` uses the same server filter. An empty filtered human result says no log entry matched; `--json` and `--jsonl` keep their machine-readable output.
+
+`ocx hub disable [--revoke-clients --client-key <id> ...] [--json]` returns a hub to standalone in one validated config write. Client key revocation requires explicit IDs because key names do not prove origin. See [Return a hub to standalone](/guides/remote-hub/#return-a-hub-to-standalone).

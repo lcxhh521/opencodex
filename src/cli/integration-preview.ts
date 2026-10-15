@@ -1,5 +1,6 @@
 /** Preview and explicitly bound mutations use the existing management authority. */
 import type { IntegrationMutationPlan, IntegrationPlanOperation } from "../integrations/mutation-plan";
+import type { IntegrationClientId } from "../integrations/registry";
 import { redactSecretString, redactUserPath } from "../lib/redact";
 import {
   CliUsageError, RuntimeApiError, printData, runtimeRequest, terminalSafeText,
@@ -163,8 +164,12 @@ function reportError(error: unknown): number {
     const body = record(error.body) ? error.body : {};
     const stale = body.code === "integration_preview_stale";
     const unavailable = body.code === "integration_preview_unavailable";
+    // Local discovery found no proxy: nothing was sent, so name the start command instead of
+    // the generic management-host guidance. Server 503s always carry a body; this one has none.
+    const stopped = error.status === 503 && error.body === null && error.message.startsWith("Proxy is not running");
     console.error(stale ? "Error: Integration preview is stale. Run the explicit preview again and review its changes before retrying."
       : unavailable ? "Error: Integration preview is unavailable. Load the model catalog, then run the preview again."
+      : stopped ? "Error: Proxy is not running. Start the intended proxy with: ocx start. No request was sent."
       : error.status === 404 ? "Error: Integration operation or profile was not found. Inspect integration history and the selected profile."
       : error.status === 409 ? "Error: Integration change was refused. Inspect integration status and preview before retrying."
       : error.status === 503 ? "Error: Management API is unavailable. Check the proxy and run this command on its management host."
@@ -182,9 +187,15 @@ function reportError(error: unknown): number {
   return 1;
 }
 
-export async function handleIntegrationPreviewCommand(argv: string[], deps: RuntimeApiDeps = {}): Promise<number> {
+export async function handleIntegrationPreviewCommand(argv: string[], deps: RuntimeApiDeps = {}, expectedClientId?: IntegrationClientId): Promise<number> {
   try {
     const intent = parseIntent(argv);
+    if (expectedClientId !== undefined && intent.operation === "restore") {
+      if (intent.client !== undefined || intent.profile !== undefined) throw new CliUsageError("client-specific restore does not accept --client or --profile", USAGE);
+      intent.client = expectedClientId;
+      intent.path = `${clientIntegrationPath(expectedClientId)}/restore${intent.preview ? "/preview" : ""}`;
+      intent.body.expectedClientId = expectedClientId;
+    }
     const result = await runtimeRequest(intent.path, {
       method: intent.preview || intent.operation === "restore" ? "POST" : "PUT",
       redirect: "error", body: JSON.stringify(intent.body),

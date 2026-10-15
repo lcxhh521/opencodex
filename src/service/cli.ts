@@ -26,6 +26,9 @@ import type { WindowsSchedulerTaskProbe } from "./windows-scheduler";
 import { win32 } from "node:path";
 import { serviceDiagnosticsSummary } from "./diagnostics";
 import { runServiceClaim } from "./claim";
+import { createSupervisionLatch, desktopServiceCommandRefusal } from "./desktop-command-guard";
+import { linuxServiceBootHint } from "./linux-linger";
+import { diagnoseDesktopStartup, desktopLoginStatusSummary } from "./desktop-startup";
 
 /**
  * `restart` is NO LONGER folded into `repair`.
@@ -214,6 +217,7 @@ export function removeServiceTokenAfterUninstall(
 /** Execute a service verb while preserving client-owned credentials during uninstall. */
 export async function serviceCommand(...args: (string | undefined)[]): Promise<void> {
   const filteredArgs = args.filter((a): a is string => Boolean(a));
+  const supervisionLatch = createSupervisionLatch();
   const execute = async (): Promise<void> => {
     // `claim` is not an install verb: it is deliberately outside planServiceCommand (whose
     // backend/installation checks do not apply to an ownership write) and outside
@@ -231,6 +235,12 @@ export async function serviceCommand(...args: (string | undefined)[]): Promise<v
       process.exit(1);
     }
     const { parsed, command } = plan;
+    const refusal = desktopServiceCommandRefusal(command, undefined, supervisionLatch);
+    if (refusal) {
+      console.error(refusal);
+      process.exitCode = 1;
+      return;
+    }
   if (command === "repair" || command === "restart") {
     const verb: ServiceRepairVerb = command === "restart" ? "restart" : "repair";
     assertServiceEnvironmentMatchesInstall();
@@ -249,7 +259,7 @@ export async function serviceCommand(...args: (string | undefined)[]): Promise<v
     // existing registration had been restarted, not repaired (#4914).
     let repairError: unknown;
     try {
-      await repairService({ verb });
+      await repairService({ verb, supervisionLatch });
     } catch (error) {
       repairError = error;
       process.exitCode = 1;
@@ -295,12 +305,12 @@ export async function serviceCommand(...args: (string | undefined)[]): Promise<v
             throw new Error(`Task Scheduler state could not be verified before install: ${scheduler.detail}`);
           }
           if (scheduler.status === "absent") {
-            await installFreshWindowsSchedulerSafely();
+            await installFreshWindowsSchedulerSafely({ supervisionLatch });
           } else {
-            await installServiceSafely(backend, ops.install);
+            await installServiceSafely(backend, ops.install, { supervisionLatch });
           }
         } else {
-          await installServiceSafely(backend, ops.install);
+          await installServiceSafely(backend, ops.install, { supervisionLatch });
         }
       } catch (error) {
         console.error(`❌ Service install cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -328,7 +338,7 @@ export async function serviceCommand(...args: (string | undefined)[]): Promise<v
       // and the baked one cannot have diverged yet — unlike `start`, which reads the
       // installed artifact instead.
       await reportServiceServing("installed", { port: resolveServiceListenPort() });
-      if (process.platform === "linux") console.log("   For auto-start on boot: loginctl enable-linger $USER");
+      if (process.platform === "linux") console.log(linuxServiceBootHint());
       // Service users never reach the `ocx start` prompt: the proxy they run is the
       // supervised child, which always carries OCX_SERVICE=1. This command, though, is
       // hand-typed in a real terminal, so it is the one interactive moment they get.
@@ -425,6 +435,8 @@ export async function serviceCommand(...args: (string | undefined)[]): Promise<v
       const lease = ownershipMutationLeaseStatusLine(serviceStatePaths());
       if (lease) console.log(lease);
       console.log(`Diagnostics: ${serviceDiagnosticsSummary()}`);
+      const desktop = diagnoseDesktopStartup();
+      if (desktop) console.log(desktopLoginStatusSummary(desktop));
       break;
     }
     case "uninstall":
@@ -474,6 +486,14 @@ export async function serviceCommand(...args: (string | undefined)[]): Promise<v
   };
 
   const preliminary = parseServiceArgs(filteredArgs);
+  if (preliminary.invalid.length === 0) {
+    const refusal = desktopServiceCommandRefusal(preliminary.sub, undefined, supervisionLatch);
+    if (refusal) {
+      console.error(refusal);
+      process.exitCode = 1;
+      return;
+    }
+  }
   const windowsMutation = process.platform === "win32"
     && preliminary.invalid.length === 0
     && preliminary.sub !== "status";

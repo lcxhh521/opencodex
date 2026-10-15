@@ -3,7 +3,7 @@
 The experimental macOS integration is owned by `src/chatgpt/` and exposed through
 `src/cli/chatgpt-command.ts`. It is default off; an explicit launch requires
 `chatgptDesktop.appServerShim === true` or `chatgptDesktop.unblockSend === true`, and only the
-shim launcher requires `appServerShim`. The strict config leaf accepts optional boolean `appServerShim` and `unblockSend`
+shim launcher requires `appServerShim`. The strict config leaf accepts optional boolean `appServerShim`, `unblockSend` and `pacFallback`
 flags and an optional integer `port` in 1..65535; malformed reads disable the leaf, while live
 writes reject malformed values and unknown fields.
 
@@ -62,7 +62,12 @@ app-server binary. It relaunches without that override and removes the launcher 
 `com.openai.codex` bundle is found it removes the launcher, relaunches nothing and
 exits 1. Status reports
 the experimental flag, launcher presence, and the verified bundle process's override
-without printing its environment. Other platforms reject the public operations.
+without printing its environment. Discovery exceptions and failed process inspection
+are unknown rather than evidence of an absent app. Launch preflights process inspection
+before writing the launcher; both operations refuse to open when exit cannot be confirmed.
+Restore keeps the launcher on those failures. A later probe may fail after launch has
+atomically updated it; this is not a transaction spanning the launcher and app restart.
+Other platforms reject the public operations.
 
 The launcher and its executable paths are local code-execution inputs. The shim alone
 installs no network listener, CA or background watcher and starts no proxy timer.

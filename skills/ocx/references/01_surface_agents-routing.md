@@ -8,7 +8,7 @@
 Use these declarations to choose a task, then check its flags and authority before execution.
 Non-mutating probes may still contact providers, consume quota or refresh caches.
 
-Declared capabilities: 48.
+Declared capabilities: 51.
 
 ### `ocx agent subagents force`
 
@@ -53,7 +53,7 @@ JSON mode: `payload`.
 
 ### `ocx agent roles`
 
-Usage: `ocx agent roles [status] [--json]; ocx agent roles set <role> <model> [--json]; ocx agent roles suggest [--model <id>] [--apply] [--json]`
+Usage: `ocx agent roles [status] [--json]; ocx agent roles set <role> <model> [--effort <level>] [--json]; ocx agent roles suggest [--model <id>] [--apply] [--json]`
 
 omo (Codex / LazyCodex): show each Codex agent role's model pin, set one role's model in its TOML and in omo.jsonc, or suggest a model for every role.
 
@@ -68,6 +68,7 @@ State-changing: yes.
 | Flag | Value | Meaning |
 |---|---|---|
 | `--json` | boolean | Emit the role list, the write result or the proposals as JSON. |
+| `--effort` | string | set: also write the role's reasoning effort. |
 | `--model` | string | suggest: size the roles with this model instead of the Codex default model. |
 | `--apply` | boolean | suggest: write every proposal through the role model write. |
 
@@ -75,8 +76,8 @@ JSON mode: `payload`.
 
 - A bare invocation reads and never writes.
 - Requires Codex-based omo (LazyCodex): the omo@sisyphuslabs Codex plugin enabled in config.toml and installed; otherwise status lists no roles, and set and suggest are refused.
-- set rewrites only the root model value of $CODEX_HOME/agents/<role>.toml; omo.jsonc is skipped when absent or when it contains comments.
-- suggest sizes every role with one model call and prints proposals without writing; --apply writes each proposed model, and its effort when the role file already sets model_reasoning_effort.
+- set rewrites only the root model value of $CODEX_HOME/agents/<role>.toml, plus model_reasoning_effort with --effort; omo.jsonc gets the same model and, when LazyCodex has that level, the effort as reasoning; it is skipped when absent or when it contains comments.
+- suggest sizes every role with one model call and prints proposals without writing; --apply writes each proposed model and effort.
 
 ### `ocx agent injection`
 
@@ -153,6 +154,67 @@ State-changing: no.
 JSON mode: `payload`.
 
 - Read-only: nothing is probed and no provider row is created.
+
+### `ocx message sessions`
+
+Discover already-loaded local Codex sessions without reading conversation history.
+
+State-changing: no.
+
+Drives no management route.
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--json` | boolean | Emit a versioned local session directory. |
+
+JSON mode: `envelope`.
+
+- Linux/macOS Unix socket only. Uses effective CODEX_HOME; starts no daemon and returns no partial directory.
+
+### `ocx message send`
+
+Submit one correlated peer message to an exact loaded local Codex destination.
+
+State-changing: yes.
+
+Drives no management route.
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--thread` | string | Exact loaded UUID; choose this or --name. |
+| `--name` | string | Unique exact loaded name; choose this or --thread. |
+| `--stdin` | boolean | Read at most 16 KiB of UTF-8 message text. |
+| `--kind` | string | request (default), response or notification. |
+| `--in-reply-to` | string | Request message UUID; required only for a response. |
+| `--json` | boolean | Emit a receipt with not_sent, queued or unknown status. |
+
+JSON mode: `envelope`.
+
+- Requires daemon support for experimental thread/queue/add. Sender context comes from CODEX_THREAD_ID, not an authentication claim.
+- queued means submitted, not processed. unknown must not be replayed; no automatic retry, daemon start or thread resume.
+- Exit 0: queued; 1: not sent; 3: unknown; 64: invalid usage. No remote/Claude transport or skill installation.
+
+### `ocx advisor`
+
+Inspect and configure the advisor sidecar (expert consultation for routed workers).
+
+State-changing: yes.
+
+| Method | Route |
+|---|---|
+| GET | `/api/advisor/settings` |
+| PUT | `/api/advisor/settings` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--json` | boolean | Emit advisor settings as JSON. |
+
+JSON mode: `payload`.
+
+- `status` (the default) reads the resolved settings; `on`/`off` toggle the sidecar; `consent` records or revokes context-sharing consent; `set` updates model, effort, policy, or timeout.
+- `on` does not grant consent. Without current consent it refuses and prints the disclosure. `on --ack-context-sharing` records consent v1 and enables. `consent --revoke` removes consent and stops task-context transfer.
+- The advisor model may be any routable model string: a bare native model, an explicit `provider/model`, or an account-qualified native model.
+- `policy: preflight` makes OpenCodex attempt one automatic consultation per task with a stable conversation identity once the task shows orientation evidence (an assistant tool call or a tool result after the latest user message). Without a stable identity, each eligible request may trigger another consultation. `policy: manual` consults only when the worker calls the synthetic `advisor` tool. Neither path sends task context without current context-sharing consent.
 
 ### `ocx agent status`
 

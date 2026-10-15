@@ -80,6 +80,7 @@ const SEMANTICS_KEY: Record<FileIntegrationClientId, TKey> = {
   dsh: "integrations.semantics.dsh",
   mcode: "integrations.semantics.mcode",
   zcode: "integrations.semantics.zcode",
+  commandcode: "integrations.semantics.commandcode",
   prime: "integrations.semantics.prime",
   aside: "integrations.semantics.aside",
   raycast: "integrations.semantics.raycast",
@@ -87,6 +88,7 @@ const SEMANTICS_KEY: Record<FileIntegrationClientId, TKey> = {
   cline: "integrations.semantics.cline",
   kilo: "integrations.semantics.kilo",
   droid: "integrations.semantics.droid",
+  qoder: "integrations.semantics.qoder",
 };
 
 const TAB_LABEL_KEY: Record<FileIntegrationClientId, TKey> = {
@@ -100,6 +102,7 @@ const TAB_LABEL_KEY: Record<FileIntegrationClientId, TKey> = {
   dsh: "integrations.tab.dsh",
   mcode: "integrations.tab.mcode",
   zcode: "integrations.tab.zcode",
+  commandcode: "integrations.tab.commandcode",
   prime: "integrations.tab.prime",
   aside: "integrations.tab.aside",
   raycast: "integrations.tab.raycast",
@@ -107,6 +110,7 @@ const TAB_LABEL_KEY: Record<FileIntegrationClientId, TKey> = {
   cline: "integrations.tab.cline",
   kilo: "integrations.tab.kilo",
   droid: "integrations.tab.droid",
+  qoder: "integrations.tab.qoder",
 };
 
 type FileIntegrationPageProps = {
@@ -289,7 +293,11 @@ function FileIntegrationControls({
     return (
       <section className="integration-client-page">
         {stateResource.state.showError
-          ? <Notice tone="err">{t("integrations.error.load")}</Notice>
+          ? (
+            <Notice tone="err">{t("integrations.error.load")}
+              <button type="button" className="btn btn-ghost btn-sm" onClick={refresh} disabled={stateResource.state.refreshing}>{t("common.retry")}</button>
+            </Notice>
+          )
           : <p className="page-sub">{t("common.loading")}</p>}
       </section>
     );

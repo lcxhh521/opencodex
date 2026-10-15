@@ -1,6 +1,8 @@
 import { MAIN_ACCOUNT_HARD_LOCK_MIN_PERCENT } from "../../codex/quota-types";
 import * as z from "zod/v4";
+import { anthropicAccountPoolSchema } from "./anthropic-account-pool";
 import { compactionRecoverySchema } from "./compaction-recovery";
+import { desktopCompatibilitySchema } from "./desktop-compatibility";
 import { blockedModelRedirectsSchema } from "./blocked-model-redirects";
 import {
   agentTaskRecoverySchema,
@@ -82,6 +84,7 @@ export const protocolConfigSchema = z.object({
     managedMessagesNative: z.boolean().optional(),
     managedMessagesNativeOAuth: z.boolean().optional(),
     directEncoders: z.boolean().optional(),
+    antigravityDirect: z.boolean().optional(),
     shadowPlan: z.boolean().optional(),
   }).strict().optional(),
 }).strict();
@@ -105,6 +108,8 @@ export const configSchema = z.object({
   skills: skillsConfigSchema.optional().catch(undefined),
   // Malformed hand edits disable this opt-in exporter. Live writes reject them in diagnostics.ts.
   metricsExport: z.object({ enabled: z.boolean().optional() }).strict().optional().catch(undefined),
+  // Same contract as metricsExport: a malformed hand edit leaves recovery off; live writes reject it.
+  serviceHealthRecovery: z.object({ enabled: z.boolean().optional() }).strict().optional().catch(undefined),
   // Kept raw on purpose: `.catch(undefined)` would turn a mistyped `enabled` into "inherit",
   // which can reopen a surface the operator meant to close. src/protocols/settings.ts parses it
   // and fails closed instead.
@@ -122,6 +127,7 @@ export const configSchema = z.object({
         managedMessagesNative: false,
         managedMessagesNativeOAuth: false,
         directEncoders: fields.directEncoders === true,
+        antigravityDirect: fields.antigravityDirect === true,
         shadowPlan: fields.shadowPlan === true,
       },
     };
@@ -188,6 +194,7 @@ export const configSchema = z.object({
   modelPinnedEfforts: modelPinnedEffortsSchema.optional(),
   compactionRouting: compactionRoutingSchema.optional().catch(undefined),
   compactionRecovery: compactionRecoverySchema.optional().catch(undefined),
+  desktopCompatibility: desktopCompatibilitySchema.optional().catch(undefined),
   // A hand-edited malformed phase disables only that phase instead of rejecting
   // providers/apiKeys, matching the load-time degradation notice; the management write
   // boundary (validateConfigCandidate) still refuses the bad value through the shared,
@@ -215,6 +222,8 @@ export const configSchema = z.object({
     short: z.number().int().min(MAIN_ACCOUNT_HARD_LOCK_MIN_PERCENT).max(100).optional().catch(undefined),
     long: z.number().int().min(MAIN_ACCOUNT_HARD_LOCK_MIN_PERCENT).max(100).optional().catch(undefined),
   }).optional().catch(undefined),
+  // #2999: a malformed hand edit falls back to auto detection rather than rejecting the config.
+  nativeMainRefresh: z.enum(["codex", "opencodex"]).optional().catch(undefined),
   // Future versions remain opaque through passthrough-compatible whole-config saves.
   // Only version 1 grants deletion authority in the rebase path.
   configRebaseProvenance: z.unknown().optional(),
@@ -299,6 +308,10 @@ export const configSchema = z.object({
   codexAccountAutoSwitchThresholds: z.unknown().optional().transform(salvageCodexAccountAutoSwitchThresholds),
   // An invalid optional preference must not discard providers or credential rows.
   codexAccountPriorityFailback: z.boolean().optional().catch(false),
+  // Absent or invalid keeps the sliding window on. Explicit false restores consecutive-only steering.
+  codexFailureWindow: z.boolean().optional().catch(undefined),
+  codexPinnedTransientPolicy: z.enum(["hold", "detour-new-threads"]).optional().catch("hold"),
+  codexWsReuseAcrossTurns: z.boolean().optional().catch(false),
   activeCodexAccountPinned: z.string().regex(CODEX_ACCOUNT_PIN_PATTERN).optional().catch(undefined),
   // A malformed hand edit must degrade to false without discarding providers, accounts,
   // or the exact selector map. Live writes remain strict.
@@ -328,7 +341,7 @@ export const configSchema = z.object({
   blockedModelRedirects: blockedModelRedirectsSchema.optional().catch(undefined),
   // Degrade malformed hand edits locally; candidate writes reject them before parsing.
   // An invalid native preference retains the legacy route instead of enabling native by default.
-  anthropicAccountPool: z.object({ nativeMessages: z.boolean().optional().catch(false) }).passthrough().optional().catch(undefined),
+  anthropicAccountPool: anthropicAccountPoolSchema,
   // Same degrade-don't-reject rationale as the fields above: a hand-edited
   // non-string must not trip the backup-and-defaults repair path. Unset then
   // takes the canonical sideband path (src/server/live.ts normalizeSidebandRoot).
@@ -351,6 +364,11 @@ export const configSchema = z.object({
       .map(row => apiKeyEntrySchema.parse(row) as OcxApiKeyEntry);
   }),
 }).passthrough().superRefine((config, ctx) => {
+  // Helper `anthropicInstance` is deliberately not refined here. A document-level issue would send
+  // loadConfig through salvage (which refuses pathless issues) to the backup-and-defaults path, so
+  // one hand-edited helper preference would hide every provider. Writes reject it explicitly in
+  // validateConfigCandidate, diagnostics report it from the raw file, and loadConfig drops only the
+  // offending key (sanitizeAnthropicSidecarInstanceForLoad).
   const claudeCode = (config as { claudeCode?: unknown }).claudeCode;
   if (claudeCode !== undefined && (!claudeCode || typeof claudeCode !== "object" || Array.isArray(claudeCode))) {
     ctx.addIssue({ code: "custom", path: ["claudeCode"], message: "claudeCode must be an object" });
@@ -665,6 +683,17 @@ export const configSchema = z.object({
         code: "custom",
         path: ["providers", redactSecretString(name), "modelReasoningSummaryDelivery"],
         message: reasoningSummaryDeliveryError,
+      });
+    }
+    const minMaxOutputError = positiveIntegerConfigError(
+      (provider as { minMaxOutputTokens?: unknown }).minMaxOutputTokens,
+      "minMaxOutputTokens",
+    );
+    if (minMaxOutputError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "minMaxOutputTokens"],
+        message: minMaxOutputError,
       });
     }
     const defaultMaxOutputError = positiveIntegerConfigError(

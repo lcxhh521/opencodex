@@ -13,12 +13,14 @@ import {
   type RuntimeApiDeps,
 } from "./runtime-api";
 import { clientIntegrationPath, validateAsideProfile } from "./integration-input";
+import { asideProfileRecoveryLines } from "./aside-profile-recovery";
+import type { IntegrationClientId } from "../integrations/registry";
 
 const CLAUDE_USAGE = `Usage:
   ocx claude config [status] [--json]
   ocx claude config set [--enabled <on|off>] [--auth-mode <auto|proxy|subscription>]
       [--system-env <on|off>] [--fast-mode <on|off>] [--auto-context <on|off>]
-      [--compact-window <tokens|default>] [--inject-agents <on|off>]
+      [--compact-window <tokens|default>] [--context-accounting <1m|200k>] [--inject-agents <on|off>]
       [--small-fast-model <id|->] [--model-map <from=to,from=to|->]
       [--blocked-skills <name,name|->] [--web-model <id|->] [--web-backend <openai|anthropic|xai|gemini|exa|->]
       [--vision-model <id|->] [--vision-backend <openai|anthropic|->] [--json]
@@ -74,6 +76,7 @@ export async function handleClaudeConfigCommand(argv: string[], deps: RuntimeApi
     const fastMode = takeBooleanOption(args, "--fast-mode");
     const autoContext = takeBooleanOption(args, "--auto-context");
     const compact = takeOption(args, "--compact-window");
+    const accounting = takeOption(args, "--context-accounting");
     const injectAgents = takeBooleanOption(args, "--inject-agents");
     const smallFastModel = takeOption(args, "--small-fast-model");
     const modelMap = takeOption(args, "--model-map");
@@ -95,6 +98,11 @@ export async function handleClaudeConfigCommand(argv: string[], deps: RuntimeApi
         if (!Number.isInteger(value) || value <= 0) throw new CliUsageError("--compact-window must be a positive integer or default", CLAUDE_USAGE);
         body.autoCompactWindow = value;
       }
+    }
+    if (accounting !== undefined) {
+      const value = accounting.toLowerCase();
+      if (value !== "1m" && value !== "200k") throw new CliUsageError("--context-accounting must be 1m or 200k", CLAUDE_USAGE);
+      body.contextAccounting = value;
     }
     if (injectAgents !== undefined) body.injectAgents = injectAgents;
     if (smallFastModel !== undefined) body.smallFastModel = smallFastModel === "-" ? "" : smallFastModel;
@@ -193,7 +201,10 @@ function raycastBlock(result: unknown): RaycastStatusBlock | null {
  */
 function singleClientStatusLines(result: unknown): string[] {
   const raycast = raycastBlock(result);
-  if (!raycast) return summaryLines(result);
+  if (!raycast) {
+    const aside = (result as { clientId?: unknown } | null)?.clientId === "aside";
+    return [...summaryLines(result), ...(aside ? asideProfileRecoveryLines([result]) : [])];
+  }
   const rest = Object.fromEntries(Object.entries(result as Record<string, unknown>).filter(([key]) => key !== "raycast"));
   const lines = [...summaryLines(rest), `plan: ${raycast.plan}`];
   if (!raycast.aiDirPresent) {
@@ -215,7 +226,11 @@ function singleClientStatusLines(result: unknown): string[] {
 export async function handleClientIntegrationCommand(
   argv: string[],
   deps: RuntimeApiDeps = {},
+  expectedClientId?: IntegrationClientId,
 ): Promise<number> {
+  if (expectedClientId !== undefined && argv.some(arg => ["--client", "--profile"].some(flag => arg === flag || arg.startsWith(`${flag}=`)))) {
+    return runCliAction(async () => { throw new CliUsageError("client-specific restore does not accept --client or --profile", CLIENT_USAGE); });
+  }
   if ((argv[0] === "history" || argv[0] === "journal") && argv[1] === "remove") {
     const { handleIntegrationJournalRemove } = await import("./integration-journal");
     return handleIntegrationJournalRemove(argv.slice(2), deps);
@@ -227,7 +242,7 @@ export async function handleClientIntegrationCommand(
   if (argv[0] === "preview" || argv.some(arg => ["--preview", "--plan-fingerprint", "--reasoning-default", "--clear-reasoning-defaults"]
     .some(flag => arg === flag || arg.startsWith(`${flag}=`)))) {
     const { handleIntegrationPreviewCommand } = await import("./integration-preview");
-    return handleIntegrationPreviewCommand(argv, deps);
+    return handleIntegrationPreviewCommand(argv, deps, expectedClientId);
   }
   return runCliAction(async () => {
     const args = [...argv];
@@ -247,7 +262,10 @@ export async function handleClientIntegrationCommand(
       const profiles = (result as { profiles?: Array<Record<string, unknown>> }).profiles;
       printData(result, wantsJson, profiles
         ? profiles.length > 0
-          ? profiles.map(row => `${String(row.profileId)}  ${String(row.name ?? "Aside")}: ${row.enabled ? "on" : "off"} (${String(row.state)})${row.current ? " [current]" : ""}`)
+          ? [
+            ...profiles.map(row => `${String(row.profileId)}  ${String(row.name ?? "Aside")}: ${row.enabled ? "on" : "off"} (${String(row.state)})${row.current ? " [current]" : ""}`),
+            ...asideProfileRecoveryLines(profiles),
+          ]
           : [String((result as { error?: string }).error ?? "No Aside profiles found.")]
         : rows
         /*
@@ -289,9 +307,12 @@ export async function handleClientIntegrationCommand(
       if (client !== undefined && profile === undefined) throw new CliUsageError("restore --client requires --profile", CLIENT_USAGE);
       rejectArgs(args, CLIENT_USAGE);
       if (!opId) throw new CliUsageError("--op <opId> is required", CLIENT_USAGE);
-      const result = await runtimeRequest(profile === undefined ? "/api/client-integrations/restore" : `${clientIntegrationPath("aside", profile)}/restore`, {
+      const restorePath = expectedClientId !== undefined ? `${clientIntegrationPath(expectedClientId)}/restore`
+        : profile === undefined ? "/api/client-integrations/restore" : `${clientIntegrationPath("aside", profile)}/restore`;
+      const result = await runtimeRequest(restorePath, {
         method: "POST",
-        body: JSON.stringify({ opId, confirmDrift }),
+        ...(expectedClientId === undefined ? {} : { redirect: "error" as const }),
+        body: JSON.stringify({ opId, confirmDrift, ...(expectedClientId === undefined ? {} : { expectedClientId }) }),
       }, deps);
       printData(result, wantsJson, [String((result as Record<string, unknown>).message ?? "Restored.")]);
       return;
@@ -386,4 +407,25 @@ export async function handleClaudeInterceptCommand(argv: string[], deps: Runtime
     const result = await runtimeRequest("/api/claude-intercept/start", { method: "POST" }, deps);
     printData(result, wantsJson, summaryLines(result));
   });
+}
+
+const COMMANDCODE_USAGE = "Usage: ocx commandcode [status|show|list|enable|disable|history|journal|restore] [--json]";
+
+export async function handleCommandcodeCommand(argv: string[], deps: RuntimeApiDeps = {}): Promise<number> {
+  const args = [...argv];
+  const verbIndex = args.findIndex(arg => !arg.startsWith("-"));
+  const action = (verbIndex === -1 ? "status" : args[verbIndex]).toLowerCase();
+  const known = ["status", "show", "list", "enable", "disable", "history", "journal", "restore"];
+  if (!known.includes(action)) {
+    console.error(`unknown commandcode command ${action}`);
+    console.error(COMMANDCODE_USAGE);
+    return 2;
+  }
+  const rest = verbIndex === -1 ? args : [...args.slice(0, verbIndex), ...args.slice(verbIndex + 1)];
+  const forwarded = action === "restore" ? [action, ...rest] : [action, ...rest, "--client", "commandcode"];
+  const code = await handleClientIntegrationCommand(forwarded, deps, action === "restore" ? "commandcode" : undefined);
+  if (code === 0 && (action === "enable" || action === "disable")) {
+    console.error("Command Code reads providers on startup.");
+  }
+  return code;
 }

@@ -8,11 +8,11 @@
 Use these declarations to choose a task, then check its flags and authority before execution.
 Non-mutating probes may still contact providers, consume quota or refresh caches.
 
-Declared capabilities: 40.
+Declared capabilities: 41.
 
 ### `ocx claude config`
 
-Usage: `ocx claude config status [--json]; ocx claude config set [--enabled <on|off>] [--auth-mode <auto|proxy|subscription>] [--system-env <on|off>] [--fast-mode <on|off>] [--auto-context <on|off>] [--compact-window <tokens|default>] [--inject-agents <on|off>] [--small-fast-model <id|->] [--model-map <from=to,...|->] [--blocked-skills <name,name|->] [--web-model <id|->] [--web-backend <openai|anthropic|xai|gemini|exa|->] [--vision-model <id|->] [--vision-backend <openai|anthropic|->] [--json]; or ocx claude config set --first-party <on|off> [--json]`
+Usage: `ocx claude config status [--json]; ocx claude config set [--enabled <on|off>] [--auth-mode <auto|proxy|subscription>] [--system-env <on|off>] [--fast-mode <on|off>] [--auto-context <on|off>] [--compact-window <tokens|default>] [--context-accounting <1m|200k>] [--inject-agents <on|off>] [--small-fast-model <id|->] [--model-map <from=to,...|->] [--blocked-skills <name,name|->] [--web-model <id|->] [--web-backend <openai|anthropic|xai|gemini|exa|->] [--vision-model <id|->] [--vision-backend <openai|anthropic|->] [--json]; or ocx claude config set --first-party <on|off> [--json]`
 
 Read or update Claude Code settings, including independent CLI first-party routing.
 
@@ -31,6 +31,7 @@ State-changing: yes.
 | `--fast-mode` | string | on or off. |
 | `--auto-context` | string | on or off. |
 | `--compact-window` | string | Positive token count or default to clear. |
+| `--context-accounting` | string | 1m (default) or 200k. |
 | `--inject-agents` | string | on or off. |
 | `--small-fast-model` | string | Model ID; - clears. |
 | `--model-map` | string | Comma-separated from=to mappings; - clears. |
@@ -517,6 +518,33 @@ JSON mode: `payload`.
 - Preview preserves exact opId/profile/confirm-drift intent. Generic restore derives the client on the server; the returned plan does not embed opId or complete command input.
 - A refused or no-op preview is completed inspection, not applied work. A stale bound mutation exits5 with a fixed re-preview hint; no replacement token is automatically adopted.
 
+### `ocx commandcode restore`
+
+Usage: `ocx commandcode restore --op <opId> [--confirm-drift] [--preview | --plan-fingerprint <token>] [--json]`
+
+Restore a Command Code rollback operation, retaining client ownership and drift checks.
+
+State-changing: yes.
+
+| Method | Route |
+|---|---|
+| POST | `/api/client-integrations/commandcode/restore` |
+| POST | `/api/client-integrations/commandcode/restore/preview` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--op` | string | Command Code operation ID; --op-id is an alias. |
+| `--confirm-drift` | boolean | Explicitly allow replacing edits made after the snapshot. |
+| `--preview` | boolean | Inspect restoration without mutating; exclusive with a commit fingerprint. |
+| `--plan-fingerprint` | string | Optional versioned token from a matching preview; stale intent is refused without retry. |
+| `--json` | boolean | Emit the result as JSON. |
+
+JSON mode: `payload`.
+
+- cmd restore is an alias. --client and --profile are rejected; the dedicated route binds the operation to Command Code.
+- Older proxies without the dedicated route fail without a generic restore fallback. Redirects are refused.
+- Preview preserves the operation and drift intent. A stale bound mutation requires a new explicit preview.
+
 ### `ocx claude config status`
 
 Usage: `ocx claude config status [--json]`
@@ -539,7 +567,7 @@ JSON mode: `payload`.
 
 ### `ocx claude config set`
 
-Usage: `ocx claude config set [--enabled <on|off>] [--auth-mode <auto|proxy|subscription>] [--system-env <on|off>] [--fast-mode <on|off>] [--auto-context <on|off>] [--compact-window <tokens|default>] [--inject-agents <on|off>] [--small-fast-model <id|->] [--model-map <from=to,...|->] [--blocked-skills <name,name|->] [--web-model <id|->] [--web-backend <openai|anthropic|xai|gemini|exa|->] [--vision-model <id|->] [--vision-backend <openai|anthropic|->] [--json]; or ocx claude config set --first-party <on|off> [--json]`
+Usage: `ocx claude config set [--enabled <on|off>] [--auth-mode <auto|proxy|subscription>] [--system-env <on|off>] [--fast-mode <on|off>] [--auto-context <on|off>] [--compact-window <tokens|default>] [--context-accounting <1m|200k>] [--inject-agents <on|off>] [--small-fast-model <id|->] [--model-map <from=to,...|->] [--blocked-skills <name,name|->] [--web-model <id|->] [--web-backend <openai|anthropic|xai|gemini|exa|->] [--vision-model <id|->] [--vision-backend <openai|anthropic|->] [--json]; or ocx claude config set --first-party <on|off> [--json]`
 
 Change Claude Code settings through the runtime owner.
 
@@ -557,6 +585,7 @@ State-changing: yes.
 | `--fast-mode` | string | on or off. |
 | `--auto-context` | string | on or off. |
 | `--compact-window` | string | Positive token count or default to clear. |
+| `--context-accounting` | string | 1m (default) or 200k. |
 | `--inject-agents` | string | on or off. |
 | `--small-fast-model` | string | Model ID; - clears. |
 | `--model-map` | string | Comma-separated from=to mappings; - clears. |

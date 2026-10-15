@@ -9,7 +9,7 @@ import {
   revertEditable,
   type ClaudeCodeEditable,
 } from "../src/pages/claude-code-save";
-import type { ClaudeCodeState, MapRow } from "../src/pages/claude-code-types";
+import { normalizeContextAccounting, type ClaudeCodeState, type MapRow } from "../src/pages/claude-code-types";
 
 const STATE = {
   enabled: true,
@@ -26,6 +26,7 @@ const STATE = {
   maxContextTokens: null,
   autoContext: true,
   autoCompactWindow: null,
+  contextAccounting: "1m",
   injectAgents: true,
   smallFastModel: "",
   effectiveModelEnv: {},
@@ -37,8 +38,30 @@ const STATE = {
 const row = (from: string, to: string, id = `${from}->${to}`): MapRow => ({ id, from, to });
 const editable = (state: Partial<ClaudeCodeState> = {}, rows: MapRow[] = []): ClaudeCodeEditable => ({ state: { ...STATE, ...state }, rows });
 
+test("tier defaults participate in save, polling preservation and revert", () => {
+  const tiers = { opus: "combo/opus", sonnet: "combo/sonnet", haiku: "combo/haiku" };
+  const draft = editable({ tierModels: tiers });
+  const baseline = editable({ tierModels: {} });
+  expect(claudeCodeSaveBody(draft.state, []).tierModels).toEqual(tiers);
+  expect(isClaudeCodeDraftDirty(draft, baseline)).toBe(true);
+  expect(mergeServerRead(draft.state, baseline.state).tierModels).toEqual(tiers);
+  expect(revertEditable(draft.state, baseline.state).tierModels).toEqual({});
+  expect(claudeCodeSaveBody({ ...STATE, tierModels: {} }, []).tierModels).toEqual({});
+});
+
 test("the Save body never carries the immediate connection switch", () => {
   expect("enabled" in claudeCodeSaveBody(STATE, [])).toBe(false);
+});
+
+test("Save preserves unset helper identity and explicit deletion without materializing A", () => {
+  const body = claudeCodeSaveBody({ ...STATE,
+    webSearchSidecar: { backend: "anthropic", model: "claude-haiku-4-5" },
+    visionSidecar: { backend: "anthropic", model: "claude-haiku-4-5", anthropicInstance: "anthropic2" },
+  }, []);
+  expect(body.webSearchSidecar).toEqual({ backend: "anthropic", model: "claude-haiku-4-5" });
+  expect(body.visionSidecar?.anthropicInstance).toBe("anthropic2");
+  expect(claudeCodeSaveBody({ ...STATE, visionSidecar: { backend: "openai", anthropicInstance: null } }, []).visionSidecar)
+    .toEqual({ backend: "openai", model: "", anthropicInstance: null });
 });
 
 test("modelMap is trimmed, drops blank rows, keeps the last duplicate and sorts keys", () => {
@@ -115,4 +138,13 @@ test("a successful Save shows the normalized rows even if the refresh never land
   const kept = acknowledgeSave({ draft: edited, baseline: editable(), adoptNextRead: false }, submitted)!;
   expect(kept.draft).toBe(edited);
   expect(isClaudeCodeDraftDirty(kept.draft, kept.baseline)).toBe(true);
+});
+
+test("context accounting is saved, dirties the draft, and older states read as the 1m default", () => {
+  expect(claudeCodeSaveBody({ ...STATE, contextAccounting: "200k" }, []).contextAccounting).toBe("200k");
+  expect(isClaudeCodeDraftDirty(editable({ contextAccounting: "200k" }), editable())).toBe(true);
+  // A state cached by an older proxy carries no field; the page normalizer reads it as the default.
+  expect(normalizeContextAccounting(undefined)).toBe("1m");
+  expect(normalizeContextAccounting("bogus")).toBe("1m");
+  expect(normalizeContextAccounting("200k")).toBe("200k");
 });

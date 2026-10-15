@@ -193,6 +193,12 @@ describe("CLI help recovery", () => {
       mock.module(${JSON.stringify(repoPath("src", "cli", "codex-shim-autorestore.ts"))}, () => ({
         maybeAutoRestoreCodexShim: command => { calls.push(command); if (reportCalls) console.log("preflight called"); },
       }));
+      // The lifecycle skew notice probes the configured (here: default) port. A developer machine
+      // with a live proxy there would answer, so keep this admission test independent of the host.
+      mock.module(${JSON.stringify(repoPath("src", "cli", "version-skew-notice.ts"))}, () => ({
+        shouldNoticeVersionSkew: () => false,
+        maybeNoticeVersionSkew: async () => {},
+      }));
       const { runCli } = await import(${JSON.stringify(repoPath("src", "cli", "root.ts"))});`;
     const rejected = isolated(`${mockSetup}
       reportCalls = true; await runCli(["modles"]);`);
@@ -208,4 +214,22 @@ describe("CLI help recovery", () => {
     expect(admitted.stderr).toBe("");
     expect(JSON.parse(admitted.stdout)).toEqual({ heads: names, calls: names });
   });
+});
+
+
+test.each([0, 1])("update dispatch preserves updater exit %s without executing the updater", code => {
+  const result = isolated(`import { mock } from "bun:test";
+    const updatePath = ${JSON.stringify(repoPath("src", "update", "index.ts"))};
+    const original = await import(updatePath);
+    mock.module(updatePath, () => ({
+      ...original, runUpdate: async () => { process.exitCode = ${code}; },
+    }));
+    const { dispatchCommand } = await import(${JSON.stringify(repoPath("src", "cli", "dispatch.ts"))});
+    const args = ["update"];
+    const status = await dispatchCommand({ kind: "command", command: "update", args }, { args });
+    console.log(JSON.stringify({ status }));
+    process.exit(status);`);
+  expect(result.status).toBe(code);
+  expect(JSON.parse(result.stdout)).toEqual({ status: code });
+  expect(result.stderr).toBe("");
 });

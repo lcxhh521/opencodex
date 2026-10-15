@@ -45,6 +45,10 @@ export interface ManagementRequestIngress {
 }
 
 export interface ManagementApiDeps {
+  desktopStartupSettings?: import("../../codex/desktop-compatibility/startup-settings").DesktopStartupSettingsService;
+  desktopCertificateService?: import("../../codex/desktop-compatibility/certificate-service").DesktopCertificateService;
+  desktopCompatibilityRuntime?: import("../../codex/desktop-compatibility/runtime").DesktopCompatibilityRuntime;
+  onDesktopCompatibilityShutdown?: (shutdown: () => Promise<void>) => void;
   /** Bound to this server's lifecycle owner; absent in direct route tests. */
   listLowQuotaEvents?: (limit?: number) => LowQuotaEvent[];
   /** Bound Claude intercept state, injectable for isolated management-route tests. */
@@ -64,8 +68,8 @@ export interface ManagementApiDeps {
   refreshOwnedCatalogIntegrations?: typeof refreshOwnedCatalogIntegrations;
   /** Platform seam for capability projections; does not alter host-level startup behavior. */
   platform?: NodeJS.Platform;
-  toggleCodexMultiAgentV2?: (enabled: boolean) => void;
-  toggleDefaultModeRequestUserInput?: (enabled: boolean) => void;
+  toggleCodexMultiAgentV2?: (enabled: boolean, env: NodeJS.ProcessEnv, validateBeforeSpawn: () => void) => void;
+  toggleDefaultModeRequestUserInput?: (enabled: boolean, env: NodeJS.ProcessEnv, validateBeforeSpawn: () => void) => void;
   createManagementConvergeCodex?: (config: Readonly<OcxConfig>) => ConvergeCodex;
   /** Test-only destination for best-effort Claude agent-definition sync. */
   claudeAgentConfigDir?: string;

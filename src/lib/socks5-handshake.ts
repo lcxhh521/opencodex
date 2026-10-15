@@ -1,11 +1,12 @@
 /**
- * The SOCKS5 handshake both raw outbound transports share: method negotiation
+ * The SOCKS5 handshake raw outbound transports share: method negotiation
  * (RFC 1928), the optional RFC 1929 username/password subnegotiation, and the
  * CONNECT exchange.
  *
- * `src/lib/socks5-fetch.ts` (the HTTP tunnel) and
- * `src/chatgpt/desktop-unblock/ws-upstream.ts` (the ChatGPT desktop relay's raw
- * dial) each own their socket, their timeouts, and what happens after CONNECT;
+ * `src/lib/socks5-fetch.ts` (the HTTP tunnel),
+ * `src/lib/desktop-upstream-tunnel.ts` (the native desktop relay), and
+ * `src/chatgpt/desktop-unblock/ws-upstream.ts` (the ChatGPT intercept relay)
+ * each own their socket, their timeouts, and what happens after CONNECT;
  * this module only frames bytes through the reader each hands it, so a
  * credentialed `socks5://` proxy URL authenticates identically whether the caller
  * is a fetch or a raw WebSocket upgrade. When the URL carries credentials the

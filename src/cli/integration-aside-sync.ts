@@ -1,9 +1,10 @@
 import { z } from "zod";
 import { redactUserPath } from "../lib/redact";
 import type { RefusalReason } from "../integrations/mutation-plan";
+import { ASIDE_SYNC_EMPTY_LINES } from "./aside-profile-recovery";
 import { refreshAsideProfilesThroughServer } from "./aside-profiles";
 import { runCatalogAction } from "./catalog-command-result";
-import { CliUsageError, printData, takeFlag, takeOption, type RuntimeApiDeps } from "./runtime-api";
+import { CliUsageError, RuntimeApiError, printData, takeFlag, takeOption, type RuntimeApiDeps } from "./runtime-api";
 
 const USAGE = "Usage: ocx integration client sync --client aside [--json]";
 const refusalText = {
@@ -49,11 +50,14 @@ export function handleIntegrationAsideSync(argv: string[], deps: AsideSyncCliDep
     // Sync is an aggregate operation: every owner/transport failure is exit 1,
     // not the record-not-found/conflict exits used by addressed journal writes.
     const outcomes = await (deps.refreshAsideProfilesImpl ?? refreshAsideProfilesThroughServer)(deps)
-      .catch(() => { throw new Error("Aside synchronization did not complete"); });
+      .catch(error => {
+        if (error instanceof RuntimeApiError && error.code === "proxy_not_running") throw error;
+        throw new Error("Aside synchronization did not complete");
+      });
     const parsed = resultsSchema.safeParse(outcomes);
     if (!parsed.success) throw new Error("Invalid Aside synchronization outcome");
     const results = parsed.data;
-    const lines = results.length === 0 ? ["No eligible Aside profiles to synchronize. Check integration status and profile sync preferences."]
+    const lines = results.length === 0 ? [...ASIDE_SYNC_EMPTY_LINES]
       : results.flatMap(row => [
         `Aside profile ${row.profileId}: ${row.ok ? row.changed ? "updated" : "unchanged" : "failed"}.`,
         ...(row.reason ? [row.reason] : []),

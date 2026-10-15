@@ -43,6 +43,8 @@ function carriesTranslatableWords(value: string): boolean {
 const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   // The Codex sidebar row is the product name, kept in every locale like Claude.
   "nav.codexSet",
+  // The primary Anthropic pool is labelled by the vendor name alone, kept in every locale.
+  "sidecar.poolA",
   // A bare em dash: the "no Reasoning control" marker is a symbol, not copy.
   "integrations.cursor.noControl",
   // API protocol/endpoint names
@@ -169,6 +171,12 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   "integrations.tab.kilo",
   "api.clientConfig.clientKilo",
   "api.clientConfig.clientDroid",
+  // Qoder is a product name, identical in every locale.
+  "integrations.tab.qoder",
+  "api.clientConfig.clientQoder",
+  // Command Code is a product name, identical in every locale.
+  "integrations.tab.commandcode",
+  "api.clientConfig.clientCommandCode",
   "integrations.codex.title",
   // Provider proper nouns kept in English
   "provider.name.commandCodeAuth",
@@ -207,6 +215,8 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   // untranslated `~$`); the templates are pure placeholders on purpose.
   "logs.cost.approximate",
   "logs.cost.lowerBound",
+  // A token count ("200k") reads the same in every locale; the 1M choice carries the translated "default".
+  "claude.contextAccounting200k",
 ]);
 
 test("zh-TW ships no untranslated English placeholders beyond the intentional allowlist", async () => {

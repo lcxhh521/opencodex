@@ -19,13 +19,13 @@ ocx agent subagents set ark/model-a,openai/gpt-5.5
 
 `ocx agent roles` is for omo (Codex / LazyCodex). It lists each Codex agent role in
 `$CODEX_HOME/agents` with its model pin and whether `~/.omo/omo.jsonc` can be updated, or says
-LazyCodex is not installed, in which case `set` is refused. `ocx agent roles set <role> <model>` rewrites only
-that role's root `model` line and mirrors the value into omo.jsonc at
-`codex.agents.<role>.model`. A missing omo.jsonc, or one containing comments, is left unchanged
+LazyCodex is not installed, in which case `set` is refused. `ocx agent roles set <role> <model> [--effort <level>]` rewrites only
+that role's root `model` line, and its `model_reasoning_effort` line with `--effort`, and mirrors both into omo.jsonc at
+`[codex].agents.<role>` as `model` and `reasoning`. An effort LazyCodex has no level for, such as `ultra`, is written to the role file only. A missing omo.jsonc, or one containing comments, is left unchanged
 and the command says so. See [omo (Codex / LazyCodex) role models](/guides/integrations/#omo-codex--lazycodex-role-models).
 
 ```bash
-ocx agent roles set explorer xai/grok-4.5
+ocx agent roles set explorer xai/grok-4.5 --effort medium
 ```
 
 `ocx agent roles suggest` is omo (Codex / LazyCodex) only, refused like `set` when LazyCodex is not
@@ -903,7 +903,7 @@ Manage and apply the Grok Build model fence.
 
 ## Client config export
 
-### `ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime|aside|raycast|omo|cline|kilo|droid>`
+### `ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime|aside|raycast|omo|cline|kilo|commandcode|droid>`
 
 Print a client config wired to the running proxy. The command serializes the
 `opencodex` provider block — base URL, model list, and the client's credential
@@ -919,7 +919,7 @@ See [client integrations](/guides/integrations/) for managed refresh and upgrade
 
 | Flag | Action |
 | --- | --- |
-| `--client <opencode\|pi\|omp\|hermes\|openclaw\|kimi\|gajae\|dsh\|mcode\|zcode\|prime\|aside\|raycast\|omo\|cline\|kilo\|droid>` | Required. Selects the client config dialect. |
+| `--client <opencode\|pi\|omp\|hermes\|openclaw\|kimi\|gajae\|dsh\|mcode\|zcode\|prime\|aside\|raycast\|omo\|cline\|kilo\|commandcode\|droid>` | Required. Selects the client config dialect. |
 | `--json` | Print the generated document as JSON on stdout for scripts. This is JSON even when the selected client's native format is YAML, TOML, or JSON5. |
 | `--out <path>` | Write the client's native config format to `<path>`. Refuses to replace an existing file. |
 | `--force` | Allow `--out` to replace an existing file. |
@@ -946,12 +946,13 @@ client applies its own defaults for those).
 | `gajae` | `~/.gjc/agent/models.yml` | `gajae-models.yaml` | non-secret loopback placeholder |
 | `dsh` | `$DSH_HOME/settings.yaml` (default `~/.dsh/settings.yaml`) | `settings.yaml` | none — non-secret loopback bearer placeholder |
 | `mcode` | `~/.minimax/config.yaml` (`MINIMAX_DATA_DIR`, then the legacy `MAVIS_DATA_DIR`, win when set; a relative value is refused) | `mcode-config.yaml` | none — loopback placeholder |
-| `zcode` | `~/.zcode/v2/config.json` (`ZCODE_DATA_DIR` wins when set; a relative value is refused) | `config.json` | none — loopback placeholder |
+| `zcode` | `~/.zcode/v2/config.json` (`dataBaseDir` in the default-home `setting.json` relocates the root; `ZCODE_DATA_DIR` wins when set; relative values are refused) | `config.json` | none — loopback placeholder |
 | `prime` | `~/.prime/agent/models.json` (`PRIME_AGENT_CODING_AGENT_DIR` wins when set; a relative value is refused) | `prime-models.json` | none — loopback placeholder |
 | `aside` | `~/.aside/u/<account>/models.json` for the account Aside's own `accounts.json` names as current; an unreadable manifest is refused rather than defaulting to an account | `aside-models.json` | none — loopback placeholder |
 | `raycast` | `~/.config/raycast/ai/providers.yaml` on macOS and Windows alike (Raycast does not honor `XDG_CONFIG_HOME`) | `raycast-providers.yaml` | none — loopback only, no `api_keys` entry is written |
 | `omo` | `~/.omo/agent/models.json` (`OMO_CODING_AGENT_DIR`, then `SENPI_CODING_AGENT_DIR`, then `PI_CODING_AGENT_DIR` win in that order when set; a relative value is refused) | `omo-models.json` | none — loopback placeholder |
 | `kilo` | first existing `kilo.jsonc`, `kilo.json`, `opencode.jsonc`, `opencode.json`, or `config.json` under `~/.config/kilo` (`XDG_CONFIG_HOME` relocates that directory); uses `kilo.jsonc` when none exists | `kilo.jsonc` | `OPENCODEX_KILO_API_KEY` |
+| `commandcode` | `~/.commandcode/providers.json` (on Windows with the default home: use `HOME ?? USERPROFILE` only if nonblank and Windows-absolute, otherwise `homedir()`; a separately supplied home is preserved; append `.commandcode\providers.json`) | `providers.json` | loopback only; `apiKey: false`; no environment variable |
 | `droid` | `~/.factory/settings.json` (`%USERPROFILE%\.factory\settings.json` on Windows) | `factory-settings.json` | loopback only; no environment variable |
 
 The managed DSH export requires DSH 0.1.0-rc.6 or newer and owns only
@@ -1033,6 +1034,26 @@ Additional system booleans take on/off: `--show-codex-credits`, `--account-picke
 explicit fields and may combine with existing system options. Showing credits is
 a display preference, not paid-credit opt-in; system Ultra Fast is separate from
 provider Fast.
+
+Ultra Fast is an opt-in setting, default off. With `--ultra-fast-tier on`, the
+generated catalog adds the Ultrafast speed choice to native `gpt-6-astra` and
+`gpt-6.1-sol` (including account-bound rows), so the Codex picker offers it next to
+Fast. Ultrafast requires an eligible ChatGPT plan; the catalog cannot check that,
+so turn the setting on only if your plan includes it. Other models and the default
+speed are unchanged.
+
+For routed models, sync and catalog convergence retain an existing routed
+row's operator-supplied `ultrafast` entries in `service_tiers` and
+`additional_speed_tiers` alongside its current Fast capability. Declarations belong
+to the exact provider/model slug; they are not copied to other models. The setting
+does not create missing declarations or restore removed models. Turning it off
+removes Ultra Fast from ordinary routed rows and the generated native choice on the
+next catalog regeneration.
+
+The proxy's Fast mode decides what reaches the backend: when it is unset, a selected
+Ultrafast request is forwarded as `service_tier: "ultrafast"`; `fastMode: true`
+replaces any tier with Fast (`priority`), and `fastMode: false` removes the tier.
+Leave Fast mode unset to use Ultrafast.
 
 ```bash
 ocx system settings --json
