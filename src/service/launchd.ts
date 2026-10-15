@@ -11,7 +11,7 @@ import { BUN_RUNTIME_PATH_ENV, BUN_RUNTIME_SOURCE_ENV, durableBunRuntime, type D
 import { serviceApiTokenFilePath } from "../lib/service-secrets";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
 import { writeServiceApiTokenFile, assertLiveServiceManagerAllowed } from "./guards";
-import { resolveServiceListenPort, buildServiceShellCommand, buildServiceLauncherShellCommand, installedServiceListenPort, resolvedProxyEnv } from "./health";
+import { resolveServiceListenPort, buildServiceShellCommand, buildServiceLauncherShellCommand, resolvedProxyEnv } from "./definition";
 import { SERVICE_MANAGED_ENV, LABEL, cliEntry, filterTransientServicePath, logPath, serviceStatePath, currentCodexSqliteHomeAbsolute, type ServiceInstallState, writeServiceInstallState, readServiceInstallState } from "./state";
 import { writeServiceDefinitionFile } from "./windows-ops";
 import { readTextOrNull } from "./windows-taskxml";
@@ -359,8 +359,11 @@ export function probeLaunchdLoadState(deps: {
   for (const domain of [`gui/${uid}`, `user/${uid}`]) {
     const printed = run(["print", `${domain}/${LABEL}`]);
     if (printed.status === 0) {
+      // Use this backend's plist, then the configured service port. Foreign artifacts
+      // can exist on macOS: systemdListenPort has no platform gate, so the general
+      // installed-artifact chain could incorrectly select a copied Linux unit's port.
       const expected = (deps.expectedCommand
-        ?? (() => expectedLaunchdCommand(installedServiceListenPort())))();
+        ?? (() => expectedLaunchdCommand(launchdListenPort() ?? resolveServiceListenPort())))();
       const printedText = `${printed.stdout}\n${printed.stderr}`;
       return {
         state: printedText.includes(expected) ? "loaded-current" : "loaded-stale",
@@ -769,6 +772,7 @@ export function restartLaunchdJob(deps: {
 export function startLaunchd(deps: {
   launchctl?: typeof runLaunchctl;
   matches?: typeof launchdJobMatchesPlist;
+  readPlist?: () => string;
 } = {}): void {
   const run = deps.launchctl ?? runLaunchctl;
   const p = plistPath();
@@ -778,16 +782,24 @@ export function startLaunchd(deps: {
   // already be bootstrapped from THIS plist, which is a no-op rather than an error.
   // `install` can assume a stale job (it just rewrote the plist); `start` cannot, and
   // throwing here would break `ocx service start` on every healthy service.
+  // A live job can outlast its deleted or unreadable plist. Only a readable
+  // definition can justify the no-op; use the same snapshot for port parsing.
+  let plist: string | null;
+  try { plist = (deps.readPlist ?? (() => readFileSync(p, "utf8")))(); }
+  catch { plist = null; }
+  // Match the same launchd-only port choice as probeLaunchdLoadState above.
   const live = (deps.matches ?? launchdJobMatchesPlist)(
-    expectedLaunchdCommand(installedServiceListenPort()),
+    expectedLaunchdCommand(launchdListenPort({ readPlist: () => plist ?? "" }) ?? resolveServiceListenPort()),
   );
-  if (live.loaded && live.matchesPlist) {
+  if (plist !== null && live.loaded && live.matchesPlist) {
     console.log("ℹ️  service was already loaded from the current plist; nothing to do.");
     return;
   }
   throw new Error(
     `launchctl could not load ${p}: ${loaded.stderr || "load reported failure"}\n`
-    + (live.loaded
+    + (plist === null
+      ? "The service plist is missing or unreadable. Run 'ocx service repair' to restore it."
+      : live.loaded
       ? `launchd is running an OLDER plist. Fix:\n  launchctl bootout ${launchdGuiDomain()}/${LABEL}\n  ocx service repair`
       : "The job is not loaded. Run 'ocx service repair' to reload it."),
   );

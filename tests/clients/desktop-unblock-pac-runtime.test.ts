@@ -33,9 +33,9 @@ describe("chatgpt unblock runtime ports and mode", () => {
     expect(chatgptUnblockEntryPort(config({ port: 65535 }), 10100)).toBe(65534);
   });
 
-  test("pacFallback implies unblockSend and is off by default", () => {
+  test("pacFallback requires unblockSend and is off by default", () => {
     expect(chatgptPacFallbackEnabled(config())).toBe(false);
-    // The intercept itself is macOS only, and PAC mode implies it.
+    // The intercept itself is macOS only, and PAC mode requires it.
     expect(chatgptPacFallbackEnabled(config({ pacFallback: true }))).toBe(process.platform === "darwin");
     expect(chatgptPacFallbackEnabled({ chatgptDesktop: { pacFallback: true } } as OcxConfig)).toBe(false);
     expect(chatgptPacFallbackEnabled({ chatgptDesktop: { unblockSend: true, pacFallback: true }, runtimeRole: "client" } as OcxConfig)).toBe(false);

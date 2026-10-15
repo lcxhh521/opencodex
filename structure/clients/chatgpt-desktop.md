@@ -3,7 +3,7 @@
 The experimental macOS integration is owned by `src/chatgpt/` and exposed through
 `src/cli/chatgpt-command.ts`. It is default off; an explicit launch requires
 `chatgptDesktop.appServerShim === true` or `chatgptDesktop.unblockSend === true`, and only the
-shim launcher requires `appServerShim`. The strict config leaf accepts optional boolean `appServerShim` and `unblockSend`
+shim launcher requires `appServerShim`. The strict config leaf accepts optional boolean `appServerShim`, `unblockSend` and `pacFallback`
 flags and an optional integer `port` in 1..65535; malformed reads disable the leaf, while live
 writes reject malformed values and unknown fields.
 
@@ -62,7 +62,12 @@ app-server binary. It relaunches without that override and removes the launcher 
 `com.openai.codex` bundle is found it removes the launcher, relaunches nothing and
 exits 1. Status reports
 the experimental flag, launcher presence, and the verified bundle process's override
-without printing its environment. Other platforms reject the public operations.
+without printing its environment. Discovery exceptions and failed process inspection
+are unknown rather than evidence of an absent app. Launch preflights process inspection
+before writing the launcher; both operations refuse to open when exit cannot be confirmed.
+Restore keeps the launcher on those failures. A later probe may fail after launch has
+atomically updated it; this is not a transaction spanning the launcher and app restart.
+Other platforms reject the public operations.
 
 The launcher and its executable paths are local code-execution inputs. The shim alone
 installs no network listener, CA or background watcher and starts no proxy timer.
@@ -110,11 +115,15 @@ verification remains enabled; direct, HTTP(S) CONNECT and SOCKS5 routes follow
 opencodex's outbound proxy selection. The shared method/auth/CONNECT framing
 owner is `src/lib/socks5-handshake.ts`, also used by `src/lib/socks5-fetch.ts`.
 Each transport still owns its socket, timeout, buffering and post-CONNECT work.
+HTTP CONNECT sends Basic proxy authorization when either URL credential is present; invalid percent
+encoding fails before CONNECT is written and closes the proxy socket. SOCKS username-only credentials
+retain the shared empty-password compatibility behavior.
 
 `src/chatgpt/desktop-unblock/launch-watcher.ts` owns resolver/system-proxy and PAC launch
 arguments and the optional launchd script. The watcher has no shim mode. Its launchd agent wakes on the app's `SingletonLock` and on the
 `chatgpt-unblock.ready` marker that `startChatgptUnblock` rewrites once the listener is up, so an
-app that opened before opencodex is still routed. Each run checks listener identity, leaves native
+app that opened before opencodex is still routed. Plist freshness compares both watched paths against
+the installed generation; a legacy lock-only plist is stale. Each run checks listener identity, leaves native
 launches alone while the intercept is down, and serializes corrective restarts; an explicit launch
 that meets another run's lock fails with a message instead of reporting success. In watch mode it
 restarts only an app no more than five minutes old (`ps -o etime=`); a missing or unparseable age
@@ -122,19 +131,24 @@ counts as fresh, and explicit launch is not age-limited. A failed `open` exits n
 than printing success.
 Explicit CLI launch can supply the existing shim's launcher environment along
 with intercept arguments. A loaded watcher must be uninstalled before CLI
-restore. The CLI preserves shim-only launch without a running proxy and reports
+restore; this guard queries launchd directly without reading installed watcher files or rendering a
+script. The CLI preserves shim-only launch without a running proxy and reports
 intercept port, trust, listener identity, watcher freshness and app switches.
 
-PAC fallback (`chatgptDesktop.pacFallback`, implying `unblockSend`) replaces the resolver rule so
+PAC fallback (`chatgptDesktop.pacFallback`, effective only when `unblockSend` is enabled) replaces the resolver rule so
 the app keeps a route while opencodex is down. `src/chatgpt/desktop-unblock/entry-proxy.ts` binds a
-CONNECT entry on the listener port + 1 that splices `chatgpt.com:443` onto the TLS listener;
+CONNECT entry normally on the listener port + 1 (65534 when the listener port is 65535)
+that splices `chatgpt.com:443` onto the TLS listener;
 `pac.ts` reads the scutil proxy chain and any system PAC; `runtime.ts` rewrites
 `chatgpt-unblock.pac` at every start, before the readiness marker, embedding the system PAC only
 while the base64 `data:` switch stays within 512 KiB (`system-pac-unreadable`/`-too-large` fall
 back to the proxy chain, then DIRECT, with a startup warning). An entry bind or PAC write failure
 releases both listeners. The script launches with the inline PAC switch alone, requires the entry
-(curl exit 0 or 56) as well as listener identity, and `native` mode undoes any PAC switch, inline
-or the older `file://` form.
+(curl exit 0 or 56) as well as listener identity. After deciding a launch is needed, it prepares
+all launch arguments before quitting the app, rejecting missing, unreadable, non-file or empty PAC
+input and failed encoding. The same prepared PAC snapshot is passed to open; a failed preflight
+leaves the running app untouched. `native` mode requires no PAC file and undoes any PAC switch,
+inline or the older `file://` form.
 
 Intercept regression files use the existing `tests/clients/` domain alongside
 the shim tests; shared handshake coverage is `tests/lib/socks5-handshake.test.ts`.

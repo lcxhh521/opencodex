@@ -95,6 +95,13 @@ The app-server shim alone installs no certificate, network listener, PAC, or bac
 watcher. It does not log the app's messages or environment. Status reports whether
 the running ChatGPT bundle process carries the expected launcher override.
 
+If app discovery or process inspection fails, `status` reports `unknown` rather
+than `not running`. `launch` and `restore` refuse to reopen an app whose exit
+cannot be confirmed; restore keeps the launcher. Resolve the inspection error
+and retry. Launch checks before writing its launcher, but a later inspection can
+still fail after that atomic update; the commands do not guarantee an all-or-nothing
+restart transaction.
+
 ## Failure behavior and known limits
 
 When the platform is not macOS, the OpenCodex runtime is missing, or the filter
@@ -190,10 +197,14 @@ running to be fetched:
 { "chatgptDesktop": { "unblockSend": true, "pacFallback": true } }
 ```
 
-`pacFallback` only takes effect together with `unblockSend`. OpenCodex then also
-listens on the listener port plus one (`10301` by default), a CONNECT entry that
-splices onto the TLS listener, and rewrites `chatgpt-unblock.pac` in its home
-directory at every start, before the `chatgpt-unblock.ready` marker. The PAC sends
+`pacFallback` only takes effect together with `unblockSend`. Config diagnostics
+warn when PAC fallback is enabled on its own; the saved flags are left unchanged.
+OpenCodex normally also listens on the listener port plus one (`10301` by default),
+or port `65534` when the listener uses `65535`. This CONNECT entry splices onto the
+TLS listener. OpenCodex rewrites `chatgpt-unblock.pac` in its home
+directory at every start, before the `chatgpt-unblock.ready` marker. Before restarting an
+app, the launcher prepares the PAC argument; if the file cannot be read and encoded,
+is empty, or is not a regular file, it leaves the running app untouched. The PAC sends
 `chatgpt.com` to that entry first, and every other host the way the system routes it:
 
 | Setup | Other hosts, and `chatgpt.com` while OpenCodex is stopped |

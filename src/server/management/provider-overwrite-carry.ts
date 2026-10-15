@@ -50,6 +50,7 @@ const RETRY_POLICY_VALIDATORS = {
  */
 export const PROVIDER_COMPAT_CARRY_FIELDS = [
   "preserveReasoningContentModels",
+  "preserveResponsesReasoningContent",
   "requiresReasoningPlaceholderModels",
   "foldDeveloperRoleToSystem",
   "reasoningWireFormat",
@@ -160,6 +161,8 @@ export function providerCompatFieldConfigError(provider: Record<string, unknown>
   if (fold !== undefined && typeof fold !== "boolean") return "foldDeveloperRoleToSystem must be a boolean";
   const hideRawReasoning = provider.hideRawReasoning;
   if (hideRawReasoning !== undefined && typeof hideRawReasoning !== "boolean") return "hideRawReasoning must be a boolean";
+  const preserveResponses = provider.preserveResponsesReasoningContent;
+  if (preserveResponses !== undefined && typeof preserveResponses !== "boolean") return "preserveResponsesReasoningContent must be a boolean";
   const wire = provider.reasoningWireFormat;
   if (wire !== undefined && !PROVIDER_REASONING_WIRE_FORMATS.includes(wire as never)) {
     return `reasoningWireFormat must be one of: ${PROVIDER_REASONING_WIRE_FORMATS.join(", ")}`;
@@ -202,6 +205,20 @@ export function applyProviderCompatPatchFields(
     if (value === null) delete next.hideRawReasoning;
     else if (typeof value === "boolean") next.hideRawReasoning = value;
     else return { error: "hideRawReasoning must be a boolean" };
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "preserveResponsesReasoningContent")) {
+    const value = rawBody.preserveResponsesReasoningContent;
+    if (value === null) delete next.preserveResponsesReasoningContent;
+    else if (typeof value === "boolean") next.preserveResponsesReasoningContent = value;
+    else return { error: "preserveResponsesReasoningContent must be a boolean" };
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "inferContextWindow")) {
+    const value = rawBody.inferContextWindow;
+    if (value === null) delete next.inferContextWindow;
+    else if (typeof value === "boolean") next.inferContextWindow = value;
+    else return { error: "inferContextWindow must be a boolean or null" };
     touched = true;
   }
   if (Object.hasOwn(rawBody, "reasoningWireFormat")) {

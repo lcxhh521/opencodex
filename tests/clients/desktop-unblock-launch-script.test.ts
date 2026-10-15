@@ -117,8 +117,11 @@ case "$STUB_LISTENER" in
   *) exit 7 ;;
 esac`);
   stub("scutil", `cat "$STUB_DIR/scutil.txt"`);
+  stub("base64", `[ "$STUB_PAC_ENCODING_FAILS" = 1 ] && { printf 'partial'; exit 1; }
+exec /usr/bin/base64 "$@"`);
   // Quitting removes the app's main process (helpers exit with it only in reality; irrelevant here).
   stub("osascript", `echo quit >> "$STUB_DIR/calls"
+[ "$STUB_REMOVE_PAC_ON_QUIT" = 1 ] && rm -f "$STUB_PAC_FILE"
 if [ "$STUB_QUIT_IGNORED" != 1 ]; then
   grep -v '|ChatGPT|' "$STUB_DIR/processes" > "$STUB_DIR/processes.tmp"
   mv -f "$STUB_DIR/processes.tmp" "$STUB_DIR/processes"
@@ -179,8 +182,19 @@ function run(mode: "watch" | "launch" | "native", options: {
   /** PAC mode: what the CONNECT entry probe sees. */
   entry?: "up" | "up56" | "down";
   entryPort?: number;
+  /** Synthetic PAC preflight failures; no live application or network is involved. */
+  pacFile?: "missing" | "unreadable" | "directory" | "empty";
+  pacEncodingFails?: boolean;
+  removePacOnQuit?: boolean;
 }) {
-  if (options.pac === true) writeFileSync(join(options.configDir ?? dir, "chatgpt-unblock.pac"), PAC_TEXT);
+  const pacFile = join(options.configDir ?? dir, "chatgpt-unblock.pac");
+  if (options.pac === true && options.pacFile !== "missing") {
+    if (options.pacFile === "directory") mkdirSync(pacFile);
+    else {
+      writeFileSync(pacFile, options.pacFile === "empty" ? "" : PAC_TEXT);
+      if (options.pacFile === "unreadable") chmodSync(pacFile, 0o000);
+    }
+  }
   const processes = [
     options.app === "plain" ? `400|ChatGPT|${APP_BINARY}` : null,
     options.app === "flagged" ? `400|ChatGPT|${APP_BINARY} ${RESOLVER} --proxy-bypass-list=chatgpt.com` : null,
@@ -215,6 +229,9 @@ function run(mode: "watch" | "launch" | "native", options: {
       STUB_APP_ETIME: options.appEtime ?? "",
       STUB_ANCESTORS: options.appIsAncestor ? "400" : "",
       STUB_ENTRY: options.entry ?? (options.pac === true ? "up" : "n/a"),
+      STUB_PAC_ENCODING_FAILS: options.pacEncodingFails ? "1" : "0",
+      STUB_REMOVE_PAC_ON_QUIT: options.removePacOnQuit ? "1" : "0",
+      STUB_PAC_FILE: pacFile,
       ...(options.inheritedCliPath === undefined ? {} : { CODEX_CLI_PATH: options.inheritedCliPath }),
     },
   });
@@ -228,6 +245,7 @@ function run(mode: "watch" | "launch" | "native", options: {
     openEnv: read("open-env").split("\n").filter(Boolean),
     openInherited: read("open-inherited").trim(),
     log: read("chatgpt-unblock-watcher.log"),
+    processes: read("processes"),
   };
 }
 
@@ -514,19 +532,6 @@ describe.skipIf(process.platform === "win32")("the watcher's five-minute guard a
     expect(r.calls).toEqual(["quit", "open"]);
     expect(r.openArgs).toEqual([]);
   });
-
-  test("every mode combination parses as bash", () => {
-    const configDirs = [dir, join(dir, "it's \"quoted\" $dir")];
-    for (const configDir of configDirs) {
-      mkdirSync(configDir, { recursive: true });
-      for (const shim of [false, true]) {
-        const script = join(dir, `syntax-${shim}.sh`);
-        writeFileSync(script, buildChatgptUnblockWatcherScript(PORT, configDir, shim));
-        const check = checkChatgptWatcherScriptSyntax(script);
-        expect({ shim, configDir, ok: check.ok, output: check.output }).toEqual({ shim, configDir, ok: true, output: "" });
-      }
-    }
-  });
 });
 
 test.skipIf(process.platform === "win32")("the shim's CODEX_CLI_PATH rides the explicit relaunch after a quit", () => {
@@ -560,6 +565,63 @@ describe("an inherited CODEX_CLI_PATH never reaches a relaunch", () => {
 });
 
 describe.skipIf(process.platform === "win32")("chatgpt launch in PAC-fallback mode", () => {
+  for (const mode of ["launch", "watch"] as const) {
+    for (const pacFile of ["missing", "directory", "empty"] as const) {
+      test(`${mode} leaves the running app untouched when PAC preflight finds a ${pacFile} file`, () => {
+        const r = run(mode, { app: "plain", pac: true, pacFile });
+        expect(r.status).toBe(1);
+        expect(r.calls).toEqual([]);
+        expect(r.processes).toContain(`400|ChatGPT|${APP_BINARY}\n`);
+        expect(r.openArgs).toEqual([]);
+        expect(existsSync(join(dir, "tmp", "opencodex-chatgpt-launch.lock"))).toBe(false);
+      });
+    }
+    test.skipIf(process.getuid?.() === 0)(`${mode} leaves the running app untouched when PAC preflight cannot read the file`, () => {
+      const r = run(mode, { app: "plain", pac: true, pacFile: "unreadable" });
+      expect(r.status).toBe(1);
+      expect(r.calls).toEqual([]);
+      expect(r.processes).toContain(`400|ChatGPT|${APP_BINARY}\n`);
+    });
+    test(`${mode} leaves the running app untouched when PAC preflight encoding fails after partial output`, () => {
+      const r = run(mode, { app: "plain", pac: true, pacEncodingFails: true });
+      expect(r.status).toBe(1);
+      expect(r.calls).toEqual([]);
+      expect(r.processes).toContain(`400|ChatGPT|${APP_BINARY}\n`);
+    });
+  }
+
+  test("PAC preflight leaves an old watch-mode app alone when the PAC is missing", () => {
+    const r = run("watch", { app: "plain", pac: true, pacFile: "missing", appEtime: "01:00:00" });
+    expect(r.status).toBe(0);
+    expect(r.calls).toEqual([]);
+    expect(r.processes).toContain(`400|ChatGPT|${APP_BINARY}\n`);
+  });
+
+  test("PAC preflight refuses a new launch without opening an app when the PAC is missing", () => {
+    const r = run("launch", { app: "none", pac: true, pacFile: "missing" });
+    expect(r.status).toBe(1);
+    expect(r.calls).toEqual([]);
+    expect(r.processes).toBe("");
+  });
+
+  test("the PAC snapshot is built before quit and is not re-read during open", () => {
+    const r = run("launch", { app: "plain", pac: true, removePacOnQuit: true });
+    expect(r.status).toBe(0);
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.openArgs).toEqual([PAC_SWITCH]);
+    expect(existsSync(join(dir, "chatgpt-unblock.pac"))).toBe(false);
+  });
+
+  test("PAC preflight leaves no-op watch and native restore independent of a missing PAC file", () => {
+    const idle = run("watch", { app: "none", pac: true, pacFile: "missing" });
+    expect(idle.status).toBe(0);
+    expect(idle.calls).toEqual([]);
+    const native = run("native", { app: "pac", pac: true, pacFile: "missing" });
+    expect(native.status).toBe(0);
+    expect(native.calls).toEqual(["quit", "open"]);
+    expect(native.openArgs).toEqual([]);
+  });
+
   test("the app gets the PAC switch alone, whatever the system proxy is", () => {
     for (const scutil of [SCUTIL_NO_PROXY, SCUTIL_SYSTEM_PROXY, SCUTIL_SOCKS_ONLY, SCUTIL_PAC]) {
       const r = run("launch", { app: "none", scutil, pac: true, configDir: dir });

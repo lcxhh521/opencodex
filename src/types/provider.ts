@@ -1,4 +1,5 @@
 import type { UpstreamHttpVersion, ReasoningSummaryDelivery, CodexAccountMode } from "./wire";
+import type { AnthropicAccountPoolConfig } from "./anthropic-account-pool";
 
 /**
  * Per-provider proactive-refresh policy. The guardian only ever touches a provider whose EFFECTIVE
@@ -274,6 +275,10 @@ export interface ModelCapabilities {
 }
 
 export interface OcxProviderConfig {
+  /** Explicit builtin Pool 2 provenance; endpoints never imply ownership. */
+  anthropicOAuthInstance?: "anthropic2";
+  /** Independent Anthropic pool settings; valid only on providers.anthropic2. */
+  anthropicAccountPool?: AnthropicAccountPoolConfig;
   /** Optional browser-compatible outbound TLS profile; disabled by default. */
   tlsProfile?: "antigravity-browser";
   /** Optional short provider namespace used only at request/catalog presentation time. */
@@ -617,6 +622,11 @@ export interface OcxProviderConfig {
   contextWindow?: number;
   /** Per-model fallback when context metadata is absent; otherwise caps the reported window. */
   modelContextWindows?: Record<string, number>;
+  /**
+   * Custom providers only, default off: fill a missing context window from bundled model-ID
+   * metadata before the Context cap / 128k fallback. An estimate, not verified relay capacity.
+   */
+  inferContextWindow?: boolean;
   /** Per-model Copilot upstream tier; only the github-copilot route sends it. */
   modelContextTiers?: Record<string, "default" | "long_context">;
   /** Model-specific Codex catalog input modalities, e.g. ["text"] or ["text", "image"]. */
@@ -634,6 +644,8 @@ export interface OcxProviderConfig {
    * Responses `max_output_tokens`. Adapters still let an explicit request win.
    */
   defaultMaxOutputTokens?: number;
+  /** Opt-in Azure Responses floor for explicit positive output budgets; may raise the caller cap. */
+  minMaxOutputTokens?: number;
   /** Model-specific fallback output token budgets. Exact/model-pattern entries beat the provider default. */
   modelMaxOutputTokens?: Record<string, number>;
   /**

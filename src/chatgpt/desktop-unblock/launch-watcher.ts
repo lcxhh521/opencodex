@@ -177,10 +177,14 @@ app_age() {
   echo $(( 10#$days * 86400 + 10#$h * 3600 + 10#$m * 60 + 10#$s ))
 }
 # The PAC travels inline as a data: URL (a file:// PAC is ignored by the app), so the switch is
-# rebuilt from the file opencodex regenerated at its last start. Fails when there is no file.
+# rebuilt from the file opencodex regenerated at its last start. Reject unavailable/empty files
+# and propagate read/encoding failures instead of returning a prefix with an incomplete payload.
 pac_arg() {
-  [ -r "$PAC_FILE" ] || return 1
-  printf '%s%s' "$PAC_PREFIX" "$(base64 < "$PAC_FILE" | tr -d '\n')"
+  [ -f "$PAC_FILE" ] && [ -r "$PAC_FILE" ] || return 1
+  local encoded
+  encoded=$(set -o pipefail; base64 < "$PAC_FILE" | tr -d '\n') || return 1
+  [ -n "$encoded" ] || return 1
+  printf '%s%s' "$PAC_PREFIX" "$encoded"
 }
 # Flagged by whichever switch the configured mode uses, so a mode change corrects an app launched
 # under the other mode.
@@ -294,6 +298,7 @@ if [ "$MODE" = native ]; then
   exit 0
 fi
 
+RESTART_APP=0
 if app_running; then
   if app_flagged; then
     if shim_wanted && ! app_has_shim "$(app_pid)"; then
@@ -310,15 +315,16 @@ if app_running; then
     log "ChatGPT has been running for \${age}s without the launch switches; leaving it (run 'ocx chatgpt launch' to restart it with them)"
     exit 0
   fi
-  say "ChatGPT is running without the launch switches; restarting it"
-  quit_app || { say "ChatGPT did not quit; leaving it running without the switches"; exit 1; }
+  RESTART_APP=1
 elif [ "$MODE" != launch ]; then
   exit 0
 fi
 
+# Prepare every launch argument before quitting; open uses this same PAC snapshot even if the
+# file changes while the old app exits. Failed preflight leaves a running app untouched.
 ARGS=()
 if [ "$PAC_MODE" = 1 ]; then
-  PAC_SWITCH=$(pac_arg) || { say "no PAC file at $PAC_FILE; start opencodex with pacFallback first"; exit 1; }
+  PAC_SWITCH=$(pac_arg) || { say "cannot prepare PAC file at $PAC_FILE; start opencodex with pacFallback first"; exit 1; }
   ARGS+=("$PAC_SWITCH")
 else
   ARGS+=("$RESOLVER_ARG")
@@ -328,6 +334,10 @@ while IFS= read -r arg; do
 done < <(proxy_args)
 OPEN_ENV=()
 if [ "$SHIM_MODE" = 1 ]; then OPEN_ENV=(--env "CODEX_CLI_PATH=$SHIM_SCRIPT"); fi
+if [ "$RESTART_APP" = 1 ]; then
+  say "ChatGPT is running without the launch switches; restarting it"
+  quit_app || { say "ChatGPT did not quit; leaving it running without the switches"; exit 1; }
+fi
 open -a ChatGPT \${OPEN_ENV[@]+"\${OPEN_ENV[@]}"} --args "\${ARGS[@]}" || { say "could not launch ChatGPT"; exit 1; }
 say "launched ChatGPT with: \${ARGS[*]}"
 `;
@@ -490,6 +500,11 @@ export interface ChatgptUnblockWatcherStatus {
   plistUpToDate: boolean;
 }
 
+/** Check launchd state alone, without reading installed watcher files or building a script. */
+export function chatgptUnblockWatcherLoaded(launchctl: LaunchctlRunner = defaultLaunchctl): boolean {
+  return launchctl(["print", `${watcherDomain()}/${CHATGPT_UNBLOCK_WATCHER_LABEL}`]).ok;
+}
+
 export function chatgptUnblockWatcherStatus(
   port: number,
   configDir?: string,
@@ -499,11 +514,11 @@ export function chatgptUnblockWatcherStatus(
   const paths = chatgptUnblockWatcherPaths(configDir);
   const scriptInstalled = existsSync(paths.scriptPath);
   const plistInstalled = existsSync(paths.plistPath);
-  const agentLoaded = sh("launchctl", ["print", `${watcherDomain()}/${CHATGPT_UNBLOCK_WATCHER_LABEL}`]).ok;
+  const agentLoaded = chatgptUnblockWatcherLoaded();
   const scriptUpToDate = scriptInstalled
     && readFileSync(paths.scriptPath, "utf8") === buildChatgptUnblockWatcherScript(port, configDir, shimMode, pac);
   const plistUpToDate = plistInstalled
-    && readFileSync(paths.plistPath, "utf8") === buildChatgptUnblockWatcherPlist(paths.scriptPath, paths.lockPath, paths.errPath);
+    && readFileSync(paths.plistPath, "utf8") === buildChatgptUnblockWatcherPlist(paths.scriptPath, [paths.lockPath, paths.readyPath], paths.errPath);
   return { scriptInstalled, plistInstalled, agentLoaded, scriptUpToDate, plistUpToDate };
 }
 

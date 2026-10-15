@@ -44,15 +44,27 @@ export function overlayActivationHint(configDir = getConfigDir()): string {
 function sameId(left: OverlayIdentity | null | undefined, right: OverlayIdentity | null | undefined): boolean {
   return !!left && !!right && left.dev === right.dev && left.ino === right.ino;
 }
+/** APFS device numbers can change after reboot; persisted ownership still requires the same inode. */
+function samePersistedInode(current: OverlayIdentity, recorded: OverlayIdentity | undefined): boolean {
+  return !!recorded && current.ino === recorded.ino;
+}
 function lexical(path: string): Stats | null {
   try { return lstatSync(path); }
   catch (error) { if (fileErrorCode(error) === "ENOENT") return null; throw error; }
+}
+/** Name the path and the failed check; a group/world-writable owned file gets the chmod that fixes it. */
+function untrustedArtifact(path: string, stat: Stats): Error {
+  const prefix = `Private Codex artifact is not an owned regular file: ${path}`;
+  if (stat.isSymbolicLink() || !stat.isFile()) return new Error(`${prefix} is not a regular file`);
+  if (stat.uid !== process.getuid?.()) return new Error(`${prefix} is owned by uid ${stat.uid}`);
+  const mode = (stat.mode & 0o777).toString(8).padStart(4, "0");
+  return new Error(`${prefix} is group- or world-writable (mode ${mode}); run chmod 600 ${shQuote(path)} and retry`);
 }
 function snapshot(path: string): Snapshot | null {
   const before = lexical(path);
   if (!before) return null;
   if (!before.isFile() || before.isSymbolicLink() || before.uid !== process.getuid?.() || (before.mode & 0o022)) {
-    throw new Error("Private Codex artifact is not an owned regular file");
+    throw untrustedArtifact(path, before);
   }
   const bounded = readBoundedRegularFile(path, PRIVATE_FILE_MAX_BYTES);
   if (!bounded || "warning" in bounded) throw new Error("Private Codex artifact is unreadable or changed");
@@ -120,7 +132,7 @@ function shellEnvironment(): string {
     'unset ocx_shim_dir ocx_shim_rest ocx_shim_path ocx_shim_more ocx_shim_part', ""].join("\n");
 }
 function ownedWrapper(value: Snapshot, state: OverlayState): boolean {
-  return sameId(value.identity, state.wrapperIdentity)
+  return samePersistedInode(value.identity, state.wrapperIdentity)
     && value.content.includes(SHIM_MARKER) && value.content.includes(`exec ${shQuote(state.launcherPath)} "$@"`);
 }
 function requireOverlayIdentities(state: OverlayState): void {
@@ -129,7 +141,7 @@ function requireOverlayIdentities(state: OverlayState): void {
   }
 }
 function ownedEnvironment(value: Snapshot, state: OverlayState): boolean {
-  return sameId(value.identity, state.envIdentity) && value.content === shellEnvironment();
+  return samePersistedInode(value.identity, state.envIdentity) && value.content === shellEnvironment();
 }
 function revalidateOverlay(state: OverlayState, saved: Snapshot | null, wrapper: Snapshot | null, env: Snapshot | null): void {
   if (!unchanged(statePath(), saved) || !unchanged(state.wrapperPath, wrapper) || !unchanged(overlayPaths().env, env)) {
@@ -193,6 +205,7 @@ export function overlayDiagnostic(state: ShimState): CodexShimDiagnostic {
     inspection?.revalidate();
   } catch (error) { active = null; runnable = false; integrityMessage = failure(error).message; }
   return { installed: true, healthy: complete && runnable && active === true, runnable, active,
+    activationPending: complete && runnable && active !== true,
     summary: `Codex PATH shim: ${complete && runnable ? "ready" : "unhealthy"} at ${state.wrapperPath}; launcher ${state.launcherPath}; PATH ${active === null ? "unverified" : active ? "active" : "inactive"}. ${complete && runnable ? overlayActivationHint() : integrityMessage || "Run ocx codex-shim install to repair the shim."}` };
 }
 
@@ -396,7 +409,9 @@ function failure(error: unknown): InstallResult {
   const message = error instanceof Error ? error.message : "Codex overlay operation failed";
   return { installed: false, refused: true, message: truncateRetainedUtf8(message.replace(/[\r\n]/g, " "), MAX_DIAGNOSTIC_VALUE_BYTES) };
 }
-function installLocked(discover: () => string | null, automatic: boolean, check: () => void): InstallResult {
+function installLocked(
+  discover: () => string | null, automatic: boolean, check: () => void, describeMiss?: () => string | null,
+): InstallResult {
   recoverJournal(check);
   const pinnedState = snapshot(statePath());
   const result = readStateResult();
@@ -420,18 +435,20 @@ function installLocked(discover: () => string | null, automatic: boolean, check:
     const discovered = automatic ? null : discover();
     launcher = discovered ? resolve(discovered) : null;
   }
-  if (!launcher) throw new Error("Native Codex launcher not found; install or repair Codex with its package manager");
+  // A discovery that refused a candidate (fnm's temporary multishell path) says why; reporting it
+  // as plain absence sent users to reinstall a Codex that was already there (#6963).
+  if (!launcher) throw new Error(describeMiss?.() || "Native Codex launcher not found; install or repair Codex with its package manager");
   check();
   return publishOverlay(launcher, overlay, check, pinnedState);
 }
-export function installUnixOverlay(discover: () => string | null): InstallResult {
+export function installUnixOverlay(discover: () => string | null, describeMiss?: () => string | null): InstallResult {
   let lock: ReturnType<typeof tryAcquireShimRestoreLock> = null;
   try {
     const check = namespace(true);
     lock = tryAcquireShimRestoreLock();
     if (!lock) throw new Error("Codex shim operation is already in progress; retry later");
     check();
-    return installLocked(discover, false, check);
+    return installLocked(discover, false, check, describeMiss);
   } catch (error) { return failure(error); }
   finally { lock?.release(); }
 }

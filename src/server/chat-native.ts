@@ -1,3 +1,5 @@
+import { createPhysicalSendReporter } from "../lib/request-execution-budget";
+import { createInferenceSendBudget } from "./inference/context";
 import { buildOpenAIChatPassthroughRequest, createOpenAIChatAdapter } from "../adapters/openai-chat";
 import type { AdapterRequest, ProviderAdapter } from "../adapters/base";
 import { isNativeChatRouteEligible } from "./chat-native-eligibility";
@@ -16,8 +18,9 @@ import {
   isCyberPolicyCode,
   isCyberPolicyMessage,
   SEND_BUDGET_EXHAUSTED_CODE,
+  UNDECLARED_TOOL_CALL_ERROR_CODE,
 } from "../lib/errors";
-import type { RequestExecutionBudget } from "../lib/request-execution-budget";
+import { reportDispatchSends, type RequestExecutionBudget, type SingleUseDispatchPermit } from "../lib/request-execution-budget";
 import type { AdmissionLease } from "../lib/admission";
 import { readBoundedResponseBody } from "../lib/bounded-body";
 import { redactSecretString } from "../lib/redact";
@@ -72,7 +75,7 @@ import {
   recordAttemptCredentialSource,
   type RequestLogContext,
 } from "./request-log";
-import { jsonCompletionSse, nativeChatSse, structuredError, usageFromChat } from "./chat-native-sse";
+import { chatResponseHasUndeclaredToolCalls, UNDECLARED_CHAT_TOOL_MESSAGE, jsonCompletionSse, nativeChatSse, structuredError, usageFromChat } from "./chat-native-sse";
 import { beginInferenceAttempt, type InferenceAttempt } from "./inference/attempt";
 import { createFinalRequestLog } from "./inference/final-log";
 import { registerTurn, unregisterTurn } from "./lifecycle";
@@ -198,6 +201,7 @@ export interface NativeChatExecution extends HandleNativeChatOptions {
    * the parent row, replace the one the final log settles.
    */
   sendBudget?: RequestExecutionBudget;
+  comboDispatchPermit?: SingleUseDispatchPermit;
   /** Replaces the request-relative first-output mark; a combo child records its own. */
   onFirstOutput?: () => void;
   /** The lease a streamed body holds; defaults to `logIds.turnAdmissionLease`. */
@@ -254,6 +258,7 @@ export function createNativeChatComboSource(input: {
       translatorBudget: input.translatorBudget,
       finishLog: child.finishLog,
       sendBudget: child.sendBudget,
+      comboDispatchPermit: child.comboDispatchPermit,
       onFirstOutput: child.onFirstOutput,
       ...(child.turnAdmissionLease ? { turnAdmissionLease: child.turnAdmissionLease } : {}),
     }, child.attemptHandle),
@@ -271,6 +276,10 @@ export async function runNativeChatAttempt(
 ): Promise<Response> {
   const { req, config, logCtx, logIds, route, requestedModel, requestedStream, translatorBudget, finishLog } = execution;
   const { sendBudget } = execution;
+  const clientDeclaredEmptyToolCatalog = Array.isArray(execution.chatBody.tools) && execution.chatBody.tools.length === 0;
+  const declaredLegacyFunctionNames = new Set<string>(clientDeclaredEmptyToolCatalog && Array.isArray(execution.chatBody.functions)
+    ? execution.chatBody.functions.flatMap(fn => isRec(fn) && typeof fn.name === "string" && fn.name.length > 0 ? [fn.name] : [])
+    : []);
   const { attempt } = attemptHandle;
   const onFirstOutput = execution.onFirstOutput
     ?? (logIds ? () => recordFirstOutput(logCtx, logIds.start) : undefined);
@@ -314,6 +323,7 @@ export async function runNativeChatAttempt(
   let activeProvider: OcxProviderConfig = route.provider;
   stampApiKeyAccountLabel(logCtx, route.providerName, activeProvider);
   const spendTracker = sendBudget ? undefined : attachRequestSpendTracker(req, logCtx);
+  const physicalBudget = sendBudget ?? createInferenceSendBudget(req, logCtx);
   let activeAdapter: ProviderAdapter = createOpenAIChatAdapter(activeProvider);
   let activeRequest: AdapterRequest;
   let retainedRequestBytes = 0;
@@ -356,14 +366,16 @@ export async function runNativeChatAttempt(
   // key rotation so recovery cannot replace the ceiling along with the active credential.
   const requestTransientPolicy = transientRetryPolicyFor(activeProvider);
   let transientSendsUsed = 0;
-  // A combo child also answers to the request's shared base allowance, at the cap its own ladder
-  // uses. Its first send is exempt: the combo reserved it before dispatching this target.
+  // A Combo child's initial send is prepaid, not exempt from the shared ceiling. Only its
+  // owning permit exposes that one booking in addition to the still-unspent allowance, and only
+  // until this child's first physical send has started and settled the booking.
   const sharedSendCap = requestTransientPolicy?.attempts ?? TRANSIENT_RETRY_MAX_ATTEMPTS;
   let physicalSends = 0;
+  let initialSendStarted = false;
   const remainingSharedSends = (): number => {
     if (!sendBudget) return Number.POSITIVE_INFINITY;
     const remaining = sendBudget.remainingBaseSends(sharedSendCap);
-    return physicalSends === 0 ? Math.max(1, remaining) : remaining;
+    return Math.min(sharedSendCap, remaining + (!initialSendStarted && execution.comboDispatchPermit ? 1 : 0));
   };
   const remainingTransientSends = (): number => Math.min(
     requestTransientPolicy
@@ -399,6 +411,21 @@ export async function runNativeChatAttempt(
     claimAmbiguousResend,
   );
 
+  // Non-enforced accounting for one physical send. Enforced spend is owned by the reporter.
+  const comboReceipt = Boolean(sendBudget && execution.comboDispatchPermit);
+  const settleNonEnforcedSend = (url: string): void => {
+    if (sendBudget) {
+      // Backstop for sends the helper cannot see coming (a reset replay). The first
+      // report settles the combo's booking; each later one is charged and booked.
+      if (physicalSends > 0 && sendBudget.remainingBaseSends(sharedSendCap) <= 0) {
+        throw new SendBudgetExhaustedError(safeHostLabel(url));
+      }
+      physicalSends += 1;
+      reportDispatchSends(sendBudget, 1, execution.comboDispatchPermit);
+      initialSendStarted = true;
+    } else if (!spendTracker?.charge()) throw new NativeChatSpendRefusal();
+  };
+
   const send = async (
     request: AdapterRequest,
     recovery?: "rate-limit-429" | "key-429" | UpstreamSendRecovery,
@@ -428,6 +455,9 @@ export async function runNativeChatAttempt(
           providerFetch(activeProvider, undefined, {
             providerName: route.providerName,
             modelId: route.modelId,
+            onPhysicalDispatch: comboReceipt
+              ? () => { if (!physicalBudget.spendEnforced) settleNonEnforcedSend(request.url); }
+              : undefined,
             dispatchOverride: async (_input, init, execute) => {
               if (!providerApiKeySelectionIsCurrent(config, route.providerName, activeProvider)) {
                 const current = resolveCurrentProviderApiKeyTransport(config, route.providerName, activeProvider);
@@ -450,30 +480,41 @@ export async function runNativeChatAttempt(
               const encoding = new Headers(init.headers).get("accept-encoding");
               if (!headers.has("accept-encoding") && encoding) headers.set("accept-encoding", encoding);
               if (init.signal?.aborted) throw init.signal.reason;
-              if (sendBudget) {
-                // Backstop for sends the helper cannot see coming (a reset replay). The first
-                // report settles the combo's booking; each later one is charged and booked.
-                if (physicalSends > 0 && sendBudget.remainingBaseSends(sharedSendCap) <= 0) {
-                  throw new SendBudgetExhaustedError(safeHostLabel(request.url));
+              const spendReport = createPhysicalSendReporter(physicalBudget, () => ({
+                poolId: logCtx.spendPoolId ?? route.providerName, identityId: logCtx.accountLogLabel,
+              }), execution.comboDispatchPermit);
+              let dispatched: Response;
+              try {
+                // Capture this request's spend policy at its first physical boundary, including
+                // observe-only starts; later configuration changes belong to later requests.
+                if (spendReport.beforeSend && !spendReport.beforeSend()) {
+                  if ((logCtx.spendTracker as { refusals?: number } | undefined)?.refusals) throw new NativeChatSpendRefusal();
+                  throw new SendBudgetExhaustedError();
                 }
-                physicalSends += 1;
-                sendBudget.used += 1;
-              } else if (!spendTracker?.charge()) throw new NativeChatSpendRefusal();
-              noteProviderAttemptSend(logCtx, route.providerName, activeProvider, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
-              // A reselected provider transport is still a physical send: the connection policy
-              // and manual-redirect ownership wrap the selected implementation (#4992).
-              const dispatched = await sendWithConnectionPolicy(
-                (activeProvider as OcxProviderTransport).fetch ?? execute,
-                request.url,
-                applyUpstreamRecoveryInit({
-                  ...init, method: request.method, headers, body: request.body,
-                }, transportRecovery),
-                // Reselection can replace the provider transport and the wire shape, so the
-                // egress route is bound to the provider this send actually uses. Omitting it
-                // here would let a provider transport bypass its configured route entirely,
-                // because that transport wins over the executor that carries the binding.
-                { providerName: route.providerName, provider: activeProvider },
-              );
+                // Enforced spend started this send at `beforeSend`. A Combo child's non-enforced
+                // send is booked by the physical-dispatch receipt instead, so a local refusal
+                // before the wire refunds the booking rather than charging it.
+                if (physicalBudget.spendEnforced) initialSendStarted = true;
+                else if (!comboReceipt) settleNonEnforcedSend(request.url);
+                noteProviderAttemptSend(logCtx, route.providerName, activeProvider, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
+                // A reselected provider transport is still a physical send: the connection policy
+                // and manual-redirect ownership wrap the selected implementation (#4992).
+                dispatched = await sendWithConnectionPolicy(
+                  (activeProvider as OcxProviderTransport).fetch ?? execute,
+                  request.url,
+                  applyUpstreamRecoveryInit({
+                    ...init, method: request.method, headers, body: request.body,
+                  }, transportRecovery),
+                  // Reselection can replace the provider transport and the wire shape, so the
+                  // egress route is bound to the provider this send actually uses. Omitting it
+                  // here would let a provider transport bypass its configured route entirely,
+                  // because that transport wins over the executor that carries the binding.
+                  { providerName: route.providerName, provider: activeProvider },
+                );
+              } finally {
+                try { if (physicalBudget.spendEnforced) spendReport(1); }
+                finally { spendReport.close?.(); }
+              }
               if (!dispatched.ok) await recordKeyAttemptFailure(logCtx, dispatched, init.signal ?? upstream.signal);
               return dispatched;
             },
@@ -558,7 +599,7 @@ export async function runNativeChatAttempt(
     upstream.abort();
     if (req.signal.aborted) return fail(499, "Client cancelled request", "client_cancelled");
     const sendError = error instanceof UpstreamRetryEvidenceError ? error.cause : error;
-    if (sendBudget && sendError instanceof SendBudgetExhaustedError) {
+    if (sendError instanceof SendBudgetExhaustedError) {
       // A decision this process made, answered as the Responses path answers it: 429, not 502.
       return fail(429, sendError.message, SEND_BUDGET_EXHAUSTED_CODE, SEND_BUDGET_EXHAUSTED_CODE);
     }
@@ -704,6 +745,8 @@ export async function runNativeChatAttempt(
       signal: upstream.signal,
       stallTimeoutSec: config.stallTimeoutSec,
       localUpstream: isLocalUpstream(activeProvider.baseUrl),
+      clientDeclaredEmptyToolCatalog,
+      declaredLegacyFunctionNames,
       onFirstOutput,
       onUsage: usage => {
         if (!recordKeyWireAttemptUsage(logCtx, usage)) {
@@ -803,6 +846,9 @@ export async function runNativeChatAttempt(
       logCtx.usage = usage;
       attempt.usage = usage;
     }
+  }
+  if (clientDeclaredEmptyToolCatalog && chatResponseHasUndeclaredToolCalls(completion, declaredLegacyFunctionNames)) {
+    return fail(502, UNDECLARED_CHAT_TOOL_MESSAGE, "upstream_error", UNDECLARED_TOOL_CALL_ERROR_CODE);
   }
   onFirstOutput?.();
   try {

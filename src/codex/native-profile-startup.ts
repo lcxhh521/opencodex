@@ -3,7 +3,7 @@ import { loadConfig } from "../config";
 import { initializeMainAccountPolicyBinding } from "./account-lifecycle";
 import { isMainAccountHardLockEnabled } from "./main-account-hard-lock";
 import { clearAccountNeedsReauth } from "./account-runtime-state";
-import { MAIN_CODEX_ACCOUNT_ID } from "./main-account";
+import { MAIN_CODEX_ACCOUNT_ID } from "./account-id";
 import {
   probeNativeProfileRecoveryState,
   resolveNativeProfileContext,
@@ -20,6 +20,7 @@ import { withNativeMainExclusiveClaim } from "./native-main-claim";
 import { scrubNativeMainAuthTempResidues } from "./native-main-auth-temp";
 import { NATIVE_STAGE_SWEEP_INTERVAL_MS } from "./native-profile-stage-store";
 import type { NativeCodexOwnership } from "../integrations/native/ownership-preflight";
+import { isPassiveRead } from "../lib/passive-read";
 
 export type NativeMainStartupGateSnapshot =
   | { status: "ready"; homeId: string | null }
@@ -701,7 +702,9 @@ export async function releaseNativeMainStartupLifecycle(server: object): Promise
 
 export function isNativeMainTrafficBlocked(): boolean {
   const reason = activeServiceOwnershipBlockReason();
-  if (reason !== null && reprobeServiceOwnership(reason)) {
+  // A passive read (a Remote Link Child's, #6959) reports the gate as it stands: re-inspecting
+  // service ownership can activate the native-main lifecycle and its recovery on this machine.
+  if (reason !== null && !isPassiveRead() && reprobeServiceOwnership(reason)) {
     // The host became ownable after boot (#2108): the fence lifts here rather than
     // waiting for the restart the reporter had to perform by hand.
     return activeServiceOwnershipBlockReason() !== null || snapshot.status === "blocked";

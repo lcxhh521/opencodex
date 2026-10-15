@@ -19,7 +19,8 @@
  * long-lived proxy cannot grow without limit.
  */
 
-import { createHash, createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { thoughtSignatureReplaySalt } from "./thought-signature-replay";
 import type {
   OcxProviderConfig,
   OcxReasoningReplayIdentity,
@@ -27,9 +28,25 @@ import type {
 } from "../types";
 
 const MAX_ENTRIES = 64;
+export interface NativeReasoningOwner { destination: string; credential: string }
+
+/** Bind exact ciphertext to the durable route that accepted it. */
+export function nativeReasoningTag(owner: NativeReasoningOwner | undefined, blob: string): string | undefined {
+  const salt = thoughtSignatureReplaySalt();
+  if (!owner || !salt || salt.length < 16 || blob.length === 0) return undefined;
+  return createHmac("sha256", salt).update("native-reasoning\0")
+    .update(JSON.stringify([owner.destination, owner.credential, createHash("sha256").update(blob).digest("hex")]))
+    .digest("hex");
+}
+
+export function nativeReasoningTagMatches(expected: string | undefined, presented: string | undefined): boolean {
+  if (!expected || !presented || !/^[a-f0-9]{64}$/.test(expected) || !/^[a-f0-9]{64}$/.test(presented)) return false;
+  return timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(presented, "hex"));
+}
 const MAX_TOTAL_BYTES = 256 * 1024;
 const TTL_MS = 60 * 60 * 1000;
 const OPAQUE_BLOB_REJECTION_TTL_MS = 5 * 60 * 1000;
+const MAX_OPAQUE_BLOB_REJECTION_FINGERPRINTS = 256;
 const replayIdentityKey = randomBytes(32);
 const CREDENTIAL_HEADER_NAMES = new Set([
   "authorization",
@@ -62,7 +79,13 @@ interface ServingIdentityEntry {
 interface OpaqueBlobRejectionEntry {
   bytes: number;
   at: number;
+  /** Undefined retains the legacy blanket rejection; only payload digests are stored here. */
+  fingerprints?: ReadonlySet<string>;
 }
+
+export type ReasoningReplayOpaqueBlobRejection =
+  | { mode: "blanket" }
+  | { mode: "selective"; fingerprints: ReadonlySet<string> };
 
 const entries = new Map<string, CacheEntry>();
 const servingIdentities = new Map<string, ServingIdentityEntry>();
@@ -272,18 +295,57 @@ export function reasoningReplayOpaqueBlobRejectionMemoized(
   return opaqueBlobRejections.has(key);
 }
 
+/** Undefined means no live memo; a selective result owns a defensive copy of its digests. */
+export function getReasoningReplayOpaqueBlobRejection(
+  scope: OcxReasoningReplayScopeRef | undefined,
+): ReasoningReplayOpaqueBlobRejection | undefined {
+  const key = opaqueBlobRejectionKeyFor(scope);
+  if (!key) return undefined;
+  sweepExpiredOpaqueBlobRejections(now());
+  const entry = opaqueBlobRejections.get(key);
+  return entry === undefined ? undefined : entry.fingerprints === undefined ? { mode: "blanket" }
+    : { mode: "selective", fingerprints: new Set(entry.fingerprints) };
+}
+
+/** Incomplete, invalid or unbounded enumerations cannot safely narrow the legacy rejection. */
+function boundedRejectionFingerprints(fingerprints: ReadonlySet<string> | undefined): Set<string> | undefined {
+  if (fingerprints === undefined) return undefined;
+  const copy = new Set<string>();
+  try {
+    // The intrinsic validates a real Set without trusting an overridden iterator or size getter.
+    for (const value of Set.prototype.values.call(fingerprints) as IterableIterator<unknown>) {
+      if (typeof value !== "string" || value.length !== 64 || !/^[a-f0-9]{64}$/.test(value)
+        || copy.size >= MAX_OPAQUE_BLOB_REJECTION_FINGERPRINTS) return undefined;
+      copy.add(value);
+    }
+  } catch { return undefined; }
+  return copy.size > 0 ? copy : undefined;
+}
+
 /** Record only after a blobless retry succeeded for this durable serving identity. */
 export function rememberReasoningReplayOpaqueBlobRejection(
   scope: OcxReasoningReplayScopeRef | undefined,
+  fingerprints?: ReadonlySet<string>,
 ): void {
   const key = opaqueBlobRejectionKeyFor(scope);
   if (!key) return;
-  const bytes = Buffer.byteLength(key, "utf8");
-  if (bytes > MAX_TOTAL_BYTES) return;
+  const keyBytes = Buffer.byteLength(key, "utf8");
+  if (keyBytes > MAX_TOTAL_BYTES) return;
   const at = now();
   sweepExpiredOpaqueBlobRejections(at);
-  if (opaqueBlobRejections.has(key)) deleteOpaqueBlobRejection(key);
-  opaqueBlobRejections.set(key, { bytes, at });
+  const previous = opaqueBlobRejections.get(key);
+  let merged = previous && previous.fingerprints === undefined ? undefined : boundedRejectionFingerprints(fingerprints);
+  if (merged && previous?.fingerprints) {
+    for (const fingerprint of previous.fingerprints) {
+      merged.add(fingerprint);
+      if (merged.size > MAX_OPAQUE_BLOB_REJECTION_FINGERPRINTS) { merged = undefined; break; }
+    }
+  }
+  // A near-limit key can still retain its existing blanket memo if the digest set will not fit.
+  if (merged && keyBytes + merged.size * 64 > MAX_TOTAL_BYTES) merged = undefined;
+  const bytes = keyBytes + (merged?.size ?? 0) * 64;
+  if (previous) deleteOpaqueBlobRejection(key);
+  opaqueBlobRejections.set(key, { bytes, at, ...(merged ? { fingerprints: merged } : {}) });
   opaqueBlobRejectionTotalBytes += bytes;
   while (
     (opaqueBlobRejectionTotalBytes > MAX_TOTAL_BYTES || opaqueBlobRejections.size > MAX_ENTRIES)

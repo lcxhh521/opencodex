@@ -171,7 +171,7 @@ describe("injectCodexConfig integration (Design B)", () => {
   // read-only bit, so neither can express the permission this test needs.
   const unreadablePreimages =
     process.platform === "win32" || process.getuid?.() === 0 ? test.skip : test;
-  unreadablePreimages("unreadable preimages abort capture and remain visible as compensation failures", () => {
+  unreadablePreimages.each(["same", "absent", "different"] as const)("unreadable preimages abort capture and remain visible as compensation failures (journal preimage=%s)", (journalPreimage) => {
     console.error('ocx-startup-diagnostic:{"file":"codex-inject-integration","phase":"unreadable_preimages_entered"}');
     const script = `
       const fs = require("node:fs");
@@ -200,7 +200,7 @@ describe("injectCodexConfig integration (Design B)", () => {
         catch(error) { outcomes.push(error.code==="EACCES"); }
         unchangedAfterEach.push(readWatched().every((bytes,i)=>bytes===original[i]));
       }
-      const restored=restoreCodexPreImages({config:original[0],profile:original[1],journal:original[2]});
+      const restored=restoreCodexPreImages({config:original[0],profile:original[1],journal:${journalPreimage === "same" ? "original[2]" : journalPreimage === "absent" ? "null" : JSON.stringify("# stale journal preimage\n")}});
       const preserved=readWatched().every((bytes,i)=>bytes===original[i]);
       allow();
       console.log(JSON.stringify({unreadable,captureCode,restored,outcomes,unchangedAfterEach,preserved}));
@@ -241,8 +241,10 @@ describe("injectCodexConfig integration (Design B)", () => {
       errorCode,
     })}`);
     expect(child.status, child.stderr).toBe(0);
+    // Failed profile compensation retains the current recovery journal rather than
+    // deleting it or replacing it with a preimage; that deferred restore is reported.
     expect(JSON.parse(child.stdout)).toEqual({
-      unreadable: true, captureCode: "EACCES", restored: { complete: false, unrestored: ["profile"] }, outcomes: [true, true, true], unchangedAfterEach: [true, true, true], preserved: true,
+      unreadable: true, captureCode: "EACCES", restored: { complete: false, unrestored: ["profile", "journal"] }, outcomes: [true, true, true], unchangedAfterEach: [true, true, true], preserved: true,
     });
   });
 
@@ -898,10 +900,12 @@ describe("injectCodexConfig integration (Design B)", () => {
     expect(result.status).toBe(0);
     const value = JSON.parse(result.stdout.trim());
     expect(value.preflight.success).toBe(true);
+    expect(value.preflight.configChanged).not.toBe(true);
     expect(value.before).toBe(original);
     expect(value.afterPreflight).toBe(original);
     expect(value.journalAfterPreflight).toBe(false);
     expect(value.committed.success).toBe(true);
+    expect(value.committed.configChanged).toBe(true);
     expect(value.injected).toContain('base_url = "https://hub.example.test/v1"');
     expect(value.injected).toContain('env_key = "OPENCODEX_API_AUTH_TOKEN"');
     expect(value.owner).toEqual({ kind: "client", apiKeyId: "client-key-1" });
@@ -969,9 +973,13 @@ describe("injectCodexConfig integration (Design B)", () => {
   test("re-inject over a Design B config is idempotent", () => {
     writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
 
-    expect(runInject(codexHome, ocxHome).status).toBe(0);
+    const firstResult = runInject(codexHome, ocxHome);
+    expect(firstResult.status, firstResult.stderr).toBe(0);
+    expect(JSON.parse(firstResult.stdout)).toMatchObject({ success: true, configChanged: true });
     const first = readFileSync(join(codexHome, "config.toml"), "utf8");
-    expect(runInject(codexHome, ocxHome).status).toBe(0);
+    const secondResult = runInject(codexHome, ocxHome);
+    expect(secondResult.status, secondResult.stderr).toBe(0);
+    expect(JSON.parse(secondResult.stdout)).toMatchObject({ success: true, configChanged: false });
     const second = readFileSync(join(codexHome, "config.toml"), "utf8");
 
     expect(second.match(/openai_base_url/g)?.length).toBe(1);
@@ -1512,6 +1520,7 @@ describe("injectCodexConfig integration (Design B)", () => {
     expect(result.message).toContain("routing NOT injected");
     expect(result.message).toContain('external model_provider "custom"');
     expect(result.configApplied).toBe(false);
+    expect(result.configChanged).not.toBe(true);
     expect(result.message).toContain("http://127.0.0.1:10100/v1");
     expect(result.message).toContain("Responses passthrough");
     expect(result.nativeSubagentDefaultsWarning).toContain("external model_provider");

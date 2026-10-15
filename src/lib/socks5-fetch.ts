@@ -1,7 +1,7 @@
 import net, { type Socket } from "node:net";
 import tls, { type TLSSocket } from "node:tls";
 import { classifyContentCoding, isNullBodyStatus } from "./http-response-semantics";
-import { socks5Credentials, socks5Handshake } from "./socks5-handshake";
+import { socks5Credentials, socks5Handshake, Socks5HandshakeError } from "./socks5-handshake";
 
 const DEFAULT_SOCKS5_PORT = 1080;
 const SOCKS5_CONNECT_TIMEOUT_MS = 30_000;
@@ -10,6 +10,7 @@ const MAX_RESPONSE_HEADER_BYTES = 64 * 1024;
 const MAX_BODY_SLICE_BYTES = 64 * 1024;
 const MAX_DECODED_BODY_BYTES = 32 * 1024 * 1024;
 const MAX_STREAM_DECODE_EXPANSION_RATIO = 128;
+const SOCKS5_VERSION = 0x05;
 const CRLF = Buffer.from("\r\n");
 const HEADER_END = Buffer.from("\r\n\r\n");
 
@@ -32,7 +33,10 @@ function validateProxy(proxy: string): URL {
     throw new Socks5FetchError("SOCKS5 proxy port is invalid");
   }
   if (parsed.search || parsed.hash) throw new Socks5FetchError("SOCKS5 proxy URL must not contain a query or fragment");
-  socks5Credentials(parsed);
+  try { socks5Credentials(parsed); } catch (error) {
+    if (error instanceof Socks5HandshakeError) throw new Socks5FetchError(error.message);
+    throw error;
+  }
   return parsed;
 }
 
@@ -261,6 +265,7 @@ async function socks5Connect(proxy: string, target: URL, signal?: AbortSignal): 
     return socket;
   } catch (error) {
     socket.destroy();
+    if (error instanceof Socks5HandshakeError) throw new Socks5FetchError(error.message);
     throw error;
   } finally {
     reader.dispose();
@@ -288,25 +293,50 @@ function requestHeaders(request: Request, target: URL): { text: string; chunked:
 
 async function secureSocket(socket: Socket, target: URL, signal: AbortSignal): Promise<TLSSocket> {
   return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      socket.destroy();
+      reject(signal.reason instanceof Error ? signal.reason : new Error("The operation was aborted"));
+      return;
+    }
     const tlsSocket = tls.connect({
       socket,
       servername: target.hostname,
       rejectUnauthorized: true,
     });
-    const onAbort = () => {
-      tlsSocket.destroy();
-      reject(signal.reason instanceof Error ? signal.reason : new Error("The operation was aborted"));
-    };
-    const onSecureConnect = () => {
+    let settled = false;
+    // Absolute deadline: a peer sending occasional TLS bytes must not extend the handshake.
+    const timer = setTimeout(() => {
+      fail(new Socks5FetchError("SOCKS5 TLS handshake timed out"));
+    }, SOCKS5_CONNECT_TIMEOUT_MS);
+    const cleanup = () => {
+      clearTimeout(timer);
       signal.removeEventListener("abort", onAbort);
+      tlsSocket.removeListener("secureConnect", onSecureConnect);
+      tlsSocket.removeListener("error", onError);
+      tlsSocket.removeListener("close", onClose);
+    };
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      // No error argument: pending event observers must not receive a second error.
+      tlsSocket.destroy();
+      reject(error);
+    };
+    const onAbort = () => fail(signal.reason instanceof Error ? signal.reason : new Error("The operation was aborted"));
+    const onError = (error: Error) => fail(error);
+    const onClose = () => fail(new Socks5FetchError("SOCKS5 upstream closed during TLS handshake"));
+    const onSecureConnect = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
       resolve(tlsSocket);
     };
     tlsSocket.once("secureConnect", onSecureConnect);
-    tlsSocket.once("error", error => {
-      signal.removeEventListener("abort", onAbort);
-      reject(error);
-    });
+    tlsSocket.once("error", onError);
+    tlsSocket.once("close", onClose);
     signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
   });
 }
 

@@ -2,6 +2,13 @@
 
 The opt-in key-auth Responses hosted-search bridge follows the
 [continuation binding contract](../providers-and-adapters.md#hosted-search-continuation-binding).
+`src/web-search/loop.ts` follows [prepaid initial sends](../transports/responses-spend.md#prepaid-initial-sends)
+for Combo child inference: generic HTTP/WS reports physical dispatch; fetchResponse receives the
+live adapter budget instead. Initial headers are acquired before Response return, so unsent failures
+remain with ingress cleanup. RunTurn search retains its ordinary producer owner; standalone search
+and direct callers keep their existing behavior.
+
+Final client tool output after hosted search follows the [explicit empty client-catalog boundary](../transports/responses-wire-shapes.md#declared-tool-membership-by-inbound-wire), before client delivery or continuation state. Internal search execution retains its existing behavior.
 
 ## Serving the relay without ChatGPT auth
 

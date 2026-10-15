@@ -7,7 +7,7 @@ import { rotateAnthropicAccountOn429 } from "../helpers/anthropic-shared-quota";
  * prefix back in the answer. Pooled accounts keep the native wire with shared recovery. Every credential here is
  * synthetic, and any real network call fails the case.
  */
-import { afterEach, beforeEach, describe, expect, test, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, spyOn, mock } from "bun:test";
 import { mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -181,6 +181,22 @@ async function send(config: OcxConfig, body: Record<string, unknown>, identityHe
 }
 
 describe("managed native Messages over Anthropic OAuth", () => {
+  for (const stream of [false, true]) for (const effort of ["xhigh", "low"]) {
+    test(`logs requested effort over OAuth: ${effort}, stream=${stream}`, async () => {
+      await seed(1);
+      const body = { ...BODY, output_config: { effort }, thinking: { type: "adaptive" }, stream };
+      const { response, row } = await send(fixtureConfig(), body);
+      expect(response.status).toBe(200);
+      expect(row.protocolTrace?.mode).toBe("native");
+      expect(row.requestedEffort).toBe(effort);
+      expect(row.attempts).toHaveLength(1);
+      expect(row.attempts![0]!.requestedEffort).toBe(effort);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]!.body.output_config).toEqual(body.output_config);
+      expect(sent[0]!.body.thinking).toEqual(body.thinking);
+    });
+  }
+
   for (const native of [true, false]) for (const enabled of [true, false]) {
     for (const state of ["needs-reauth", "unusable", "cooled", "paused-cooled", "healthy"] as const) {
       test(`Messages native=${native}, pool=${enabled}: pacing ${state} preserves fresh admission`, async () => {
@@ -445,13 +461,17 @@ describe("native pooled Messages dispatch", () => {
       return Response.json(MESSAGE);
     }) as typeof fetch;
     const metadata = { user_id: JSON.stringify({ account_uuid: uuids[0], session_id: "fixture-recovery-session" }) };
-    const body = { ...BODY, stream: false, metadata, system: [{ type: "text", text: "fixture cache prefix", cache_control: { type: "ephemeral" } }] };
+    const body = { ...BODY, output_config: { effort: "xhigh" }, stream: false, metadata, system: [{ type: "text", text: "fixture cache prefix", cache_control: { type: "ephemeral" } }] };
     const { response, row } = await send(config, body);
     expect(response.status).toBe(200);
     expect(row.protocolTrace?.mode).toBe("native");
+    expect(row.requestedEffort).toBe("xhigh");
+    expect(row.attempts).toHaveLength(2);
+    expect(row.attempts!.map(attempt => attempt.requestedEffort)).toEqual(["xhigh", "xhigh"]);
     expect(sent).toHaveLength(2);
     expect(sent.map(entry => entry.headers.get("authorization"))).toEqual([`Bearer ${credential(0).access}`, `Bearer ${credential(1).access}`]);
     for (const [index, entry] of sent.entries()) {
+      expect(entry.body.output_config).toEqual(body.output_config);
       expect(entry.headers.has("x-api-key")).toBe(false);
       expect(JSON.parse((entry.body.metadata as typeof metadata).user_id).account_uuid).toBe(uuids[index]);
       expect(entry.body.messages).toEqual(body.messages.map(message => message.role !== "assistant" ? message : { ...message, content: (message.content as Record<string, unknown>[]).map(block => block.type === "tool_use" ? { ...block, name: "custom_lookup" } : block) }));
@@ -702,9 +722,19 @@ test("malformed route after an asynchronous admission is a request error", async
   expect(anthropicSessionAffinitySizeForTests()).toBe(0);
 });
 
+function mockPrimaryFamilyClaim(implementation: typeof familyQuota.claimAnthropicFamilyRevalidation) {
+  const claim = mock(implementation);
+  const resolve = familyQuota.anthropicModelQuotaFor;
+  const factory = spyOn(familyQuota, "anthropicModelQuotaFor").mockImplementation(instance => {
+    const facade = resolve(instance);
+    return instance === "anthropic" ? { ...facade, claimAnthropicFamilyRevalidation: claim } : facade;
+  });
+  return { claim, restoreClaim: () => factory.mockRestore() };
+}
+
 test("denied family lease records no physical send and creates no spend journal", async () => {
   await seed(1);
-  const denied = spyOn(familyQuota, "claimAnthropicFamilyRevalidation").mockReturnValue(null);
+  const { claim: denied, restoreClaim } = mockPrimaryFamilyClaim(() => null);
   try {
     const { response, row } = await send(fixtureConfig(), { ...BODY, stream: false });
     expect(response.status).toBe(429);
@@ -712,13 +742,13 @@ test("denied family lease records no physical send and creates no spend journal"
     expect(sent).toHaveLength(0);
     expect(row.attempts?.reduce((sum, attempt) => sum + attempt.sendCount, 0) ?? 0).toBe(0);
     expect(existsSync(join(home, "spend-ledger.jsonl"))).toBe(false);
-  } finally { denied.mockRestore(); }
+  } finally { restoreClaim(); }
 });
 
 test("family lease is released on physical transport failure", async () => {
   await seed(1);
   let releases = 0;
-  const claimed = spyOn(familyQuota, "claimAnthropicFamilyRevalidation").mockImplementation(() => () => { releases++; });
+  const { claim: claimed, restoreClaim } = mockPrimaryFamilyClaim(() => () => { releases++; });
   const config = fixtureConfig();
   config.providers.anthropic!.fetch = (async () => { throw new Error("fixture transport failed"); }) as typeof fetch;
   try {
@@ -726,7 +756,7 @@ test("family lease is released on physical transport failure", async () => {
     expect(response.status).toBe(502);
     expect(claimed).toHaveBeenCalledTimes(1);
     expect(releases).toBe(1);
-  } finally { claimed.mockRestore(); }
+  } finally { restoreClaim(); }
 });
 
 test("refusal cancellation starts before replacement selection without awaiting deferred disposal", async () => {
@@ -793,7 +823,7 @@ test("family lease releases when spend admission refuses without a physical send
   await seed(1);
   const config = fixtureConfig();
   let releases = 0;
-  const claimed = spyOn(familyQuota, "claimAnthropicFamilyRevalidation").mockImplementation(() => () => { releases++; });
+  const { claim: claimed, restoreClaim } = mockPrimaryFamilyClaim(() => () => { releases++; });
   configureSharedSpendLedger(spendPolicyFromConfig({ pool: { maxTokens: 1 } }));
   try {
     const { response, row } = await send(config, { ...BODY, stream: false });
@@ -803,7 +833,7 @@ test("family lease releases when spend admission refuses without a physical send
     expect(sent).toHaveLength(0);
     expect(row.attempts?.reduce((sum, attempt) => sum + attempt.sendCount, 0) ?? 0).toBe(0);
   } finally {
-    claimed.mockRestore();
+    restoreClaim();
     configureSharedSpendLedger(DEFAULT_SPEND_RESERVATION_POLICY);
   }
 });
@@ -813,7 +843,7 @@ test("family lease releases when cancellation arrives at admission before accoun
   const config = fixtureConfig();
   const controller = new AbortController();
   let releases = 0;
-  const claimed = spyOn(familyQuota, "claimAnthropicFamilyRevalidation").mockImplementation(() => {
+  const { claim: claimed, restoreClaim } = mockPrimaryFamilyClaim(() => {
     controller.abort(new Error("fixture cancellation"));
     return () => { releases++; };
   });
@@ -825,7 +855,7 @@ test("family lease releases when cancellation arrives at admission before accoun
     expect(sent).toHaveLength(0);
     expect(row.attempts?.reduce((sum, attempt) => sum + attempt.sendCount, 0) ?? 0).toBe(0);
     expect(existsSync(join(home, "spend-ledger.jsonl"))).toBe(false);
-  } finally { claimed.mockRestore(); }
+  } finally { restoreClaim(); }
 });
 
 test("a late UUID-only replacement cannot receive the sender's refusal attribution", async () => {
