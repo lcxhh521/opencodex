@@ -119,6 +119,33 @@ describe("shared socks5 handshake", () => {
     ]);
   });
 
+  test("an omitted password has the same wire bytes as a username-only proxy URL", async () => {
+    const expected = Buffer.from([
+      0x05, 0x02, 0x00, 0x02,
+      0x01, 4, ...Buffer.from("user"), 0,
+      ...connectRequest(TARGET.host, TARGET.port),
+    ]);
+    for (const credentials of [
+      socks5Credentials(new URL("socks5://user@proxy.example.test:1080")),
+      { username: Buffer.from("user") },
+    ]) {
+      const reader = new ScriptedReader();
+      reader.reply([0x05, 0x02], [0x01, 0x00], CONNECT_REPLY);
+      await socks5Handshake(reader, TARGET, credentials);
+      expect(reader.takeWritten()).toEqual(expected);
+    }
+  });
+
+  test("a rejected empty password stops before CONNECT", async () => {
+    const reader = new ScriptedReader();
+    reader.reply([0x05, 0x02], [0x01, 0x01]);
+    await expect(socks5Handshake(reader, TARGET, { username: Buffer.from("user") }))
+      .rejects.toThrow("SOCKS5 proxy authentication failed");
+    expect(reader.takeWritten()).toEqual(Buffer.from([
+      0x05, 0x02, 0x00, 0x02, 0x01, 4, ...Buffer.from("user"), 0,
+    ]));
+  });
+
   test("a failure reply to the subnegotiation is an authentication failure", async () => {
     const reader = new ScriptedReader();
     reader.reply([0x05, 0x02], [0x01, 0xff]);

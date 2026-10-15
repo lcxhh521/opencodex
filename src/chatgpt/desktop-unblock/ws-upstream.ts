@@ -44,6 +44,10 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 
 const CRLF = "\r\n";
 
+class HttpProxyHandshakeError extends Error {
+  override readonly name = "HttpProxyHandshakeError";
+}
+
 /**
  * Establish the TLS connection to chatgpt.com the relay pipes frames through.
  * Resolves null when the TCP dial, the proxy handshake, or the TLS handshake fails
@@ -231,8 +235,13 @@ async function httpConnectThrough(reader: ProxyHandshakeReader, target: RawTarge
   ];
   // Credentials in the proxy URL become Basic Proxy-Authorization; an unauthenticated
   // proxy never sees the header.
-  if (proxyUrl.username) {
-    const credentials = Buffer.from(`${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}`).toString("base64");
+  if (proxyUrl.username || proxyUrl.password) {
+    let credentials: string;
+    try {
+      credentials = Buffer.from(`${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}`).toString("base64");
+    } catch {
+      throw new HttpProxyHandshakeError("HTTP proxy credentials contain invalid percent encoding");
+    }
     lines.push(`Proxy-Authorization: Basic ${credentials}`);
   }
   reader.write([...lines, "", ""].join(CRLF));

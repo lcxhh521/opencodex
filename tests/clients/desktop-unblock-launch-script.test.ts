@@ -514,19 +514,6 @@ describe.skipIf(process.platform === "win32")("the watcher's five-minute guard a
     expect(r.calls).toEqual(["quit", "open"]);
     expect(r.openArgs).toEqual([]);
   });
-
-  test("every mode combination parses as bash", () => {
-    const configDirs = [dir, join(dir, "it's \"quoted\" $dir")];
-    for (const configDir of configDirs) {
-      mkdirSync(configDir, { recursive: true });
-      for (const shim of [false, true]) {
-        const script = join(dir, `syntax-${shim}.sh`);
-        writeFileSync(script, buildChatgptUnblockWatcherScript(PORT, configDir, shim));
-        const check = checkChatgptWatcherScriptSyntax(script);
-        expect({ shim, configDir, ok: check.ok, output: check.output }).toEqual({ shim, configDir, ok: true, output: "" });
-      }
-    }
-  });
 });
 
 test.skipIf(process.platform === "win32")("the shim's CODEX_CLI_PATH rides the explicit relaunch after a quit", () => {

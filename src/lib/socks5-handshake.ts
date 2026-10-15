@@ -28,6 +28,7 @@ const SOCKS5_SUCCESS = 0x00;
 /** RFC 1929 credentials decoded from the proxy URL, each bounded to one length byte. */
 export interface Socks5Credentials {
   username?: Uint8Array;
+  /** Omission preserves the empty-password bytes produced by a username-only proxy URL. */
   password?: Uint8Array;
 }
 
@@ -78,13 +79,14 @@ export async function socks5Handshake(
   reader.write(Buffer.from([SOCKS5_VERSION, methods.length, ...methods]));
   const greeting = await reader.readExact(2, signal);
   if (greeting[0] !== SOCKS5_VERSION) throw new Socks5HandshakeError("SOCKS5 proxy returned an invalid greeting");
-  if (greeting[1] === SOCKS5_USER_PASS && credentials.username && credentials.password) {
+  if (greeting[1] === SOCKS5_USER_PASS && credentials.username) {
+    const password = credentials.password ?? new Uint8Array(0);
     reader.write(Buffer.from([
       0x01,
       credentials.username.byteLength,
       ...credentials.username,
-      credentials.password.byteLength,
-      ...credentials.password,
+      password.byteLength,
+      ...password,
     ]));
     const auth = await reader.readExact(2, signal);
     if (auth[0] !== 0x01 || auth[1] !== 0x00) throw new Socks5HandshakeError("SOCKS5 proxy authentication failed");

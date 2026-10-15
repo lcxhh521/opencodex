@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { repoPath } from "../helpers/repo-root";
 import {
-  chatgptUnblockWatcherStatus,
   chatgptUnblockWatcherStatus,
   installChatgptUnblockWatcher,
   probeChatgptUnblockListener,
@@ -49,6 +50,40 @@ describe("chatgpt launch watcher install", () => {
     expect(fake.calls).toEqual(["bootout", "bootstrap"]);
     expect(existsSync(plistPath)).toBe(true);
     expect(existsSync(scriptPath)).toBe(true);
+  });
+
+  test.skipIf(process.platform === "win32")("fresh watcher plists match both watched paths and old lock-only plists are stale", () => {
+    // Isolate HOME so the real status reader never touches an installed LaunchAgent.
+    const child = spawnSync(process.execPath, ["--eval", `
+      import { mkdirSync, writeFileSync } from "node:fs";
+      import { dirname } from "node:path";
+      import {
+        buildChatgptUnblockWatcherPlist, chatgptUnblockWatcherPaths,
+        chatgptUnblockWatcherStatus, installChatgptUnblockWatcher,
+      } from ${JSON.stringify(repoPath("src/chatgpt/desktop-unblock/launch-watcher.ts"))};
+      const dir = process.env.HOME;
+      const paths = chatgptUnblockWatcherPaths(dir);
+      if (!paths.plistPath.startsWith(dir + "/")) throw new Error("test home was not isolated");
+      mkdirSync(dirname(paths.plistPath), { recursive: true });
+      const results = [];
+      for (const entryPort of [undefined, 10301]) {
+        installChatgptUnblockWatcher({
+          port: 10300, configDir: dir, plistPath: paths.plistPath, entryPort,
+          assumeSupported: true, launchctl: () => ({ ok: true, status: 0, output: "" }),
+        });
+        const pac = entryPort === undefined ? undefined : { entryPort };
+        const fresh = chatgptUnblockWatcherStatus(10300, dir, false, pac);
+        writeFileSync(paths.plistPath, buildChatgptUnblockWatcherPlist(paths.scriptPath, paths.lockPath, paths.errPath));
+        const stale = chatgptUnblockWatcherStatus(10300, dir, false, pac);
+        results.push({ fresh: fresh.plistUpToDate, script: fresh.scriptUpToDate, stale: stale.plistUpToDate });
+      }
+      console.log(JSON.stringify(results));
+    `], { encoding: "utf8", timeout: 10000, env: { ...process.env, HOME: dir, USERPROFILE: dir } });
+    expect({ status: child.status, stderr: child.stderr }).toEqual({ status: 0, stderr: "" });
+    expect(JSON.parse(child.stdout)).toEqual([
+      { fresh: true, script: true, stale: false },
+      { fresh: true, script: true, stale: false },
+    ]);
   });
 
   test("a failed bootstrap is reported with its diagnostic and leaves nothing behind", () => {

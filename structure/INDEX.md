@@ -199,6 +199,7 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/server/gui-pair-delivery.ts` | [`remote-link.md`](remote-link.md) |
 | `src/server/index.ts` | [`adapters/compatibility-lab.md`](adapters/compatibility-lab.md) |
 | `src/server/index/chatgpt-unblock-lifecycle.ts` | [`clients/chatgpt-desktop.md`](clients/chatgpt-desktop.md) |
+| `src/server/index/optional-listeners.ts` | [`clients/chatgpt-desktop.md`](clients/chatgpt-desktop.md) |
 | `src/server/management/anthropic-pool-settings.ts` | [`providers/anthropic-account-pool.md`](providers/anthropic-account-pool.md) |
 | `src/server/management/companion-routes.ts` | [`desktop-shell.md`](desktop-shell.md) |
 | `src/server/responses/advisor-plan-slot.ts` | [`advisor.md`](advisor.md) |

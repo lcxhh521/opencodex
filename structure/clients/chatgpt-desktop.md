@@ -115,11 +115,15 @@ verification remains enabled; direct, HTTP(S) CONNECT and SOCKS5 routes follow
 opencodex's outbound proxy selection. The shared method/auth/CONNECT framing
 owner is `src/lib/socks5-handshake.ts`, also used by `src/lib/socks5-fetch.ts`.
 Each transport still owns its socket, timeout, buffering and post-CONNECT work.
+HTTP CONNECT sends Basic proxy authorization when either URL credential is present; invalid percent
+encoding fails before CONNECT is written and closes the proxy socket. SOCKS username-only credentials
+retain the shared empty-password compatibility behavior.
 
 `src/chatgpt/desktop-unblock/launch-watcher.ts` owns resolver/system-proxy and PAC launch
 arguments and the optional launchd script. The watcher has no shim mode. Its launchd agent wakes on the app's `SingletonLock` and on the
 `chatgpt-unblock.ready` marker that `startChatgptUnblock` rewrites once the listener is up, so an
-app that opened before opencodex is still routed. Each run checks listener identity, leaves native
+app that opened before opencodex is still routed. Plist freshness compares both watched paths against
+the installed generation; a legacy lock-only plist is stale. Each run checks listener identity, leaves native
 launches alone while the intercept is down, and serializes corrective restarts; an explicit launch
 that meets another run's lock fails with a message instead of reporting success. In watch mode it
 restarts only an app no more than five minutes old (`ps -o etime=`); a missing or unparseable age

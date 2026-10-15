@@ -556,6 +556,7 @@
         "src/cli/",
         "src/codex/",
         "src/server/index/chatgpt-unblock-lifecycle.ts",
+        "src/server/index/optional-listeners.ts",
         "src/lib/socks5-handshake.ts"
       ]
     },

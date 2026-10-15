@@ -311,6 +311,9 @@ admission or account-snapshot pairing. The forwarding contract is covered in
 `src/lib/socks5-handshake.ts` shares RFC1928/RFC1929 framing between the fetch tunnel and
 native desktop raw TLS dial. Credential decoding is bounded and failures retain the fetch
 transport's public `Socks5FetchError` contract. This extraction reuses lcxhh521's PR5947 work.
+A handshake caller's omitted password produces the same empty-password bytes as a
+username-only proxy URL; the proxy's authentication reply still decides acceptance.
+`tests/lib/socks5-handshake.test.ts` pins both the wire bytes and refusal before CONNECT.
 
 HTTPS tunnels in `src/lib/socks5-fetch.ts` give the TLS handshake its own absolute
 30-second deadline after SOCKS CONNECT. Successful TLS clears that deadline before
