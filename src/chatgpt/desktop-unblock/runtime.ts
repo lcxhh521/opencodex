@@ -35,7 +35,7 @@ export function chatgptUnblockEnabled(config: Pick<OcxConfig, "chatgptDesktop" |
   return config.chatgptDesktop?.unblockSend === true;
 }
 
-/** Whether the PAC-fallback launch mode is on (it implies `unblockSend`). */
+/** Whether the PAC-fallback launch mode is on (it requires `unblockSend`). */
 export function chatgptPacFallbackEnabled(config: Pick<OcxConfig, "chatgptDesktop" | "runtimeRole">): boolean {
   return chatgptUnblockEnabled(config) && config.chatgptDesktop?.pacFallback === true;
 }

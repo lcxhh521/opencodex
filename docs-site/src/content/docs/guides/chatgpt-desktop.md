@@ -202,7 +202,9 @@ warn when PAC fallback is enabled on its own; the saved flags are left unchanged
 OpenCodex normally also listens on the listener port plus one (`10301` by default),
 or port `65534` when the listener uses `65535`. This CONNECT entry splices onto the
 TLS listener. OpenCodex rewrites `chatgpt-unblock.pac` in its home
-directory at every start, before the `chatgpt-unblock.ready` marker. The PAC sends
+directory at every start, before the `chatgpt-unblock.ready` marker. Before restarting an
+app, the launcher prepares the PAC argument; if the file cannot be read and encoded,
+is empty, or is not a regular file, it leaves the running app untouched. The PAC sends
 `chatgpt.com` to that entry first, and every other host the way the system routes it:
 
 | Setup | Other hosts, and `chatgpt.com` while OpenCodex is stopped |

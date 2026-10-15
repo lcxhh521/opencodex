@@ -144,8 +144,11 @@ that splices `chatgpt.com:443` onto the TLS listener;
 while the base64 `data:` switch stays within 512 KiB (`system-pac-unreadable`/`-too-large` fall
 back to the proxy chain, then DIRECT, with a startup warning). An entry bind or PAC write failure
 releases both listeners. The script launches with the inline PAC switch alone, requires the entry
-(curl exit 0 or 56) as well as listener identity, and `native` mode undoes any PAC switch, inline
-or the older `file://` form.
+(curl exit 0 or 56) as well as listener identity. After deciding a launch is needed, it prepares
+all launch arguments before quitting the app, rejecting missing, unreadable, non-file or empty PAC
+input and failed encoding. The same prepared PAC snapshot is passed to open; a failed preflight
+leaves the running app untouched. `native` mode requires no PAC file and undoes any PAC switch,
+inline or the older `file://` form.
 
 Intercept regression files use the existing `tests/clients/` domain alongside
 the shim tests; shared handshake coverage is `tests/lib/socks5-handshake.test.ts`.
