@@ -138,3 +138,10 @@ test("a stray tool-end and done cannot memoize an empty validated output", async
   recovery.rememberSuccess({ status: "completed", output: [] });
   expect(reasoningReplayOpaqueBlobRejectionMemoized(request._reasoningReplayScope)).toBe(false);
 });
+
+// Synthetic identifiers preserve the gateway wrapper without retaining user diagnostics.
+test("generic Bedrock signature wrapper still requires the conversation-binding phrase", () => {
+  const message = "aws_invoke_error: InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: 11111111-2222-4333-8444-555555555555, ValidationException: ***.***.content.0: Invalid `signature` in `thinking` block (request id: 20260101000000000000000000syntheticABC)";
+  expect(isAnthropicThinkingSignatureBindingRejectionMessage(message)).toBe(false);
+  expect(isAnthropicThinkingSignatureBindingRejectionMessage(`${message} The block is bound to a different conversation.`)).toBe(true);
+});

@@ -718,3 +718,16 @@ for (const identity of ["unsafe id", "duplicate", "prior collision"]) test(`sear
   expect(bodies).toHaveLength(identity === "prior collision" ? 2 : 1);
   expect(queries).toHaveLength(identity === "prior collision" ? 1 : 0);
 });
+
+// All gateway request identifiers in this fixture are synthetic.
+const GENERIC_BEDROCK_SIGNATURE_ERROR = "aws_invoke_error: InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: 11111111-2222-4333-8444-555555555555, ValidationException: ***.***.content.0: Invalid `signature` in `thinking` block (request id: 20260101000000000000000000syntheticABC)";
+for (const stream of [true, false]) test(`generic Bedrock HTTP signature refusal stays terminal without stripping (stream=${stream})`, async () => {
+  const { bodies, queries } = transport(() => rejection(GENERIC_BEDROCK_SIGNATURE_ERROR));
+  const result = await send({}, config(), request(stream));
+  expect(bodies).toHaveLength(1);
+  expect(queries).toHaveLength(0);
+  expect(bodies[0]).toContain(SIGNATURE);
+  expect(bodies[0]).toContain(REDACTED);
+  expect(result.text).toContain("Invalid `signature` in `thinking` block");
+  expect(result.log.activeAttempt?.recoveryKinds ?? []).toEqual([]);
+});
