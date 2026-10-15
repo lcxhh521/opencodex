@@ -1,13 +1,12 @@
 import { anthropicOpaqueFingerprint, anthropicRejectionPolicy, bindAnthropicRejectionResponse } from "./anthropic-rejection-memo";
 import type { TranslatorBudget } from "../lib/translator-budget";
-import { jsonUtf8Bytes } from "../lib/json-byte-size";
 import { createHash, type Hash } from "node:crypto";
 import type { AdapterRequest } from "./base";
 import type { AnthropicPrefixHint, OcxParsedRequest } from "../types";
 import { getAnthropicPrefixHint, isLocallyIssuedAnthropicPrefixHint } from "./anthropic-prefix-hints";
 
 type Block = Record<string, unknown>;
-export interface AnthropicPrefixSeed { hash: Hash; parent: string; scope: string; generation: object }
+export interface AnthropicPrefixSeed { hash: Hash; parent: string; scope: string; generation: object; budget?: TranslatorBudget }
 const generations = new WeakMap<object, object>();
 function generationFor(parsed: OcxParsedRequest): object {
   const owner = parsed._reasoningReplayScope ?? parsed;
@@ -18,7 +17,7 @@ export function invalidateAnthropicPrefixGeneration(parsed: OcxParsedRequest): v
 const requests = new WeakMap<AdapterRequest, AnthropicPrefixSeed>();
 const responses = new WeakMap<Response, AnthropicPrefixSeed>();
 export const ANTHROPIC_PREFIX_ROOT = createHash("sha256").update("anthropic-thinking-chain-v1").digest("hex");
-/** Stable object ordering; array/block/message order is significant. Only cache annotations vary. */
+/** Stable v1 reference serialization. Runtime hashing below streams these same bytes. */
 class UnsupportedPrefixShape extends Error {}
 export function canonicalAnthropicPrefix(value: unknown, depth = 0): string {
   if (depth > 128) throw new UnsupportedPrefixShape("Anthropic prefix nesting is unsupported");
@@ -27,19 +26,76 @@ export function canonicalAnthropicPrefix(value: unknown, depth = 0): string {
     .map(key => `${JSON.stringify(key)}:${canonicalAnthropicPrefix((value as Block)[key], depth + 1)}`).join(",")}}`;
   return JSON.stringify(value) ?? "null";
 }
-export function anthropicPrefixDigest(value: unknown): string { return createHash("sha256").update(canonicalAnthropicPrefix(value)).digest("hex"); }
-export function appendAnthropicPrefix(hash: Hash, value: unknown): void {
-  const encoded = canonicalAnthropicPrefix(value); hash.update(`${Buffer.byteLength(encoded)}:`).update(encoded);
+/** Emit the existing v1 canonical bytes without materializing a whole canonical string.
+ * Chunk boundaries never split a surrogate pair; protocol hashes remain byte-for-byte stable.
+ */
+function visitCanonical(value: unknown, emit: (part: string) => void, budget?: TranslatorBudget, depth = 0): void {
+  if (depth > 128) throw new UnsupportedPrefixShape("Anthropic prefix nesting is unsupported");
+  if (typeof value === "string") {
+    emit('"');
+    for (let start = 0; start < value.length;) {
+      let end = Math.min(start + 1024, value.length);
+      const last = value.charCodeAt(end - 1), next = value.charCodeAt(end);
+      if (end < value.length && last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end--;
+      // Worst-case substring, escaped UTF-16 serialization/slice and UTF-8 encoding.
+      const reservation = budget?.reserveTransient((end - start) * 34 + 128, { kind: "reasoning" });
+      try { emit(JSON.stringify(value.slice(start, end)).slice(1, -1)); }
+      finally { reservation?.release(); }
+      start = end;
+    }
+    emit('"'); return;
+  }
+  if (Array.isArray(value)) {
+    const reservation = budget?.reserveTransient(64, { kind: "reasoning" });
+    try {
+      emit("[");
+      for (let index = 0; index < value.length; index++) {
+        if (index) emit(",");
+        if (index in value) visitCanonical(value[index], emit, budget, depth + 1);
+      }
+      emit("]");
+    } finally { reservation?.release(); }
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    let count = 0;
+    for (const key in value) if (Object.hasOwn(value, key)) count++;
+    // References for keys/filter/sort and recursion; no copies of property values.
+    const reservation = budget?.reserveTransient(count * 64 + 64, { kind: "reasoning" });
+    try {
+      const keys = Object.keys(value).filter(key => (value as Block)[key] !== undefined).sort();
+      emit("{");
+      for (let index = 0; index < keys.length; index++) {
+        if (index) emit(",");
+        visitCanonical(keys[index], emit, budget, depth + 1); emit(":");
+        visitCanonical((value as Block)[keys[index]], emit, budget, depth + 1);
+      }
+      emit("}");
+    } finally { reservation?.release(); }
+    return;
+  }
+  emit(JSON.stringify(value) ?? "null");
+}
+export function anthropicPrefixDigest(value: unknown, budget?: TranslatorBudget): string {
+  const hash = createHash("sha256"); visitCanonical(value, part => { hash.update(part); }, budget); return hash.digest("hex");
+}
+export function appendAnthropicPrefix(hash: Hash, value: unknown, budget?: TranslatorBudget): void {
+  let bytes = 0; visitCanonical(value, part => { bytes += Buffer.byteLength(part); }, budget);
+  hash.update(`${bytes}:`);
+  visitCanonical(value, part => { hash.update(part); }, budget);
 }
 function protocolBlock(block: Block): Block { const { cache_control: _cache, ...content } = block; return content; }
 function protocolBlocks(value: unknown): unknown { return Array.isArray(value) ? value.map(block => block && typeof block === "object" ? protocolBlock(block as Block) : block) : value; }
-export function nextAnthropicParent(parent: string, block: Block): string { return anthropicPrefixDigest([parent, protocolBlock(block)]); }
+export function nextAnthropicParent(parent: string, block: Block, budget?: TranslatorBudget): string { return anthropicPrefixDigest([parent, protocolBlock(block)], budget); }
+// A fixed protocol frame needs no request-sized scratch or new admission at stream setup.
+const assistantHeader = canonicalAnthropicPrefix({ role: "assistant" });
+const assistantFrame = `${Buffer.byteLength(assistantHeader)}:${assistantHeader}`;
 export function beginAnthropicAssistant(seed: AnthropicPrefixSeed): AnthropicPrefixSeed {
-  const copy = { ...seed, hash: seed.hash.copy() }; appendAnthropicPrefix(copy.hash, { role: "assistant" }); return copy;
+  return { ...seed, hash: seed.hash.copy().update(assistantFrame) };
 }
 export function hintForAnthropicBlock(seed: AnthropicPrefixSeed, block: Block): AnthropicPrefixHint {
   return { v: 1, scheme: "anthropic-prefix-v1", scope: seed.scope, prefix: seed.hash.copy().digest("hex"),
-    parent: seed.parent, block: anthropicPrefixDigest(protocolBlock(block)) };
+    parent: seed.parent, block: anthropicPrefixDigest(protocolBlock(block), seed.budget) };
 }
 export class AnthropicHistoryIncompatibleError extends Error {
   constructor() { super("Anthropic thinking history is incompatible with the current request prefix; resend a consistent history. Reasoning mode and executed tool results were not changed."); }
@@ -52,32 +108,32 @@ function scopeFor(parsed: OcxParsedRequest): string | undefined {
 export function isCurrentAnthropicPrefixHint(hint: AnthropicPrefixHint, parsed: OcxParsedRequest): boolean {
   return hint.scope === scopeFor(parsed) && isLocallyIssuedAnthropicPrefixHint(hint, generationFor(parsed));
 }
-function initialSeed(body: Block, scope: string, generation: object): AnthropicPrefixSeed {
-  const hash = createHash("sha256"); appendAnthropicPrefix(hash, { scheme: "anthropic-prefix-v1", system: typeof body.system === "string" ? [{ type: "text", text: body.system }] : protocolBlocks(body.system ?? null), tools: protocolBlocks(body.tools ?? []) });
-  return { hash, parent: ANTHROPIC_PREFIX_ROOT, scope, generation };
+function initialSeed(body: Block, scope: string, generation: object, budget?: TranslatorBudget): AnthropicPrefixSeed {
+  const hash = createHash("sha256"); appendAnthropicPrefix(hash, { scheme: "anthropic-prefix-v1", system: typeof body.system === "string" ? [{ type: "text", text: body.system }] : protocolBlocks(body.system ?? null), tools: protocolBlocks(body.tools ?? []) }, budget);
+  return { hash, parent: ANTHROPIC_PREFIX_ROOT, scope, generation, budget };
 }
 const opaque = (block: Block) => block.type === "thinking" || block.type === "redacted_thinking";
 /** The final wire, not the client's input JSON, defines the observed prefix. */
-function prepareAnthropicPrefixUnchecked(body: Block, parsed: OcxParsedRequest): AnthropicPrefixSeed | undefined {
+function prepareAnthropicPrefixUnchecked(body: Block, parsed: OcxParsedRequest, budget?: TranslatorBudget): AnthropicPrefixSeed | undefined {
   const scope = scopeFor(parsed);
   if (!scope || !Array.isArray(body.messages)) return;
-  let seed = initialSeed(body, scope, generationFor(parsed));
+  let seed = initialSeed(body, scope, generationFor(parsed), budget);
   const removed = new Set<Block>();
   const kept: Block[] = [];
   let incompleteChain = false;
   for (const entry of body.messages as Block[]) {
     const before = seed.hash.copy();
-    const { content, ...header } = entry; appendAnthropicPrefix(seed.hash, header);
+    const { content, ...header } = entry; appendAnthropicPrefix(seed.hash, header, budget);
     const blocks = typeof content === "string" ? [{ type: "text", text: content }] : content as Block[];
     if (!Array.isArray(blocks)) return;
     for (const block of blocks) {
-      if (!opaque(block)) { appendAnthropicPrefix(seed.hash, protocolBlock(block)); continue; }
+      if (!opaque(block)) { appendAnthropicPrefix(seed.hash, protocolBlock(block), budget); continue; }
       const hint = getAnthropicPrefixHint(block);
       const comparable = hint?.scope === scope;
       const memo = anthropicRejectionPolicy(parsed);
       const memoStrip = !!memo && (memo.mode === "blanket" || !comparable || memo.fingerprints.has(anthropicOpaqueFingerprint(block) ?? ""));
       const forceStrip = memoStrip || parsed._stripReasoningEncryptedContent === true && !(hint && isCurrentAnthropicPrefixHint(hint, parsed));
-      const mismatch = comparable && (hint.block !== anthropicPrefixDigest(protocolBlock(block)) || hint.prefix !== seed.hash.copy().digest("hex"));
+      const mismatch = comparable && (hint.block !== anthropicPrefixDigest(protocolBlock(block), budget) || hint.prefix !== seed.hash.copy().digest("hex"));
       if (forceStrip || mismatch) { removed.add(block); incompleteChain = true; continue; }
       if (comparable) {
         if (hint.parent !== seed.parent) {
@@ -88,10 +144,10 @@ function prepareAnthropicPrefixUnchecked(body: Block, parsed: OcxParsedRequest):
         }
         incompleteChain = false;
       } else if (incompleteChain) throw new AnthropicHistoryIncompatibleError();
-      kept.push(block); seed.parent = nextAnthropicParent(seed.parent, block);
+      kept.push(block); seed.parent = nextAnthropicParent(seed.parent, block, budget);
     }
     if (blocks.length > 0 && blocks.every(opaque)) seed.hash = before;
-    else appendAnthropicPrefix(seed.hash, { endMessage: true });
+    else appendAnthropicPrefix(seed.hash, { endMessage: true }, budget);
   }
   if (removed.size || parsed._stripReasoningEncryptedContent === true) {
     const filtered = (body.messages as Block[]).map(message => Array.isArray(message.content)
@@ -105,25 +161,43 @@ function prepareAnthropicPrefixUnchecked(body: Block, parsed: OcxParsedRequest):
     body.messages = filtered;
   }
   // Recompute after omission, including any removed empty assistant container.
-  seed = initialSeed(body, scope, generationFor(parsed));
+  seed = initialSeed(body, scope, generationFor(parsed), budget);
   for (const entry of body.messages as Block[]) {
     const before = seed.hash.copy();
-    const { content, ...header } = entry; appendAnthropicPrefix(seed.hash, header);
+    const { content, ...header } = entry; appendAnthropicPrefix(seed.hash, header, budget);
     const blocks = typeof content === "string" ? [{ type: "text", text: content }] : content as Block[];
     for (const block of blocks) {
-      if (opaque(block)) seed.parent = nextAnthropicParent(seed.parent, block);
-      else appendAnthropicPrefix(seed.hash, protocolBlock(block));
+      if (opaque(block)) seed.parent = nextAnthropicParent(seed.parent, block, budget);
+      else appendAnthropicPrefix(seed.hash, protocolBlock(block), budget);
     }
     if (blocks.length > 0 && blocks.every(opaque)) seed.hash = before;
-    else appendAnthropicPrefix(seed.hash, { endMessage: true });
+    else appendAnthropicPrefix(seed.hash, { endMessage: true }, budget);
   }
   return seed;
 }
-/** Account for temporary canonical strings before hashing the already-built wire body. */
+/** Hash the already-owned wire in bounded chunks, admitting only live canonical scratch. */
 export function prepareAnthropicPrefix(body: Block, parsed: OcxParsedRequest, budget?: TranslatorBudget): AnthropicPrefixSeed | undefined {
   if (!scopeFor(parsed)) return undefined;
-  const reservation = budget?.reserveTransient(jsonUtf8Bytes(body) * 4, { kind: "reasoning" });
-  try { return prepareAnthropicPrefixUnchecked(body, parsed); }
+  const thinking = body.thinking as Block | undefined;
+  const hasOpaque = Array.isArray(body.messages) && body.messages.some(message => Array.isArray(message.content)
+    && message.content.some((block: Block) => opaque(block)));
+  // Repairs still observe newly generated opaque blocks even if a compatible upstream
+  // emits them without an explicit thinking option; later search rounds must retain them.
+  if ((!thinking || thinking.type === "disabled") && !hasOpaque
+    && parsed._stripReasoningEncryptedContent !== true && !anthropicRejectionPolicy(parsed)) return undefined;
+  // Account for shallow protocol projections, filtering sets and message/block references.
+  // Payload strings remain owned by the existing wire; they are hashed in bounded chunks.
+  let structuralBytes = 256;
+  const account = (value: unknown) => {
+    structuralBytes += 128;
+    if (value && typeof value === "object") for (const key in value) if (Object.hasOwn(value, key)) structuralBytes += 64;
+  };
+  for (const values of [body.system, body.tools, body.messages]) if (Array.isArray(values)) for (const value of values) {
+    account(value);
+    if (value && typeof value === "object" && Array.isArray(value.content)) for (const block of value.content) account(block);
+  }
+  const reservation = budget?.reserveTransient(structuralBytes, { kind: "reasoning" });
+  try { return prepareAnthropicPrefixUnchecked(body, parsed, budget); }
   catch (error) {
     if (!(error instanceof UnsupportedPrefixShape)) throw error;
     const hasHints = Array.isArray(body.messages) && body.messages.some(message => Array.isArray(message.content)

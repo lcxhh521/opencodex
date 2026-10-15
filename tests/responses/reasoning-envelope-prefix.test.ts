@@ -77,3 +77,53 @@ describe("optional Anthropic prefix envelope metadata", () => {
     expect(parts.map(part => part.anthropicPrefix)).toEqual([undefined, hint, undefined]);
   });
 });
+
+// Prefix preparation must not charge the size of already-owned media as a new copy.
+describe("bounded Anthropic prefix preparation", () => {
+  const scoped = () => ({ modelId: "claude-fixture", _reasoningReplayScope: { current: {
+    providerDestinationDurableIdentity: "fixture-destination", credentialDurableIdentity: "fixture-credential",
+  } } }) as unknown as import("../../src/types").OcxParsedRequest;
+  test("large media without thinking does not allocate a prefix observation", async () => {
+    const { prepareAnthropicPrefix } = await import("../../src/adapters/anthropic-prefix");
+    const { createTranslatorBudget } = await import("../../src/lib/translator-budget");
+    const budget = createTranslatorBudget();
+    try {
+      const body = { messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", data: "A".repeat(9 * 1024 * 1024) } }] }] };
+      expect(prepareAnthropicPrefix(body, scoped(), budget)).toBeUndefined();
+      expect(budget.snapshot().currentBytes).toBe(0);
+      expect(budget.snapshot().highWaterBytes).toBe(0);
+    } finally { budget.dispose(); }
+  });
+  test.each(["image", "document"])("large %s with thinking hashes without a whole-wire temporary copy", async type => {
+    const { prepareAnthropicPrefix } = await import("../../src/adapters/anthropic-prefix");
+    const { createTranslatorBudget } = await import("../../src/lib/translator-budget");
+    const budget = createTranslatorBudget();
+    try {
+      const body = { thinking: { type: "adaptive" }, messages: [{ role: "user", content: [{ type, source: { type: "base64", data: "A".repeat(9 * 1024 * 1024) } }] }] };
+      const seed = prepareAnthropicPrefix(body, scoped(), budget);
+      expect(seed).toBeDefined();
+      expect(budget.snapshot().currentBytes).toBe(0);
+      expect(budget.snapshot().highWaterBytes).toBeLessThan(256 * 1024);
+    } finally { budget.dispose(); }
+  });
+});
+
+test("incremental canonical hashes preserve exact v1 bytes across escaped and surrogate chunk boundaries", async () => {
+  const { createHash } = await import("node:crypto");
+  const { anthropicPrefixDigest, appendAnthropicPrefix, canonicalAnthropicPrefix } = await import("../../src/adapters/anthropic-prefix");
+  const { createTranslatorBudget } = await import("../../src/lib/translator-budget");
+  const values = [null, undefined, [1, undefined, null], { b: true, a: "x", skipped: undefined },
+    { nested: ["a".repeat(1023) + "😀" + "\\\"\n\u0000\ud800\udc01", { semantic: { cache_control: "keep" } }] },
+    { large: "a".repeat(100_000) }, { escaped: "\u0001".repeat(2049) }];
+  const budget = createTranslatorBudget();
+  try {
+    for (const value of values) {
+      const canonical = canonicalAnthropicPrefix(value);
+      expect(anthropicPrefixDigest(value, budget)).toBe(createHash("sha256").update(canonical).digest("hex"));
+      const hash = createHash("sha256"); appendAnthropicPrefix(hash, value, budget);
+      expect(hash.digest("hex")).toBe(createHash("sha256").update(`${Buffer.byteLength(canonical)}:`).update(canonical).digest("hex"));
+    }
+    expect(budget.snapshot().currentBytes).toBe(0);
+    expect(budget.snapshot().highWaterBytes).toBeLessThan(64 * 1024);
+  } finally { budget.dispose(); }
+});

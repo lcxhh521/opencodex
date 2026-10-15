@@ -185,3 +185,19 @@ in the request-local history, rather than waiting for the next serializer to rej
 Request-local fingerprint capture charges 256 retained translation-budget bytes per unique digest,
 including conservative Set/copy overhead, until the existing turn budget is disposed. Partial
 capture is refunded on invalid input, admission denial or overflow and cannot narrow the memo.
+
+Prefix hashing traverses the existing v1 canonical representation in bounded string chunks;
+it does not reserve or materialize four copies of the whole wire request. Protocol ordering,
+length framing and hashes remain compatible with previously issued hints, including image and
+document data. Scratch for canonical escaping, UTF-8 encoding, sorted keys and shallow history
+projections is admitted before allocation and released on success or failure. Requests with
+neither enabled thinking nor opaque history skip prefix observation unless recovery/active memo
+state must observe newly generated blocks for later continuations. Depth limits and
+budget denial remain fail-closed for histories requiring validation.
+
+The stream observer accounts for live block payloads and nonempty fragment slots rather than
+cumulative SSE frame envelopes. Empty fragments add no retained entries; replacement signature
+snapshots refund the replaced value only after growth admission succeeds. Finalization charges
+joins/parsing separately from chunked hashing. Invalidation, cancellation, admission failure and
+disposal release only that observer's admitted ownership; genuinely excessive retained fragments
+still fail the shared turn budget.

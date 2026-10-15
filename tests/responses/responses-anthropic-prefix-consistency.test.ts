@@ -491,7 +491,7 @@ describe("Anthropic prefix hints through actual Responses requests", () => {
       },
     });
     const provider = config().providers["anthropic-test"]!;
-    const parsed = parseRequest({ model: MODEL, input: [user("First question")] });
+    const parsed = parseRequest({ model: MODEL, reasoning: { effort: "high" }, input: [user("First question")] });
     parsed._reasoningReplayScope = { clientThreadId: "admission-denial-fixture" };
     bindRouteReasoningReplayScope({ parsed, provider, providerName: "anthropic-test", adapterName: "anthropic" });
     const adapter = createAnthropicAdapter(provider);
@@ -697,4 +697,21 @@ describe("Anthropic prefix hints through actual Responses requests", () => {
       expect(bodies[1]).toContain(SIGNATURE);
     });
   }
+});
+
+test.each(["none", "high"])("actual scoped adapter preserves a large accepted text request with reasoning %s", async effort => {
+  const provider = config().providers["anthropic-test"]!;
+  const text = "Synthetic large input. ".repeat(450_000);
+  const parsed = parseRequest({ model: MODEL, reasoning: { effort }, input: [user(text)] });
+  parsed._reasoningReplayScope = { clientThreadId: "large-prefix-budget-fixture" };
+  bindRouteReasoningReplayScope({ parsed, provider, providerName: "anthropic-test", adapterName: "anthropic" });
+  const budget = createTranslatorBudget();
+  try {
+    const built = await createAnthropicAdapter(provider).buildRequest(parsed, { headers: new Headers(), translatorBudget: budget });
+    const body = typeof built.body === "string" ? JSON.parse(built.body) : built.body;
+    expect(JSON.stringify(body.messages)).toContain(text);
+    expect(budget.snapshot().overflows).toBe(0);
+    built.releaseBodyObservation?.();
+    expect(budget.snapshot().currentBytes).toBe(0);
+  } finally { budget.dispose(); }
 });
