@@ -127,3 +127,35 @@ test("incremental canonical hashes preserve exact v1 bytes across escaped and su
     expect(budget.snapshot().highWaterBytes).toBeLessThan(64 * 1024);
   } finally { budget.dispose(); }
 });
+
+test("unchanged hinted history returns the first-pass hash and parent without traversing it twice", async () => {
+  const { prepareAnthropicPrefix, beginAnthropicAssistant, hintForAnthropicBlock, nextAnthropicParent, appendAnthropicPrefix } = await import("../../src/adapters/anthropic-prefix");
+  const { setAnthropicPrefixHint } = await import("../../src/adapters/anthropic-prefix-hints");
+  const { createTranslatorBudget } = await import("../../src/lib/translator-budget");
+  const parsed = { modelId: "claude-fixture", _reasoningReplayScope: { current: {
+    providerDestinationDurableIdentity: "fixture-destination", credentialDurableIdentity: "fixture-credential",
+  } } } as unknown as import("../../src/types").OcxParsedRequest;
+  const budget = createTranslatorBudget();
+  try {
+    const thinking = { type: "adaptive" };
+    const initial = prepareAnthropicPrefix({ thinking, messages: [{ role: "user", content: [{ type: "text", text: "question" }] }] }, parsed, budget)!;
+    const expected = beginAnthropicAssistant(initial);
+    const block = { type: "thinking", thinking: "complete reasoning", signature: "SyntheticUnchangedPrefixSignature==" };
+    setAnthropicPrefixHint(block, hintForAnthropicBlock(expected, block));
+    const answer = { type: "text", text: "answer" };
+    appendAnthropicPrefix(expected.hash, answer, budget);
+    appendAnthropicPrefix(expected.hash, { endMessage: true }, budget);
+    const expectedParent = nextAnthropicParent(expected.parent, block, budget);
+    let textReads = 0;
+    const observedText = { type: "text", get text() { textReads++; return "question"; } };
+    const messages = [{ role: "user", content: [observedText] }, { role: "assistant", content: [block, answer] }];
+    const body = { thinking, messages };
+    const actual = prepareAnthropicPrefix(body, parsed, budget)!;
+    expect(actual.hash.digest("hex")).toBe(expected.hash.digest("hex"));
+    expect(actual.parent).toBe(expectedParent);
+    expect(body.messages).toBe(messages);
+    expect(body.messages[1].content[0]).toBe(block);
+    expect(textReads).toBe(1);
+    expect(budget.snapshot().currentBytes).toBe(0);
+  } finally { budget.dispose(); }
+});

@@ -705,11 +705,14 @@ test.each(["none", "high"])("actual scoped adapter preserves a large accepted te
   const parsed = parseRequest({ model: MODEL, reasoning: { effort }, input: [user(text)] });
   parsed._reasoningReplayScope = { clientThreadId: "large-prefix-budget-fixture" };
   bindRouteReasoningReplayScope({ parsed, provider, providerName: "anthropic-test", adapterName: "anthropic" });
+  expect(parsed._reasoningReplayScope.current?.providerDestinationDurableIdentity).toBeTruthy();
+  expect(parsed._reasoningReplayScope.current?.credentialDurableIdentity).toBeTruthy();
   const budget = createTranslatorBudget();
   try {
     const built = await createAnthropicAdapter(provider).buildRequest(parsed, { headers: new Headers(), translatorBudget: budget });
     const body = typeof built.body === "string" ? JSON.parse(built.body) : built.body;
     expect(JSON.stringify(body.messages)).toContain(text);
+    if (effort === "high") expect(budget.snapshot().highWaterBytes).toBeGreaterThan(0);
     expect(budget.snapshot().overflows).toBe(0);
     built.releaseBodyObservation?.();
     expect(budget.snapshot().currentBytes).toBe(0);

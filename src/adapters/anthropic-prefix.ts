@@ -149,7 +149,8 @@ function prepareAnthropicPrefixUnchecked(body: Block, parsed: OcxParsedRequest, 
     if (blocks.length > 0 && blocks.every(opaque)) seed.hash = before;
     else appendAnthropicPrefix(seed.hash, { endMessage: true }, budget);
   }
-  if (removed.size || parsed._stripReasoningEncryptedContent === true) {
+  const rewritten = removed.size > 0 || parsed._stripReasoningEncryptedContent === true;
+  if (rewritten) {
     const filtered = (body.messages as Block[]).map(message => Array.isArray(message.content)
       ? { ...message, content: (message.content as Block[]).filter(block => !removed.has(block)) } : message)
       .filter(message => !Array.isArray(message.content) || message.content.length > 0);
@@ -160,6 +161,8 @@ function prepareAnthropicPrefixUnchecked(body: Block, parsed: OcxParsedRequest, 
       && Array.isArray(assistant?.content) && !assistant.content.some(block => opaque(block as Block))) throw new AnthropicHistoryIncompatibleError();
     body.messages = filtered;
   }
+  // The first pass already observed exactly this wire when no filtering occurred.
+  if (!rewritten) return seed;
   // Recompute after omission, including any removed empty assistant container.
   seed = initialSeed(body, scope, generationFor(parsed), budget);
   for (const entry of body.messages as Block[]) {

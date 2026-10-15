@@ -188,7 +188,8 @@ capture is refunded on invalid input, admission denial or overflow and cannot na
 
 Prefix hashing traverses the existing v1 canonical representation in bounded string chunks;
 it does not reserve or materialize four copies of the whole wire request. Protocol ordering,
-length framing and hashes remain compatible with previously issued hints, including image and
+length framing and hashes remain compatible with previously issued hints. Unchanged histories reuse
+the first-pass seed; only filtered histories require recomputation. This includes image and
 document data. Scratch for canonical escaping, UTF-8 encoding, sorted keys and shallow history
 projections is admitted before allocation and released on success or failure. Requests with
 neither enabled thinking nor opaque history skip prefix observation unless recovery/active memo
