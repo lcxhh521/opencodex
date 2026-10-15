@@ -207,6 +207,16 @@ describe("restore validates the discovered app before any quit or open", () => {
     expect(result.stderr).toContain("Uninstall the launch watcher");
     expect(result.calls.filter(call => ["pgrep", "ps", "/usr/bin/osascript", "/usr/bin/open"].includes(call.command))).toEqual([]);
   });
+  for (const watcherLoaded of [false, true]) {
+    test(`restore checks launchd without reading watcher files (loaded=${watcherLoaded})`, () => {
+      const result = run({ flag: false, missingBinary: true, running: true, watcherLoaded, watcherFilesUnreadable: true });
+      expect(result.code).toBe(watcherLoaded ? 1 : 0);
+      expect(result.launcherExists).toBe(watcherLoaded);
+      expect(result.calls.some(call => call.command === "/usr/bin/open")).toBe(!watcherLoaded);
+      if (watcherLoaded) expect(result.stderr).toContain("Uninstall the launch watcher");
+      expect(result.stderr).not.toContain("cannot be read");
+    });
+  }
   for (const sub of ["launch", "restore"]) {
     for (const scenario of [
       { pgrepFails: true }, { pgrepFails: true, pgrepTimeout: true },

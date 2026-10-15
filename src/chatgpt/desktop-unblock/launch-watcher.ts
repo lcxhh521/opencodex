@@ -490,6 +490,11 @@ export interface ChatgptUnblockWatcherStatus {
   plistUpToDate: boolean;
 }
 
+/** Check launchd state alone, without reading installed watcher files or building a script. */
+export function chatgptUnblockWatcherLoaded(launchctl: LaunchctlRunner = defaultLaunchctl): boolean {
+  return launchctl(["print", `${watcherDomain()}/${CHATGPT_UNBLOCK_WATCHER_LABEL}`]).ok;
+}
+
 export function chatgptUnblockWatcherStatus(
   port: number,
   configDir?: string,
@@ -499,7 +504,7 @@ export function chatgptUnblockWatcherStatus(
   const paths = chatgptUnblockWatcherPaths(configDir);
   const scriptInstalled = existsSync(paths.scriptPath);
   const plistInstalled = existsSync(paths.plistPath);
-  const agentLoaded = sh("launchctl", ["print", `${watcherDomain()}/${CHATGPT_UNBLOCK_WATCHER_LABEL}`]).ok;
+  const agentLoaded = chatgptUnblockWatcherLoaded();
   const scriptUpToDate = scriptInstalled
     && readFileSync(paths.scriptPath, "utf8") === buildChatgptUnblockWatcherScript(port, configDir, shimMode, pac);
   const plistUpToDate = plistInstalled

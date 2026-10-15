@@ -133,6 +133,9 @@ function validFileConfigDiagnostics(config: OcxConfig, rawParsed: unknown): Conf
   if (normalized.chatgptDesktop?.unblockSend === true && process.platform !== "darwin") {
     warnings.push("chatgptDesktop.unblockSend is experimental and macOS only; ignored on this platform");
   }
+  if (normalized.chatgptDesktop?.pacFallback === true && normalized.chatgptDesktop.unblockSend !== true) {
+    warnings.push("chatgptDesktop.pacFallback requires chatgptDesktop.unblockSend: true; PAC fallback is inactive");
+  }
   const chatgptDesktopIssue = chatgptDesktopConfigIssue(rawParsed);
   if (chatgptDesktopIssue) warnings.push(`${chatgptDesktopIssue}; the whole chatgptDesktop block is ignored, so the ChatGPT desktop integration reads as off`);
   warnings.push(...inheritedFastWireConflictProviderNames(normalized).map(inheritedFastWireConflictWarning));

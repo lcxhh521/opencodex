@@ -85,10 +85,14 @@ mock.module("../../src/chatgpt/desktop-unblock/launch-watcher", () => ({
   chatgptAppCommandLine: () => null,
   chatgptCommandLineHasPac: () => false,
   chatgptCommandLineHasRule: () => false,
-  chatgptUnblockWatcherStatus: () => ({
-    scriptInstalled: false, plistInstalled: false, agentLoaded: scenario.watcherLoaded === true,
-    scriptUpToDate: false, plistUpToDate: false,
-  }),
+  chatgptUnblockWatcherLoaded: () => scenario.watcherLoaded === true,
+  chatgptUnblockWatcherStatus: () => {
+    if (scenario.watcherFilesUnreadable) throw new Error("fixture: installed watcher files cannot be read");
+    return {
+      scriptInstalled: false, plistInstalled: false, agentLoaded: scenario.watcherLoaded === true,
+      scriptUpToDate: false, plistUpToDate: false,
+    };
+  },
   installChatgptUnblockWatcher: () => { throw new Error("fixture: the watcher is out of scope"); },
   launchChatgptWithRule: () => ({ ok: false, output: "fixture: the intercept launch is out of scope" }),
   probeChatgptUnblockListener: async () => ({ state: "down" }),

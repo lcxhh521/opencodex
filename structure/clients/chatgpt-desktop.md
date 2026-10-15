@@ -131,12 +131,14 @@ counts as fresh, and explicit launch is not age-limited. A failed `open` exits n
 than printing success.
 Explicit CLI launch can supply the existing shim's launcher environment along
 with intercept arguments. A loaded watcher must be uninstalled before CLI
-restore. The CLI preserves shim-only launch without a running proxy and reports
+restore; this guard queries launchd directly without reading installed watcher files or rendering a
+script. The CLI preserves shim-only launch without a running proxy and reports
 intercept port, trust, listener identity, watcher freshness and app switches.
 
-PAC fallback (`chatgptDesktop.pacFallback`, implying `unblockSend`) replaces the resolver rule so
+PAC fallback (`chatgptDesktop.pacFallback`, effective only when `unblockSend` is enabled) replaces the resolver rule so
 the app keeps a route while opencodex is down. `src/chatgpt/desktop-unblock/entry-proxy.ts` binds a
-CONNECT entry on the listener port + 1 that splices `chatgpt.com:443` onto the TLS listener;
+CONNECT entry normally on the listener port + 1 (65534 when the listener port is 65535)
+that splices `chatgpt.com:443` onto the TLS listener;
 `pac.ts` reads the scutil proxy chain and any system PAC; `runtime.ts` rewrites
 `chatgpt-unblock.pac` at every start, before the readiness marker, embedding the system PAC only
 while the base64 `data:` switch stays within 512 KiB (`system-pac-unreadable`/`-too-large` fall

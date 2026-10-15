@@ -197,9 +197,11 @@ running to be fetched:
 { "chatgptDesktop": { "unblockSend": true, "pacFallback": true } }
 ```
 
-`pacFallback` only takes effect together with `unblockSend`. OpenCodex then also
-listens on the listener port plus one (`10301` by default), a CONNECT entry that
-splices onto the TLS listener, and rewrites `chatgpt-unblock.pac` in its home
+`pacFallback` only takes effect together with `unblockSend`. Config diagnostics
+warn when PAC fallback is enabled on its own; the saved flags are left unchanged.
+OpenCodex normally also listens on the listener port plus one (`10301` by default),
+or port `65534` when the listener uses `65535`. This CONNECT entry splices onto the
+TLS listener. OpenCodex rewrites `chatgpt-unblock.pac` in its home
 directory at every start, before the `chatgpt-unblock.ready` marker. The PAC sends
 `chatgpt.com` to that entry first, and every other host the way the system routes it:
 

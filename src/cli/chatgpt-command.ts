@@ -9,7 +9,7 @@ import { claudeInterceptCaCertPath } from "../claude/intercept/local-ca";
 import { chatgptCaTrustCommand, inspectChatgptCaTrust } from "../chatgpt/desktop-unblock/ca-trust";
 import { chatgptPacFallbackEnabled, chatgptUnblockEntryPort, chatgptUnblockPacArg, chatgptUnblockPort, chatgptUnblockResolverArg } from "../chatgpt/desktop-unblock/runtime";
 import {
-  chatgptAppCommandLine, chatgptCommandLineHasPac, chatgptCommandLineHasRule, chatgptUnblockWatcherStatus,
+  chatgptAppCommandLine, chatgptCommandLineHasPac, chatgptCommandLineHasRule, chatgptUnblockWatcherLoaded, chatgptUnblockWatcherStatus,
   installChatgptUnblockWatcher, launchChatgptWithRule, probeChatgptUnblockListener,
   uninstallChatgptUnblockWatcher,
 } from "../chatgpt/desktop-unblock/launch-watcher";
@@ -230,7 +230,7 @@ CODEX_CLI_PATH launcher: ${app.shim === null ? "unknown" : app.shim ? "yes" : "n
       return 1;
     }
     // A loaded watcher would immediately put the intercept switches back on restore.
-    if (sub === "restore" && chatgptUnblockWatcherStatus(0).agentLoaded) {
+    if (sub === "restore" && chatgptUnblockWatcherLoaded()) {
       console.error("Uninstall the launch watcher before restoring native networking.");
       return 1;
     }

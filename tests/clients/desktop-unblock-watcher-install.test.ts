@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { repoPath } from "../helpers/repo-root";
 import {
+  CHATGPT_UNBLOCK_WATCHER_LABEL,
+  chatgptUnblockWatcherLoaded,
   chatgptUnblockWatcherStatus,
   installChatgptUnblockWatcher,
   probeChatgptUnblockListener,
@@ -41,6 +43,20 @@ function launchctl(statuses: { bootout?: number; bootstrap?: number }): { run: L
 
 const install = (run: LaunchctlRunner) =>
   installChatgptUnblockWatcher({ port: 10300, configDir: dir, plistPath, assumeSupported: true, launchctl: run });
+
+describe("chatgpt launch watcher loaded state", () => {
+  for (const loaded of [false, true]) {
+    test(`reads only the launchd print result (loaded=${loaded})`, () => {
+      const calls: string[][] = [];
+      const result = chatgptUnblockWatcherLoaded(args => {
+        calls.push(args);
+        return { ok: loaded, status: loaded ? 0 : 113, output: "" };
+      });
+      expect(result).toBe(loaded);
+      expect(calls).toEqual([["print", `gui/${process.getuid?.() ?? 0}/${CHATGPT_UNBLOCK_WATCHER_LABEL}`]]);
+    });
+  }
+});
 
 describe("chatgpt launch watcher install", () => {
   test("a fresh install unloads nothing, writes both files and loads the agent", () => {

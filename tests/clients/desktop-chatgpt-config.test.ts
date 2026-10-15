@@ -75,6 +75,44 @@ describe("experimental ChatGPT desktop config", () => {
     expect(diagnostics.error).toBeNull();
     if (process.platform !== "darwin") expect(diagnostics.warnings?.join(" ")).toContain("macOS only");
   });
+  for (const unblockSend of [undefined, false]) {
+    test(`PAC fallback warns without enabling send unblock when unblockSend is ${unblockSend}`, () => {
+      const chatgptDesktop = { pacFallback: true, ...(unblockSend === undefined ? {} : { unblockSend }) };
+      const candidate = { ...base, port: 12345, chatgptDesktop };
+      const diagnostics = configDiagnosticsFromRaw(JSON.stringify(candidate));
+      expect(diagnostics.warnings?.join(" ")).toContain("chatgptDesktop.pacFallback requires chatgptDesktop.unblockSend");
+      expect(diagnostics.source).toBe("file");
+      expect(diagnostics.error).toBeNull();
+      expect(diagnostics.config.chatgptDesktop).toEqual(chatgptDesktop);
+      expect(diagnostics.config.providers.xai).toEqual(base.providers.xai);
+      expect(diagnostics.config.defaultProvider).toBe(base.defaultProvider);
+      expect(diagnostics.config.port).toBe(12345);
+      expect(validateConfigCandidate(candidate).ok).toBe(true);
+    });
+  }
+  test("enabled send unblock and disabled PAC fallback do not warn about an inactive PAC", () => {
+    for (const chatgptDesktop of [{ pacFallback: true, unblockSend: true }, { pacFallback: false }, { pacFallback: false, unblockSend: false }]) {
+      const diagnostics = configDiagnosticsFromRaw(JSON.stringify({ ...base, chatgptDesktop }));
+      expect(diagnostics.error).toBeNull();
+      expect(diagnostics.config.chatgptDesktop).toEqual(chatgptDesktop);
+      expect(diagnostics.warnings?.some(warning => warning.includes("chatgptDesktop.pacFallback")) ?? false).toBe(false);
+      if (chatgptDesktop.unblockSend === true && process.platform !== "darwin") {
+        expect(diagnostics.warnings?.join(" ")).toContain("chatgptDesktop.unblockSend is experimental and macOS only");
+      }
+    }
+  });
+  test("invalid desktop leaves warn only about the dropped block rather than an inactive PAC", () => {
+    for (const chatgptDesktop of [{ pacFallback: true, unblockSend: "true" }, { pacFallback: true, unknown: true }, { pacFallback: "true" }]) {
+      const candidate = { ...base, chatgptDesktop };
+      const diagnostics = configDiagnosticsFromRaw(JSON.stringify(candidate));
+      expect(diagnostics.config.chatgptDesktop).toBeUndefined();
+      expect(diagnostics.config.providers.xai).toEqual(base.providers.xai);
+      expect(diagnostics.error).toBeNull();
+      expect(diagnostics.warnings?.join(" ")).toContain("the whole chatgptDesktop block is ignored");
+      expect(diagnostics.warnings?.some(warning => warning.includes("requires chatgptDesktop.unblockSend")) ?? false).toBe(false);
+      expect(validateConfigCandidate(candidate).ok).toBe(false);
+    }
+  });
   test("all operations reject non-macOS without app side effects", async () => {
     for (const sub of ["launch", "restore", "status", "install-watcher", "uninstall-watcher"]) expect(await handleChatgptCommand([sub], "linux")).toBe(1);
   });

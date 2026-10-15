@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { socks5Credentials, socks5Handshake, Socks5HandshakeError } from "../../src/lib/socks5-handshake";
 
 /**
- * Byte-level contract of the SOCKS5 handshake both raw transports ride: method
+ * Byte-level contract of the SOCKS5 handshake the raw transports share: method
  * negotiation, RFC 1929 subnegotiation, CONNECT framing, and reply parsing.
- * `tests/lib/socks5-fetch.test.ts` and `tests/chatgpt-unblock/unblock-ws-relay.test.ts`
+ * `tests/lib/socks5-fetch.test.ts` and `tests/clients/desktop-unblock-ws-relay.test.ts`
  * pin each transport end to end; these cases drive the handshake alone so every reply
  * shape is reachable without a socket.
  */
