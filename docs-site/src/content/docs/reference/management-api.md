@@ -650,6 +650,12 @@ setting interacts with `claudeCode.enabled` across upgrades and downgrades.
 | `GET, PUT /api/provider-context-caps` | Read or update global, all-provider, or one-provider context caps | 400 invalid request; 404 unknown provider |
 | `GET /api/provider-presets` | Return GUI provider presets derived from the runtime registry | — |
 
+Provider reads include the optional boolean `inferContextWindow` when configured. Provider PATCH
+accepts only a boolean or `null` to clear this setting; omission preserves it. A same-name POST
+also preserves an omitted setting, including the latest stored `false`; an explicit submitted
+boolean wins. See [Context windows on custom providers](/reference/configuration/providers/#context-windows-on-custom-providers)
+for its default-off, custom-provider-only behavior.
+
 The provider context-cap response includes `caps` (active limits) and `values` (last selected
 values, retained while disabled). Enabling a provider without `value` restores its selection,
 or uses the global `contextCapValue` on first enable. This also applies to OpenAI: the switch
