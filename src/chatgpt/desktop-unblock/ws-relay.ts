@@ -96,9 +96,13 @@ export async function performUpstreamHandshake(
   request: Request,
   dialOptions: DialUpstreamOptions = {},
 ): Promise<UpstreamHandshakeResult> {
-  const tunnel = await dialUpstreamTunnel(dialOptions);
-  if (!tunnel) return { ok: false, head: null };
   const url = new URL(request.url);
+  const signal = dialOptions.signal ? AbortSignal.any([dialOptions.signal, request.signal]) : request.signal;
+  const tunnel = await dialUpstreamTunnel({
+    ...dialOptions, signal, requestUrl: `wss://${CHATGPT_UPSTREAM_HOST}${url.pathname}${url.search}`,
+  });
+  if (!tunnel) return { ok: false, head: null };
+  if (signal.aborted) { tunnel.socket.destroy(); return { ok: false, head: null }; }
   const lines = [`GET ${url.pathname}${url.search} HTTP/1.1`, `Host: ${CHATGPT_UPSTREAM_HOST}`];
   forwardedHandshakeHeaders(request).forEach((value, name) => lines.push(`${name}: ${value}`));
   lines.push(
@@ -108,23 +112,33 @@ export async function performUpstreamHandshake(
     "Sec-WebSocket-Version: 13",
   );
   tunnel.socket.write(`${lines.join("\r\n")}\r\n\r\n`);
-  const response = await readResponseHead(tunnel.socket, HANDSHAKE_TIMEOUT_MS);
-  if (response === null || !/^HTTP\/1\.[01] 101\b/.test(response.head)) {
+  const response = await readResponseHead(tunnel.socket, dialOptions.headersTimeoutMs ?? HANDSHAKE_TIMEOUT_MS, signal);
+  if (signal.aborted || response === null || !/^HTTP\/1\.[01] 101\b/.test(response.head)) {
     tunnel.socket.destroy();
     return { ok: false, head: response?.head ?? null };
+  }
+  if (dialOptions.signal) {
+    // Request.signal ends when the app closes its WebSocket; the relay must still send
+    // the close frame upstream. Only runtime shutdown owns the upgraded socket lifetime.
+    const shutdown = () => tunnel.socket.destroy();
+    dialOptions.signal.addEventListener("abort", shutdown, { once: true });
+    tunnel.socket.once("close", () => dialOptions.signal!.removeEventListener("abort", shutdown));
+    if (dialOptions.signal.aborted) { shutdown(); return { ok: false, head: null }; }
   }
   const protocol = /^sec-websocket-protocol:[ \t]*([^\r\n]+)/im.exec(response.head)?.[1]?.trim() ?? null;
   return { ok: true, tunnel, protocol, early: response.early };
 }
 
 /** Read through the blank line; bytes after it are the first frames. Pauses the socket. */
-export function readResponseHead(socket: TLSSocket, timeoutMs: number): Promise<{ head: string; early: Buffer } | null> {
+export function readResponseHead(socket: TLSSocket, timeoutMs: number, signal?: AbortSignal): Promise<{ head: string; early: Buffer } | null> {
   return new Promise(resolve => {
     let buffer = Buffer.alloc(0);
     let settled = false;
     const finish = (result: { head: string; early: Buffer } | null) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       socket.removeListener("data", onData);
       socket.removeListener("error", onFailure);
       socket.removeListener("close", onFailure);
@@ -138,13 +152,17 @@ export function readResponseHead(socket: TLSSocket, timeoutMs: number): Promise<
     const onData = (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk]);
       const end = buffer.indexOf("\r\n\r\n");
+      if (end > 64 * 1024 || (end === -1 && buffer.length > 64 * 1024)) { finish(null); return; }
       if (end !== -1) finish({ head: buffer.subarray(0, end).toString("latin1"), early: buffer.subarray(end + 4) });
     };
     const onFailure = () => finish(null);
     socket.on("data", onData);
     socket.once("error", onFailure);
     socket.once("close", onFailure);
-    socket.setTimeout(timeoutMs, onFailure);
+    const onAbort = () => { finish(null); socket.destroy(); };
+    const timer = setTimeout(onFailure, timeoutMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
   });
 }
 
@@ -315,12 +333,19 @@ export async function handleWebSocketUpgrade(
 ): Promise<Response | undefined> {
   const handshake = await performUpstreamHandshake(request, dialOptions);
   if (!handshake.ok) return refusalResponse(handshake.head);
+  if (request.signal.aborted || dialOptions.signal?.aborted || handshake.tunnel.socket.destroyed) {
+    handshake.tunnel.socket.destroy();
+    return new Response("websocket upgrade cancelled", { status: 502 });
+  }
   const relay = new WsRelay(handshake.tunnel, handshake.early);
-  const upgraded = server.upgrade(request, {
-    data: { relay },
-    // Bun rejects an empty headers object, so omit it when there is no subprotocol.
-    ...(handshake.protocol ? { headers: { "sec-websocket-protocol": handshake.protocol } } : {}),
-  });
+  let upgraded = false;
+  try {
+    upgraded = server.upgrade(request, {
+      data: { relay },
+      // Bun rejects an empty headers object, so omit it when there is no subprotocol.
+      ...(handshake.protocol ? { headers: { "sec-websocket-protocol": handshake.protocol } } : {}),
+    });
+  } catch { /* The listener may have stopped while the upstream handshake was pending. */ }
   if (!upgraded) {
     relay.abort();
     return new Response("websocket upgrade failed", { status: 400 });

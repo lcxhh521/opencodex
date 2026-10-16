@@ -1,23 +1,16 @@
 import { connect as connectSocket } from "node:net";
-import { connect as connectTls } from "node:tls";
+import { checkServerIdentity, connect as connectTls } from "node:tls";
+import type { RuntimePacPolicy } from "./pac-policy";
 import { effectiveProxyFor } from "../../lib/proxy-env";
 import { socks5Credentials, socks5Handshake } from "../../lib/socks5-handshake";
 import type { Socket } from "node:net";
 import type { TLSSocket } from "node:tls";
 
 /**
- * Upstream transport for the ChatGPT desktop intercept's WebSocket relay.
- *
- * Bun's WebSocket client ignores proxy environment variables and has no proxy option
- * (verified on Bun 1.4.0), so the relay dials chatgpt.com itself over a raw socket it
- * fully controls. The dial honors the same proxy selection as every other outbound
- * request the server makes: `effectiveProxyFor` reads HTTP(S)_PROXY/ALL_PROXY, which
- * `applyProxyEnv` populates from `config.proxy` at startup. A configured http(s) proxy
- * is reached through an HTTP CONNECT tunnel; a SOCKS5 ALL_PROXY through a SOCKS5 CONNECT
- * (sharing `src/lib/socks5-handshake.ts` with the fetch tunnel, so a credentialed
- * `socks5://` proxy authenticates on both routes); no proxy means a direct TLS
- * connection. The VPN's own mode (system proxy / TUN / off) therefore never has to be
- * detected: the tunnel rides whatever egress opencodex already uses for provider traffic.
+ * Shared socket dialer for the ChatGPT intercept's HTTP and WebSocket transports.
+ * Runtime PAC policy owns route selection when configured. Otherwise the legacy
+ * environment/config proxy selection remains intact. Direct, HTTP(S) CONNECT and
+ * SOCKS5 all terminate in one verified TLS socket handed to the requesting transport.
  */
 
 export const CHATGPT_UPSTREAM_HOST = "chatgpt.com";
@@ -30,6 +23,13 @@ export interface UpstreamTunnel {
 }
 
 export interface DialUpstreamOptions {
+  /** Runtime-owned policy; when present neither environment proxies nor implicit DIRECT apply. */
+  policy?: RuntimePacPolicy;
+  /** Original upstream URL, including scheme, path and query, for per-request PAC evaluation. */
+  requestUrl?: string;
+  signal?: AbortSignal;
+  /** Absolute response-header deadline (HTTP and WebSocket), milliseconds. */
+  headersTimeoutMs?: number;
   /** Override the proxy picked from the environment; tests use it to point at a local proxy. */
   proxy?: string | null;
   /** Connect timeout for the TCP dial and the proxy handshake, milliseconds. */
@@ -56,19 +56,44 @@ class HttpProxyHandshakeError extends Error {
  */
 export async function dialUpstreamTunnel(options: DialUpstreamOptions = {}): Promise<UpstreamTunnel | null> {
   const timeout = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
-  const proxy = options.proxy !== undefined
-    ? options.proxy
-    : effectiveProxyFor(new URL(`https://${CHATGPT_UPSTREAM_HOST}`), process.env);
-  const route: UpstreamTunnel["route"] = socks5Route(proxy) ? "socks5" : proxy ? "http-connect" : "direct";
+  const { signal } = options;
   try {
+    signal?.throwIfAborted();
+    const proxies = options.policy
+      ? await resolvePolicy(options.policy, options.requestUrl ?? `https://${CHATGPT_UPSTREAM_HOST}/`, signal)
+      : [options.proxy !== undefined ? options.proxy : effectiveProxyFor(new URL(`https://${CHATGPT_UPSTREAM_HOST}`), process.env)];
     const target = options.target ?? { host: CHATGPT_UPSTREAM_HOST, port: CHATGPT_UPSTREAM_TLS_PORT };
-    const raw = await dialRaw(target, proxy, route, timeout, options.ca);
-    const socket = await wrapTls(raw, timeout, options.ca);
-    return { socket, route };
-  } catch {
-    return null;
-  }
+    for (const proxy of proxies) {
+      signal?.throwIfAborted();
+      const route: UpstreamTunnel["route"] = proxy === null ? "direct" : socks5Route(proxy) ? "socks5" : "http-connect";
+      try {
+        const raw = await dialRaw(target, proxy, route, timeout, options.ca, signal);
+        const socket = await wrapTls(raw, CHATGPT_UPSTREAM_HOST, timeout, options.ca, signal);
+        if (signal?.aborted) { socket.destroy(); return null; }
+        return { socket, route };
+      } catch (error) {
+        // Only an unreachable TCP/DNS endpoint may advance the policy. Once connected,
+        // any CONNECT/SOCKS response, TLS failure or later application failure is final.
+        if (!options.policy || !(error instanceof TcpUnavailableError) || signal?.aborted) return null;
+      }
+    }
+  } catch { /* Policy failure, cancellation and malformed settings all fail closed. */ }
+  return null;
 }
+
+async function resolvePolicy(policy: RuntimePacPolicy, url: string, signal?: AbortSignal): Promise<readonly (string | null)[]> {
+  if (!signal) return policy.resolve(url);
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => { signal.removeEventListener("abort", onAbort); reject(new Error("upstream request aborted")); };
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve().then(() => policy.resolve(url, signal)).then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
+class TcpUnavailableError extends Error {}
+const UNREACHABLE_CODES = new Set(["ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH", "ENOTFOUND", "EAI_AGAIN", "ETIMEDOUT"]);
 
 interface RawTarget {
   host: string;
@@ -95,19 +120,19 @@ export function proxyDialPort(proxyUrl: URL, route: UpstreamTunnel["route"]): nu
   return proxyUrl.protocol === "https:" ? 443 : 80;
 }
 
-async function dialRaw(target: RawTarget, proxy: string | null, route: UpstreamTunnel["route"], timeout: number, ca: string | undefined): Promise<Socket> {
-  if (route === "direct") return tcpConnect(target.host, target.port, timeout);
+async function dialRaw(target: RawTarget, proxy: string | null, route: UpstreamTunnel["route"], timeout: number, ca: string | undefined, signal?: AbortSignal): Promise<Socket> {
+  if (route === "direct") return tcpConnect(target.host, target.port, timeout, signal);
   const proxyUrl = new URL(proxy!);
   const proxyHost = proxyUrl.hostname.replace(/^\[|\]$/g, "");
   const proxyPort = proxyDialPort(proxyUrl, route);
-  const proxySocket = await tcpConnect(proxyHost, proxyPort, timeout);
+  const proxySocket = await tcpConnect(proxyHost, proxyPort, timeout, signal);
   // An https:// proxy speaks TLS on its own port before any handshake, so the CONNECT
   // request must ride that TLS session, with the proxy's hostname as the SNI.
-  const plain = proxyUrl.protocol === "https:" ? await wrapProxyTls(proxySocket, proxyHost, timeout, ca) : proxySocket;
+  const plain = proxyUrl.protocol === "https:" ? await wrapTls(proxySocket, proxyHost, timeout, ca, signal) : proxySocket;
   if (plain !== proxySocket) {
     plain.once("error", () => proxySocket.destroy());
   }
-  const reader = new ProxyHandshakeReader(plain, timeout);
+  const reader = new ProxyHandshakeReader(plain, timeout, signal);
   const socks5 = route === "socks5";
   try {
     // A socks5:// URL with credentials must authenticate here exactly as the fetch tunnel
@@ -128,17 +153,37 @@ async function dialRaw(target: RawTarget, proxy: string | null, route: UpstreamT
   return plain;
 }
 
-async function tcpConnect(host: string, port: number, timeout: number): Promise<Socket> {
+async function tcpConnect(host: string, port: number, timeout: number, signal?: AbortSignal): Promise<Socket> {
+  signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const socket = connectSocket({ host, port });
-    const onError = (error: Error) => { socket.destroy(); reject(error); };
-    socket.setTimeout(timeout, () => onError(new Error("tcp connect timeout")));
-    socket.once("error", onError);
-    socket.once("connect", () => {
-      socket.setTimeout(0);
+    // A permanent guard covers the microtask gaps between connection, handshake and owner.
+    socket.on("error", () => {});
+    let settled = false;
+    const timer = setTimeout(() => finish(new TcpUnavailableError("TCP connection timed out")), timeout);
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       socket.removeListener("error", onError);
-      resolve(socket);
-    });
+      socket.removeListener("close", onClose);
+      socket.removeListener("connect", onConnect);
+    };
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) { socket.destroy(); reject(error); } else resolve(socket);
+    };
+    const onError = (error: NodeJS.ErrnoException) => finish(UNREACHABLE_CODES.has(error.code ?? "")
+      ? new TcpUnavailableError("TCP endpoint is unreachable") : error);
+    const onAbort = () => finish(new Error("upstream request aborted"));
+    const onClose = () => finish(new Error("TCP connection closed"));
+    const onConnect = () => finish();
+    socket.once("error", onError);
+    socket.once("close", onClose);
+    socket.once("connect", onConnect);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
   });
 }
 
@@ -156,17 +201,22 @@ class ProxyHandshakeReader {
   private readonly onData = (chunk: Buffer) => this.feed(chunk);
   private readonly onError = (error: Error) => this.fail(error);
   private readonly onTimeout = () => this.fail(new Error("proxy handshake timeout"));
+  private readonly onAbort = () => this.fail(new Error("upstream request aborted"));
+  private readonly timer: ReturnType<typeof setTimeout>;
   private readonly onClosed = () => this.fail(new Error("proxy closed the connection during the handshake"));
 
-  constructor(private readonly socket: Socket, timeout: number) {
+  constructor(private readonly socket: Socket, timeout: number, private readonly signal?: AbortSignal) {
     socket.on("data", this.onData);
     socket.on("error", this.onError);
     socket.on("end", this.onClosed);
     socket.on("close", this.onClosed);
-    socket.setTimeout(timeout, this.onTimeout);
+    this.timer = setTimeout(this.onTimeout, timeout);
+    signal?.addEventListener("abort", this.onAbort, { once: true });
+    if (signal?.aborted) this.onAbort();
   }
 
   write(bytes: Uint8Array | string): void {
+    if (this.failure) throw this.failure;
     this.socket.write(bytes);
   }
 
@@ -199,6 +249,8 @@ class ProxyHandshakeReader {
   }
 
   private feed(chunk: Buffer): void {
+    if (this.failure) return;
+    if (this.buffer.length + chunk.length > 64 * 1024) { this.fail(new Error("proxy handshake is too large")); return; }
     this.buffer = this.buffer.length === 0 ? (chunk satisfies Buffer) : Buffer.concat([this.buffer, chunk]);
     if (this.pending && this.pending.ready(this.buffer)) {
       const waiter = this.pending;
@@ -215,6 +267,8 @@ class ProxyHandshakeReader {
   }
 
   dispose(): void {
+    clearTimeout(this.timer);
+    this.signal?.removeEventListener("abort", this.onAbort);
     this.socket.removeListener("data", this.onData);
     this.socket.removeListener("error", this.onError);
     this.socket.removeListener("end", this.onClosed);
@@ -247,36 +301,47 @@ async function httpConnectThrough(reader: ProxyHandshakeReader, target: RawTarge
   reader.write([...lines, "", ""].join(CRLF));
   const head = await reader.readHttpHead();
   const statusLine = head.split(CRLF)[0]!;
-  if (!/^HTTP\/1\.[01] 2\d\d/.test(statusLine)) throw new Error(`proxy refused CONNECT: ${statusLine}`);
+  if (!/^HTTP\/1\.[01] 2\d\d(?:[ \t]|$)/.test(statusLine)) throw new Error(`proxy refused CONNECT: ${statusLine}`);
 }
 
-async function wrapTls(raw: Socket, timeout: number, ca: string | undefined): Promise<TLSSocket> {
+/** Verify the named peer explicitly, including IP-literal HTTPS proxies without SNI. */
+async function wrapTls(raw: Socket, peer: string, timeout: number, ca: string | undefined, signal?: AbortSignal): Promise<TLSSocket> {
+  if (signal?.aborted) { raw.destroy(); signal.throwIfAborted(); }
   return new Promise((resolve, reject) => {
-    const tls = connectTls({ socket: raw, servername: CHATGPT_UPSTREAM_HOST, ...(ca ? { ca } : {}) });
-    const onError = (error: Error) => { tls.destroy(); reject(error); };
-    tls.setTimeout(timeout, () => onError(new Error("TLS handshake timeout")));
-    tls.once("error", onError);
-    tls.once("secureConnect", () => {
-      tls.setTimeout(0);
+    let tls: TLSSocket;
+    try {
+      tls = connectTls({
+        socket: raw, host: peer, rejectUnauthorized: true,
+        ...(!isIpLiteral(peer) ? { servername: peer } : {}), ...(ca ? { ca } : {}),
+        checkServerIdentity: (_hostname, cert) => checkServerIdentity(peer, cert),
+      });
+    } catch (error) { raw.destroy(); reject(error); return; }
+    tls.on("error", () => {});
+    let settled = false;
+    const timer = setTimeout(() => finish(new Error("TLS handshake timeout")), timeout);
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       tls.removeListener("error", onError);
-      resolve(tls);
-    });
-  });
-}
-
-/** TLS-wrap the proxy's own socket before the CONNECT handshake (https:// proxy URLs). */
-async function wrapProxyTls(raw: Socket, proxyHost: string, timeout: number, ca: string | undefined): Promise<TLSSocket> {
-  // An IP-literal proxy has no hostname to name in SNI; node:tls forbids it outright.
-  const servername = isIpLiteral(proxyHost) ? undefined : proxyHost;
-  return new Promise((resolve, reject) => {
-    const tls = connectTls({ socket: raw, ...(servername ? { servername } : {}), ...(ca ? { ca } : {}) });
-    const onError = (error: Error) => { tls.destroy(); reject(error); };
-    tls.setTimeout(timeout, () => onError(new Error("proxy TLS handshake timeout")));
+      tls.removeListener("close", onClose);
+      tls.removeListener("secureConnect", onSecure);
+      if (error) { tls.destroy(); raw.destroy(); reject(error); } else resolve(tls);
+    };
+    const onError = (error: Error) => finish(error);
+    const onAbort = () => finish(new Error("upstream request aborted"));
+    const onClose = () => finish(new Error("TLS connection closed"));
+    const onSecure = () => {
+      try {
+        const identityError = checkServerIdentity(peer, tls.getPeerCertificate());
+        finish(!tls.authorized ? new Error("upstream TLS certificate is not trusted") : identityError);
+      } catch (error) { finish(error instanceof Error ? error : new Error("TLS identity check failed")); }
+    };
     tls.once("error", onError);
-    tls.once("secureConnect", () => {
-      tls.setTimeout(0);
-      tls.removeListener("error", onError);
-      resolve(tls);
-    });
+    tls.once("close", onClose);
+    tls.once("secureConnect", onSecure);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
   });
 }

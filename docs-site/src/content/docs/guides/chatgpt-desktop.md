@@ -216,7 +216,7 @@ is empty, or is not a regular file, it leaves the running app untouched. The PAC
 `chatgpt.com` to that entry first, and every other host the way the system routes it:
 
 The listener does not report ready or forward traffic until this startup completes.
-Stopping it rejects new requests and closes active CONNECT and WebSocket relays.
+Stopping it rejects new requests and closes active policy-routed HTTP streams, CONNECT and WebSocket relays.
 Stale PAC/readiness files alone never authorize a watcher restart.
 
 | Setup | Other hosts, and `chatgpt.com` while OpenCodex is stopped |
@@ -244,6 +244,38 @@ or off, restart OpenCodex, run `ocx chatgpt launch`, and run
 launch the same way as a resolver-rule one. Resolver-rule launches likewise reject unreadable
 system proxy settings before quitting the app and never add a direct fallback to an explicit
 proxy. `restore` remains available even when proxy settings cannot be read.
+
+### Existing proxy policy while the intercept is running
+
+For both resolver and PAC launch modes, OpenCodex now reads the system proxy configuration once
+at startup. A configured system PAC is evaluated inside an isolated, runtime-owned JavaScript
+worker for both HTTP and WebSocket upstream requests. A static system proxy chain is also kept
+strict. No separate background service is installed. If neither system policy exists, the existing
+OpenCodex outbound proxy selection remains in use.
+
+Only an explicit `DIRECT` PAC result permits direct upstream access. Supported proxy results are
+`PROXY`, `HTTPS` and `SOCKS5`; malformed or unsupported results fail the request. Failover to the
+next listed route is limited to failure before establishing its TCP connection. Proxy refusal,
+TLS/certificate errors and responses do not retry or replay a chat POST. Upstream TLS verification
+remains enabled.
+
+The evaluator deliberately supports a restricted PAC subset. Classic domain matching, `*`/`?`
+globs, weekday ranges and IPv4 DNS helpers are supported. `myIpAddress`, date/time ranges, IPv6
+extension helpers, extended glob syntax, dynamic/async code, and `catch`/`finally` recovery syntax
+are unsupported. Keywords appearing only in comments or strings are allowed. Exception recovery
+is excluded because the engine cannot reliably report a caught allocation failure. DNS lookup
+errors also stop routing, including ambiguous negative answers, instead of permitting a rule to
+mistake an error for a direct route.
+
+These restrictions can reject a PAC that works in your browser. The worker has bounded memory,
+execution time, DNS work and request queue size. An unsupported operation, invalid route, runtime
+error, cancellation or exceeded limit closes that policy until OpenCodex restarts; it never switches
+to an environment proxy or an implicit direct route. HTTPS and secure WebSocket PAC matching uses
+the scheme and host, with path, query and credentials removed.
+
+This protection applies while traffic passes through the active OpenCodex listener. The browser's
+embedded PAC after OpenCodex exits still has the non-mandatory behavior described above; native
+app certificate acceptance and cached-PAC stop/crash recovery require separate macOS acceptance.
 
 ### Intercept rewrite boundary
 

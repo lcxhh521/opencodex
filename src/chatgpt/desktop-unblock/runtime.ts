@@ -14,6 +14,7 @@ import type { EntryProxyHandle } from "./entry-proxy";
 import { CHATGPT_UNBLOCK_PAC_FILENAME, buildChatgptUnblockPac, loadSystemPac, systemProxyChain } from "./pac";
 import type { SystemProxyChain } from "./pac";
 import type { WsRelaySocketData } from "./ws-relay";
+import { createRuntimePacPolicy, parsePacRoutes, type RuntimePacPolicy } from "./pac-policy";
 
 /**
  * Lifecycle for the ChatGPT desktop send-unblock listener.
@@ -186,27 +187,50 @@ export async function startChatgptUnblock<T = undefined>(options: StartChatgptUn
   const leaf = issueLocalInterceptLeaf(ca, [CHATGPT_INTERCEPT_HOST]);
   // The port must be the configured one, not ephemeral: the launcher's launch arguments name it.
   let ready = false;
-  const listener = startChatgptUnblockListener({ leaf, port, isReady: () => ready });
+  let routePolicy: RuntimePacPolicy | undefined;
+  const shutdown = new AbortController();
+  const listener = startChatgptUnblockListener({
+    leaf, port, isReady: () => ready, routePolicy: () => routePolicy,
+    wsUpstream: { signal: shutdown.signal },
+  });
   let entryProxy: EntryProxyHandle | undefined;
   let pacRoute: ChatgptUnblockPacRoute | undefined;
-  if (chatgptPacFallbackEnabled(options.config)) {
-    try {
+  try {
+    if (chatgptPacFallbackEnabled(options.config)) {
       // The PAC names this port; it must be the derived entry port, not ephemeral, and it
       // must be bound before the app ever reads the file.
       entryProxy = await startChatgptUnblockEntryProxy({ originPort: listener.port ?? port, port: chatgptUnblockEntryPort(options.config, options.publicPort) });
-      // Regenerated at every start: the entry port and the captured system route (the
-      // user's VPN state) are what the file encodes. A stale file after a config or
-      // network change would point the app at a dead chain.
-      const chain = systemProxyChain();
-      const systemPac = chain.autoConfigUrl ? await loadSystemPac(chain.autoConfigUrl) : null;
-      const pac = chooseChatgptUnblockPac(entryProxy.port, chain, systemPac);
+    }
+    // Capture one system-policy snapshot for both upstream protocols and, when enabled,
+    // the browser PAC. Resolver-rule launches must not bypass a configured system PAC.
+    const chain = systemProxyChain();
+    const systemPac = chain.autoConfigUrl ? await loadSystemPac(chain.autoConfigUrl) : null;
+    if (chain.autoConfig && !systemPac) throw new Error("The configured system PAC could not be read; refusing to replace its route.");
+    const pac = entryProxy ? chooseChatgptUnblockPac(entryProxy.port, chain, systemPac) : undefined;
+    if (systemPac) {
+      routePolicy = await createRuntimePacPolicy(systemPac);
+    } else if (chain.entries.length) {
+      const routes = parsePacRoutes(chain.entries.join("; "));
+      let closed = false;
+      routePolicy = {
+        async resolve(_url, signal) {
+          if (closed || signal?.aborted) throw new Error("ChatGPT upstream policy is closed");
+          return routes;
+        },
+        close() { closed = true; },
+      };
+    }
+    // No system policy leaves the existing explicit OpenCodex proxy selection unchanged.
+    // Policy failures never enter that path; they reject startup or the individual request.
+    if (pac) {
       pacRoute = pac.route;
       writeFileSync(chatgptUnblockPacPath(configDir), pac.text, { mode: 0o644 });
-    } catch (error) {
-      await entryProxy?.stop();
-      await listener.stop(true);
-      throw error;
     }
+  } catch (error) {
+    shutdown.abort();
+    routePolicy?.close();
+    try { await entryProxy?.stop(); } finally { await listener.stop(true); }
+    throw error;
   }
   // Only now may identity probes authorize a relaunch or traffic reach an upstream. A stale
   // marker/PAC from an earlier run must not make a slow or failing startup look ready.
@@ -226,8 +250,9 @@ export async function startChatgptUnblock<T = undefined>(options: StartChatgptUn
     listener,
     stop: async () => {
       ready = false;
-      await entryProxy?.stop();
-      await listener.stop(true);
+      shutdown.abort();
+      routePolicy?.close();
+      try { await entryProxy?.stop(); } finally { await listener.stop(true); }
     },
   };
 }

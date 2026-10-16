@@ -121,8 +121,16 @@ timestamps; request bodies and credentials are not logged.
 
 `src/chatgpt/desktop-unblock/ws-relay.ts`, `ws-frame.ts` and `ws-upstream.ts`
 relay upgrades and voice/dictation messages without rewriting. Upstream TLS
-verification remains enabled; direct, HTTP(S) CONNECT and SOCKS5 routes follow
-opencodex's outbound proxy selection. The shared method/auth/CONNECT framing
+verification remains enabled. Both HTTP and WebSocket upstreams use the same runtime-owned
+system PAC snapshot or captured static system proxy chain. Only when neither is configured do
+routes retain opencodex's existing outbound proxy selection. `pac-policy.ts` validates the whole
+route result before dialing: only explicit `DIRECT`, `PROXY`, `HTTPS` and `SOCKS5` are supported;
+empty, malformed, unsupported or oversized results never fall back to environment proxies or DIRECT.
+`upstream-fetch.ts` uses the exact TLS socket selected by `ws-upstream.ts`, with one request per
+socket and streaming/backpressure. Ordered failover is allowed only before TCP connection succeeds.
+CONNECT/SOCKS rejection, TLS/hostname failure or an HTTP/WebSocket error never retries a route or
+replays a POST. Both proxy and origin certificates remain verified. Runtime stop aborts active
+policy HTTP uploads/responses and late connections as well as WebSocket relays. The shared method/auth/CONNECT framing
 owner is `src/lib/socks5-handshake.ts`, also used by `src/lib/socks5-fetch.ts`.
 Each transport still owns its socket, timeout, buffering and post-CONNECT work.
 HTTP CONNECT sends Basic proxy authorization when either URL credential is present; invalid percent
@@ -165,7 +173,30 @@ while the base64 `data:` switch stays within 512 KiB. An unreadable system proxy
 unreadable/oversized system PAC, entry bind or PAC write failure releases both listeners and fails
 this optional integration's startup. An explicit system proxy chain receives no synthetic DIRECT:
 proxy exhaustion fails the request; only a no-proxy/TUN configuration uses normal DIRECT.
-Automatic proxy discovery cannot be captured and also fails PAC-mode startup. Embedded system
+Automatic proxy discovery cannot be captured and also fails either launch mode's startup.
+
+`pac-worker.ts` executes arbitrary PAC only in a QuickJS WASM guest inside a runtime-owned worker;
+no host JavaScript evaluator, Node globals, persistent service or guessed VPN endpoint is exposed.
+The pinned evaluator and syntax-parser dependencies are packaged with the source distribution;
+`scripts/build-standalone.ts` embeds the worker source and the main bundle embeds the WASM asset.
+The supported subset includes classic domain, `*`/`?` glob and weekday helpers, plus synchronous
+IPv4 DNS helpers using the system resolver. HTTPS/WSS PAC URLs omit credentials, path, query and
+fragment; their original scheme is retained. This is intentionally not full browser PAC parity:
+`myIpAddress`, date/time ranges, IPv6 extension helpers, extended glob syntax, dynamic code,
+asynchronous code and exception recovery (`catch`/`finally`) are unsupported. Syntax validation
+ignores keywords in comments and strings. Exception recovery is rejected because the evaluator's
+allocation errors are catchable and provide no reliable allocator-failure notification.
+DNS errors, including ambiguous negative responses, fail closed rather than guessing an answer.
+DNS uses at most one outstanding native lookup; cancellation ignores its late result, but cannot
+cancel an operating-system `getaddrinfo` call already in progress.
+Each worker has a 32 MiB guest heap, 100 ms execution budget, 2-second total request deadline,
+5-second startup deadline, 750 ms per DNS wait, 16 DNS calls, 512 helper calls, and 32 queued requests.
+Syntax parsing is also capped at 100,000 tokens.
+Source/input/result/route limits are 4 MiB, 16 KiB, 8 KiB and 32 routes. Unsupported semantics,
+execution or route errors, aborts and exceeded limits permanently close the policy; restart the
+optional integration to retry. No caller-supplied route or error details are logged.
+
+This runtime-owned policy covers only traffic the active listener actually receives. Embedded system
 PACs retain non-mandatory Chromium semantics, including direct fallback on invalid results or
 execution failure; that mode does not establish a fail-closed policy. The script launches with the inline PAC switch alone, requires the entry
 to complete a real CONNECT and authenticated TLS identity exchange. A mere TCP connection, empty
@@ -180,7 +211,9 @@ Native restore does not depend on reading the proxy configuration.
 
 Intercept regression files use the existing `tests/clients/` domain alongside
 the shim tests; shared handshake coverage is `tests/lib/socks5-handshake.test.ts`.
-Both explicit layout maps register every added test basename. No duplicate app-server shim is part
+Both explicit layout maps register every added test basename. Focused policy tests exercise
+unsupported/invalid rules, execution and DNS budgets, lifecycle cleanup, HTTP/WebSocket route parity,
+single-socket POST behavior, strict TLS and compiled worker/WASM operation without source files. No duplicate app-server shim is part
 of this integration; the PAC generator and entry proxy run only with `pacFallback`.
 Loopback tests cover active CONNECT/WebSocket shutdown and real child-process SIGKILL, stale
 readiness rejection, same-port restart and PAC regeneration. They do not attest a macOS app's

@@ -6,6 +6,8 @@ import type { PreservedSendBlock, RewriteSurface } from "./rewrite";
 import { handleWebSocketUpgrade, isRelayableUpgrade } from "./ws-relay";
 import type { WsRelaySocketData } from "./ws-relay";
 import type { DialUpstreamOptions } from "./ws-upstream";
+import type { RuntimePacPolicy } from "./pac-policy";
+import { createPolicyFetch } from "./upstream-fetch";
 
 /**
  * TLS listener for the ChatGPT desktop send-unblock intercept.
@@ -78,6 +80,8 @@ export interface ChatgptUnblockListenerOptions {
   diagnostics?: ChatgptUnblockDiagnostics;
   /** Runtime startup/shutdown gate; a bound socket is not yet a launchable integration. */
   isReady?: () => boolean;
+  /** Runtime-owned captured system policy, shared by HTTP and WebSocket requests. */
+  routePolicy?: () => RuntimePacPolicy | undefined;
 }
 
 function responseHeaders(source: Response): Headers {
@@ -290,8 +294,12 @@ export function startChatgptUnblockListener(options: ChatgptUnblockListenerOptio
       if (options.isReady?.() === false) {
         return new Response("ChatGPT intercept is not ready", { status: 503, headers: { "cache-control": "no-store" } });
       }
-      if (isRelayableUpgrade(req)) return handleWebSocketUpgrade(req, server, options.wsUpstream);
-      return relayWithSendUnblock(req, upstreamBase, options.fetchImpl, diagnostics);
+      const policy = options.routePolicy?.();
+      if (isRelayableUpgrade(req)) return handleWebSocketUpgrade(req, server, {
+        ...options.wsUpstream, ...(policy ? { policy } : {}),
+      });
+      const upstreamFetch = policy ? createPolicyFetch(policy, options.wsUpstream) : options.fetchImpl;
+      return relayWithSendUnblock(req, upstreamBase, upstreamFetch, diagnostics);
     },
   });
 }
