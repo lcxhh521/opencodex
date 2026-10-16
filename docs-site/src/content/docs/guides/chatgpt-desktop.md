@@ -172,6 +172,12 @@ directory and CA key. The relay does not log request bodies or credentials.
 shared authority. Remove trust manually through Keychain Access when you no
 longer need it, accounting for other integrations using the same authority.
 
+Status checks the current CA's validity, exact presence in the login keychain, and
+usable user-domain SSL trust settings. An explicit deny or unrelated/scoped policy
+does not count as trust; malformed or ambiguous settings report `unknown`. This
+is a configuration check, not proof that a particular app build accepts the
+intercepted certificate or routes all its traffic through Chromium.
+
 Launch restarts ChatGPT with
 `--host-resolver-rules=MAP chatgpt.com 127.0.0.1:<port>`. Explicit system HTTP/SOCKS
 proxies get an apex-host bypass while other hosts retain the proxy without a synthetic
@@ -209,14 +215,21 @@ app, the launcher prepares the PAC argument; if the file cannot be read and enco
 is empty, or is not a regular file, it leaves the running app untouched. The PAC sends
 `chatgpt.com` to that entry first, and every other host the way the system routes it:
 
+The listener does not report ready or forward traffic until this startup completes.
+Stopping it rejects new requests and closes active CONNECT and WebSocket relays.
+Stale PAC/readiness files alone never authorize a watcher restart.
+
 | Setup | Other hosts, and `chatgpt.com` while OpenCodex is stopped |
 |---|---|
 | No proxy, or VPN in TUN mode | Direct. |
 | VPN in system-proxy mode | The configured system proxy chain, without adding direct fallback. |
 | PAC file | The system PAC, embedded in the generated file. |
 
-When OpenCodex stops, the app uses the captured route without a restart; the send
-unblock pauses until OpenCodex is back. If every configured proxy is unavailable,
+The generated PAC is intended to let the app use the captured route without a
+restart when OpenCodex stops; the send unblock pauses until OpenCodex is back.
+Loopback tests verify socket cleanup, process-crash port release and restart, but
+actual macOS app cached-PAC recovery still needs acceptance testing.
+If every configured proxy is unavailable,
 requests fail instead of silently connecting directly. Embedded system PACs retain
 Chromium’s non-mandatory PAC behavior: invalid results or execution failures can
 still fall back directly. Do not use that mode when a fail-closed system-PAC policy is required. The route is captured when

@@ -185,7 +185,8 @@ export async function startChatgptUnblock<T = undefined>(options: StartChatgptUn
   const ca = await ensureLocalInterceptCaForStartup(configDir);
   const leaf = issueLocalInterceptLeaf(ca, [CHATGPT_INTERCEPT_HOST]);
   // The port must be the configured one, not ephemeral: the launcher's launch arguments name it.
-  const listener = startChatgptUnblockListener({ leaf, port });
+  let ready = false;
+  const listener = startChatgptUnblockListener({ leaf, port, isReady: () => ready });
   let entryProxy: EntryProxyHandle | undefined;
   let pacRoute: ChatgptUnblockPacRoute | undefined;
   if (chatgptPacFallbackEnabled(options.config)) {
@@ -207,6 +208,9 @@ export async function startChatgptUnblock<T = undefined>(options: StartChatgptUn
       throw error;
     }
   }
+  // Only now may identity probes authorize a relaunch or traffic reach an upstream. A stale
+  // marker/PAC from an earlier run must not make a slow or failing startup look ready.
+  ready = true;
   // After the PAC file: the watcher wakes on this marker and relaunches with the switch it reads
   // from that file. Best effort: without the marker the watcher still acts on the app's next launch.
   try {
@@ -221,6 +225,7 @@ export async function startChatgptUnblock<T = undefined>(options: StartChatgptUn
     ...(pacRoute ? { pacRoute } : {}),
     listener,
     stop: async () => {
+      ready = false;
       await entryProxy?.stop();
       await listener.stop(true);
     },

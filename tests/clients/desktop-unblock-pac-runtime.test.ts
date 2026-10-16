@@ -173,6 +173,51 @@ describe.skipIf(process.platform === "win32")("chatgpt unblock PAC startup route
   }
 });
 
+describe.skipIf(process.platform === "win32")("chatgpt unblock startup readiness", () => {
+  test("a stale PAC and ready marker cannot make an unfinished startup launchable", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ocx-pac-readiness-"));
+    try {
+      writeFileSync(chatgptUnblockPacPath(dir), "stale PAC from an earlier run");
+      writeFileSync(chatgptUnblockReadyPath(dir), "stale readiness marker");
+      const source = `
+        import { writeFileSync } from "node:fs";
+        import { join } from "node:path";
+        import { startChatgptUnblock } from ${JSON.stringify(repoPath("src", "chatgpt", "desktop-unblock", "runtime.ts"))};
+        import { probeChatgptUnblockListener } from ${JSON.stringify(repoPath("src", "chatgpt", "desktop-unblock", "launch-watcher.ts"))};
+        Object.defineProperty(process, "platform", { value: "darwin" });
+        const dir = ${JSON.stringify(dir)};
+        let releasePac, pacRequested;
+        const pacBody = new Promise(resolve => { releasePac = resolve; });
+        const requested = new Promise(resolve => { pacRequested = resolve; });
+        const pacServer = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch() {
+          pacRequested(); return new Response(await pacBody);
+        }});
+        writeFileSync(join(dir, "scutil"), "#!/bin/sh\\nprintf '%s\\\\n' '<dictionary> {' 'ProxyAutoConfigEnable : 1' 'ProxyAutoConfigURLString : http://127.0.0.1:" + pacServer.port + "/proxy.pac' '}'\\n", { mode: 0o755 });
+        let port;
+        for (;;) {
+          const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+          port = probe.port; probe.stop(true);
+          if (port >= 65535) continue;
+          try { Bun.listen({ hostname: "127.0.0.1", port: port + 1, socket: { data() {} } }).stop(true); break; } catch {}
+        }
+        const starting = startChatgptUnblock({ config: { chatgptDesktop: { unblockSend: true, pacFallback: true, port } }, publicPort: 0, configDir: dir });
+        await requested;
+        const before = await probeChatgptUnblockListener(port, undefined, undefined, dir);
+        releasePac('function FindProxyForURL(u, h) { return "DIRECT"; }');
+        const handle = await starting;
+        const after = await probeChatgptUnblockListener(port, undefined, undefined, dir);
+        await handle.stop(); pacServer.stop(true);
+        console.log(JSON.stringify({ before: before.state, after: after.state }));
+      `;
+      const result = spawnSync(process.execPath, ["-e", source], { env: { ...process.env, PATH: dir, OPENCODEX_HOME: dir }, encoding: "utf8", timeout: 10_000 });
+      expect(result.status, result.stderr).toBe(0);
+      const states = JSON.parse(result.stdout.trim());
+      expect(states.before).not.toBe("ours");
+      expect(states.after).toBe("ours");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
 describe.skipIf(process.platform !== "darwin")("chatgpt unblock PAC-mode startup", () => {
   let dir: string;
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "ocx-chatgpt-pac-runtime-")); });

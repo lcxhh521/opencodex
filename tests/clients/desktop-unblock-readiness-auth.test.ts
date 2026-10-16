@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { get as httpsGet } from "node:https";
 import { dirname, join } from "node:path";
 import {
   claudeInterceptCaCertPath, createLocalInterceptCa, issueLocalInterceptLeaf, mintAuthorityWithExtensionsForTests,
@@ -8,7 +9,7 @@ import {
 } from "../../src/claude/intercept/local-ca";
 import { startChatgptUnblockEntryProxy } from "../../src/chatgpt/desktop-unblock/entry-proxy";
 import { buildChatgptUnblockWatcherScript, probeChatgptUnblockListener } from "../../src/chatgpt/desktop-unblock/launch-watcher";
-import { CHATGPT_UNBLOCK_IDENTITY_PATH, CHATGPT_UNBLOCK_SERVICE_ID } from "../../src/chatgpt/desktop-unblock/listener";
+import { CHATGPT_UNBLOCK_IDENTITY_PATH, CHATGPT_UNBLOCK_SERVICE_ID, startChatgptUnblockListener } from "../../src/chatgpt/desktop-unblock/listener";
 
 const trustedCa = createLocalInterceptCa();
 const trustedLeaf = issueLocalInterceptLeaf(trustedCa, ["chatgpt.com"]);
@@ -88,6 +89,37 @@ describe("authenticated ChatGPT listener readiness", () => {
     expect(readFileSync(claudeInterceptCaCertPath(dir), "utf8")).toBe(unrelatedCa.certPem);
     expect(peer.requests).toEqual([CHATGPT_UNBLOCK_IDENTITY_PATH]);
   });
+});
+
+test("readiness gates identity, HTTP and WebSocket traffic during startup and shutdown", async () => {
+  const dir = configWithCa();
+  const upstream = identityPeer();
+  let ready = false;
+  let forwarded = 0;
+  const listener = startChatgptUnblockListener({
+    leaf: trustedLeaf,
+    isReady: () => ready,
+    fetchImpl: (async () => { forwarded++; return new Response("fixture"); }) as typeof fetch,
+    wsUpstream: { proxy: null, target: { host: "127.0.0.1", port: upstream.port }, ca: trustedCa.certPem },
+  });
+  cleanups.push(async () => { await listener.stop(true); });
+  const requestStatus = (headers: Record<string, string> = {}) => new Promise<number>((resolve, reject) => {
+    const request = httpsGet({ hostname: "127.0.0.1", port: listener.port!, servername: "chatgpt.com", path: "/fixture", ca: trustedCa.certPem, headers }, response => {
+      response.resume(); resolve(response.statusCode!);
+    });
+    request.on("error", reject);
+    request.setTimeout(1000, () => request.destroy(new Error("fixture request timeout")));
+  });
+  for (const phase of ["starting", "active", "stopping"]) {
+    ready = phase === "active";
+    expect((await probeChatgptUnblockListener(listener.port!, undefined, undefined, dir)).state).toBe(ready ? "ours" : "foreign");
+    expect(await requestStatus()).toBe(ready ? 200 : 503);
+    if (!ready) {
+      expect(await requestStatus({ connection: "Upgrade", upgrade: "websocket", "sec-websocket-version": "13", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==" })).toBe(503);
+    }
+  }
+  expect(forwarded).toBe(1);
+  expect(upstream.requests).toEqual([]);
 });
 
 /** Execute only the generated probe definitions, never app discovery, quit, or launch. */

@@ -89,6 +89,10 @@ issues a leaf for chatgpt.com and never installs OS trust. The operator manually
 adds that authority to the login keychain; this permits TLS termination of the
 account's credentials and message traffic. Restore leaves the shared CA and
 keychain trust in place.
+`src/chatgpt/desktop-unblock/ca-trust.ts` reports conservative user-domain SSL trust
+configuration for the current, valid self-signed CA and its exact login-keychain fingerprint.
+Explicit deny, scoped/non-SSL settings and ambiguous exports do not establish trust. This
+status does not attest the running app's effective leaf acceptance or native transport.
 
 `src/server/index/chatgpt-unblock-lifecycle.ts` owns the pending startup promise
 and awaited stop. Each lifecycle is single-shot: the first start owns the promise and configuration,
@@ -97,6 +101,9 @@ Stopping before startup permanently closes the instance. `src/server/index/optio
 suspending startServer; startup failures warn and keep other services available.
 Shutdown warns when the app still carries the resolver rule for the closed port, or opencodex's PAC
 in PAC-fallback mode.
+The listener rejects identity, HTTP and WebSocket admission until startup has finished,
+including PAC publication, and rejects new requests before shutdown begins. Entry shutdown
+terminates owned outgoing sockets, including connections that complete after stop.
 The three core entry points do not reach the new optional modules. The activation
 window rationale in `tests/lab/core-lab-boundary.test.ts` records the synchronous
 composition-root boundary.
@@ -172,3 +179,6 @@ Intercept regression files use the existing `tests/clients/` domain alongside
 the shim tests; shared handshake coverage is `tests/lib/socks5-handshake.test.ts`.
 Both explicit layout maps register every added test basename. No duplicate app-server shim is part
 of this integration; the PAC generator and entry proxy run only with `pacFallback`.
+Loopback tests cover active CONNECT/WebSocket shutdown and real child-process SIGKILL, stale
+readiness rejection, same-port restart and PAC regeneration. They do not attest a macOS app's
+cached-PAC fallback or certificate acceptance.

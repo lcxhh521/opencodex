@@ -37,6 +37,11 @@ interface EntryState {
   toClient: Pipe;
 }
 
+interface EntryOwner {
+  stopped: boolean;
+  upstreams: Set<Socket>;
+}
+
 export interface EntryProxyHandle {
   port: number;
   stop(): Promise<void>;
@@ -94,7 +99,7 @@ function refuse(socket: Socket<EntryState>, line: string): void {
   socket.end();
 }
 
-function handleData(socket: Socket<EntryState>, chunk: Uint8Array, originPort: number): void {
+function handleData(socket: Socket<EntryState>, chunk: Uint8Array, originPort: number, owner: EntryOwner): void {
   const state = socket.data;
   if (state.upstream) {
     send(state.upstream, state.toUpstream, chunk, socket);
@@ -127,10 +132,14 @@ function handleData(socket: Socket<EntryState>, chunk: Uint8Array, originPort: n
     socket: {
       data(upstream, upChunk) { send(socket, state.toClient, upChunk, upstream); },
       drain(upstream) { flush(upstream, state.toUpstream, socket); },
-      close() { finish(socket, state.toClient); },
+      close(upstream) { owner.upstreams.delete(upstream); finish(socket, state.toClient); },
       error() { /* close follows */ },
     },
   }).then(upstream => {
+    // A connect already in flight is not owned by listen().stop(true). Never attach it
+    // after shutdown, even when its completion was queued before stop() ran.
+    if (owner.stopped) { upstream.terminate(); return; }
+    owner.upstreams.add(upstream);
     state.upstream = upstream;
     state.connecting = false;
     // The head deadline guards a silent client; a live tunnel may idle for as long as it likes.
@@ -146,6 +155,7 @@ function handleData(socket: Socket<EntryState>, chunk: Uint8Array, originPort: n
 export function startChatgptUnblockEntryProxy(options: StartEntryProxyOptions): Promise<EntryProxyHandle> {
   return new Promise((resolve, reject) => {
     let server: TCPSocketListener<EntryState>;
+    const owner: EntryOwner = { stopped: false, upstreams: new Set() };
     try {
       server = bunListen<EntryState>({
         hostname: "127.0.0.1",
@@ -161,7 +171,7 @@ export function startChatgptUnblockEntryProxy(options: StartEntryProxyOptions): 
             };
             socket.timeout(options.headTimeoutSeconds ?? HEAD_TIMEOUT_SECONDS);
           },
-          data(socket, chunk) { handleData(socket, chunk, options.originPort); },
+          data(socket, chunk) { handleData(socket, chunk, options.originPort, owner); },
           // Bun only fires the deadline when a handler exists, and never closes on its own.
           timeout(socket) {
             if (!socket.data.upstream) socket.end();
@@ -186,6 +196,11 @@ export function startChatgptUnblockEntryProxy(options: StartEntryProxyOptions): 
       port: server.port,
       stop: () =>
         new Promise<void>(done => {
+          owner.stopped = true;
+          // Outbound sockets belong to the splice, not the listener. Graceful end()
+          // can wait forever for a stalled origin or queued backpressure to drain.
+          for (const upstream of owner.upstreams) upstream.terminate();
+          owner.upstreams.clear();
           server.stop(true);
           done();
         }),

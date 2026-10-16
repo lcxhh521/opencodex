@@ -76,6 +76,8 @@ export interface ChatgptUnblockListenerOptions {
   /** Test seam: where WebSocket upgrades dial instead of chatgpt.com through the configured proxy. */
   wsUpstream?: DialUpstreamOptions;
   diagnostics?: ChatgptUnblockDiagnostics;
+  /** Runtime startup/shutdown gate; a bound socket is not yet a launchable integration. */
+  isReady?: () => boolean;
 }
 
 function responseHeaders(source: Response): Headers {
@@ -264,6 +266,9 @@ export function startChatgptUnblockListener(options: ChatgptUnblockListenerOptio
       },
     },
     async fetch(req, server) {
+      if (options.isReady?.() === false) {
+        return new Response("ChatGPT intercept is not ready", { status: 503, headers: { "cache-control": "no-store" } });
+      }
       if (isRelayableUpgrade(req)) return handleWebSocketUpgrade(req, server, options.wsUpstream);
       return relayWithSendUnblock(req, upstreamBase, options.fetchImpl, diagnostics);
     },

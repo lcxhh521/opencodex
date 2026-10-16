@@ -1,4 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { once } from "node:events";
+import { connect as connectTls } from "node:tls";
+import { createLocalInterceptCa, issueLocalInterceptLeaf } from "../../src/claude/intercept/local-ca";
+import { startChatgptUnblockListener } from "../../src/chatgpt/desktop-unblock/listener";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { probeChatgptUnblockListener } from "../../src/chatgpt/desktop-unblock/launch-watcher";
 import { repoPath, repoRoot } from "../helpers/repo-root";
 import { spawnTestChild } from "../helpers/spawn-test-child";
 
@@ -252,4 +260,135 @@ describe("ChatGPT unblock single-shot listener ownership", () => {
       assert.equal(stopCalls, 1);
     `);
   }, 20_000);
+});
+
+
+// Real listeners and fixture-only macOS dispatch: this checks process/socket recovery,
+// not Chromium's cached PAC fallback or the user's installed application.
+describe.skipIf(process.platform === "win32")("ChatGPT unblock process crash recovery", () => {
+  test("SIGKILL releases both ports and restart replaces stale PAC and readiness files", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ocx-unblock-crash-"));
+    let safeToRemove = true;
+    const scutil = (proxyPort: number) => writeFileSync(join(dir, "scutil"),
+      `#!/bin/sh\nprintf '%s\\n' '<dictionary> {' 'HTTPSEnable : 1' 'HTTPSProxy : 127.0.0.1' 'HTTPSPort : ${proxyPort}' '}'\n`, { mode: 0o755 });
+    const source = `
+      import { strict as assert } from "node:assert";
+      import { readFileSync, writeFileSync } from "node:fs";
+      import { startChatgptUnblock, chatgptUnblockPacPath, chatgptUnblockReadyPath } from ${JSON.stringify(repoPath("src/chatgpt/desktop-unblock/runtime.ts"))};
+      import { probeChatgptUnblockListener } from ${JSON.stringify(repoPath("src/chatgpt/desktop-unblock/launch-watcher.ts"))};
+      Object.defineProperty(process, "platform", { value: "darwin" });
+      const dir = ${JSON.stringify(dir)};
+      function freePair() {
+        for (;;) {
+          const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+          const port = probe.port; probe.stop(true);
+          if (port >= 65535) continue;
+          try { Bun.listen({ hostname: "127.0.0.1", port: port + 1, socket: { data() {} } }).stop(true); return port; } catch {}
+        }
+      }
+      async function start(port) {
+        const handle = await startChatgptUnblock({ config: { chatgptDesktop: { unblockSend: true, pacFallback: true, port } }, publicPort: 0, configDir: dir });
+        assert.ok(handle);
+        assert.equal((await probeChatgptUnblockListener(port, undefined, undefined, dir)).state, "ours");
+        return handle;
+      }
+    `;
+    const env = { ...process.env, PATH: dir, OPENCODEX_HOME: dir };
+    try {
+      scutil(7892);
+      safeToRemove = false;
+      const crashed = await spawnTestChild([process.execPath, "-e", source + `
+        const handle = await start(freePair());
+        const established = Promise.withResolvers();
+        const client = await Bun.connect({ hostname: "127.0.0.1", port: handle.entryProxy.port,
+          socket: { data(_socket, data) { if (Buffer.from(data).toString().startsWith("HTTP/1.1 200")) established.resolve(); }, error() {} } });
+        client.write("CONNECT chatgpt.com:443 HTTP/1.1\\r\\n\\r\\n");
+        await established.promise;
+        writeFileSync(dir + "/crash-state.json", JSON.stringify({
+          port: handle.port, entryPort: handle.entryProxy.port,
+          pac: readFileSync(chatgptUnblockPacPath(dir), "utf8"),
+          ready: readFileSync(chatgptUnblockReadyPath(dir), "utf8"),
+        }));
+        process.kill(process.pid, "SIGKILL");
+      `], { cwd: repoRoot(), env, deadlineMs: 8_000 });
+      safeToRemove = crashed.reaped;
+      expect(crashed.timedOut, crashed.stderr).toBe(false);
+      expect(crashed.reaped, crashed.stderr).toBe(true);
+      expect(crashed.signal, crashed.stderr).toBe("SIGKILL");
+      const state = JSON.parse(readFileSync(join(dir, "crash-state.json"), "utf8")) as { port: number; entryPort: number; pac: string; ready: string };
+      expect(readFileSync(join(dir, "chatgpt-unblock.pac"), "utf8")).toBe(state.pac);
+      expect(readFileSync(join(dir, "chatgpt-unblock.ready"), "utf8")).toBe(state.ready);
+      expect(state.pac).toContain("PROXY 127.0.0.1:7892");
+      expect(state.pac).not.toContain("DIRECT");
+      expect(await probeChatgptUnblockListener(state.port, undefined, undefined, dir)).toEqual({ state: "down" });
+      for (const port of [state.port, state.entryPort]) {
+        Bun.listen({ hostname: "127.0.0.1", port, socket: { data() {} } }).stop(true);
+      }
+      scutil(7893);
+      safeToRemove = false;
+      const restarted = await spawnTestChild([process.execPath, "-e", source + `
+        const before = JSON.parse(readFileSync(dir + "/crash-state.json", "utf8"));
+        const handle = await start(before.port);
+        try {
+          assert.equal(handle.entryProxy.port, before.entryPort);
+          const pac = readFileSync(chatgptUnblockPacPath(dir), "utf8");
+          assert.ok(pac.includes("PROXY 127.0.0.1:7893"));
+          assert.ok(!pac.includes("PROXY 127.0.0.1:7892"));
+          assert.ok(!pac.includes("DIRECT"));
+          assert.notEqual(readFileSync(chatgptUnblockReadyPath(dir), "utf8"), before.ready);
+        } finally { await handle.stop(); }
+        for (const port of [before.port, before.entryPort]) {
+          Bun.listen({ hostname: "127.0.0.1", port, socket: { data() {} } }).stop(true);
+        }
+      `], { cwd: repoRoot(), env, deadlineMs: 8_000 });
+      safeToRemove = restarted.reaped;
+      expect(restarted.timedOut, restarted.stderr).toBe(false);
+      expect(restarted.reaped, restarted.stderr).toBe(true);
+      expect(restarted.exitCode, restarted.stderr).toBe(0);
+      expect(existsSync(join(dir, "chatgpt-unblock.ready"))).toBe(true);
+      expect(await probeChatgptUnblockListener(state.port, undefined, undefined, dir)).toEqual({ state: "down" });
+    } finally {
+      if (safeToRemove) rmSync(dir, { recursive: true, force: true });
+    }
+  }, 25_000);
+});
+
+
+test("stopping the TLS listener closes an established WebSocket and its upstream", async () => {
+  const ca = createLocalInterceptCa(), leaf = issueLocalInterceptLeaf(ca, ["chatgpt.com"]);
+  const upstreamClosed = Promise.withResolvers<boolean>();
+  let upstreamSocket: { terminate(): void } | undefined;
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1", port: 0, tls: { cert: leaf.certPem, key: leaf.keyPem },
+    fetch(request, server) { if (!server.upgrade(request)) return new Response("upgrade required", { status: 400 }); },
+    websocket: { open(socket) { upstreamSocket = socket; }, message() {}, close() { upstreamClosed.resolve(true); } },
+  });
+  const listener = startChatgptUnblockListener({
+    leaf, wsUpstream: { proxy: null, target: { host: "127.0.0.1", port: upstream.port! }, ca: ca.certPem },
+  });
+  const client = connectTls({ host: "127.0.0.1", port: listener.port!, servername: "chatgpt.com", ca: ca.certPem });
+  client.on("error", () => {});
+  const clientClosed = new Promise<boolean>(resolve => client.once("close", () => resolve(true)));
+  const withinDeadline = async (promise: Promise<boolean>) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try { return await Promise.race([promise, new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 1_000); })]); }
+    finally { clearTimeout(timer); }
+  };
+  try {
+    await once(client, "secureConnect");
+    const head = new Promise<string>(resolve => {
+      let buffer = "";
+      client.on("data", chunk => { buffer += chunk.toString(); if (buffer.includes("\r\n\r\n")) resolve(buffer); });
+    });
+    client.write("GET /dictation/stream HTTP/1.1\r\nHost: chatgpt.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n");
+    expect(await head).toStartWith("HTTP/1.1 101");
+    expect(await withinDeadline(Promise.resolve(listener.stop(true)).then(() => true))).toBe(true);
+    expect(await withinDeadline(clientClosed)).toBe(true);
+    expect(await withinDeadline(upstreamClosed.promise)).toBe(true);
+  } finally {
+    client.destroy();
+    upstreamSocket?.terminate();
+    await listener.stop(true);
+    await upstream.stop(true);
+  }
 });

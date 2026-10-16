@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { connect as bunConnect, type Socket } from "bun";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { connect as connectNet, type Socket as NetSocket } from "node:net";
+import { connect as connectNet, createServer, type Socket as NetSocket } from "node:net";
 import { connect as connectTls } from "node:tls";
 import { startChatgptUnblockEntryProxy } from "../../src/chatgpt/desktop-unblock/entry-proxy";
 import { ChatgptUnblockDiagnostics, startChatgptUnblockListener } from "../../src/chatgpt/desktop-unblock/listener";
@@ -238,6 +238,76 @@ describe("chatgpt unblock entry proxy tunnel", () => {
     } finally {
       await entry.stop();
       await origin.stop(true);
+    }
+  });
+});
+
+
+describe("chatgpt unblock entry proxy shutdown", () => {
+  test("stop closes an established origin connection without waiting for peer EOF", async () => {
+    const accepted = Promise.withResolvers<NetSocket>();
+    const origin = createServer({ allowHalfOpen: true }, socket => accepted.resolve(socket));
+    origin.listen(0, "127.0.0.1");
+    await once(origin, "listening");
+    const address = origin.address();
+    if (!address || typeof address === "string") throw new Error("missing origin port");
+    const entry = await startChatgptUnblockEntryProxy({ originPort: address.port });
+    const client = connectNet({ host: "127.0.0.1", port: entry.port });
+    let upstream: NetSocket | undefined;
+    try {
+      await once(client, "connect");
+      client.write("CONNECT chatgpt.com:443 HTTP/1.1\r\nHost: chatgpt.com:443\r\n\r\n");
+      expect(await readHead(client)).toStartWith("HTTP/1.1 200");
+      upstream = await accepted.promise;
+      upstream.on("error", () => {});
+      const closed = new Promise<boolean>(resolve => upstream!.once("close", () => resolve(true)));
+      upstream.resume();
+      await entry.stop();
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        expect(await Promise.race([closed, new Promise<boolean>(resolve => { deadline = setTimeout(() => resolve(false), 1_000); })])).toBe(true);
+      } finally { clearTimeout(deadline); }
+    } finally {
+      client.destroy();
+      upstream?.destroy();
+      await entry.stop();
+      await new Promise<void>(resolve => origin.close(() => resolve()));
+    }
+  });
+
+  test("stop during origin acceptance cannot leave a late CONNECT alive", async () => {
+    const accepted = Promise.withResolvers<NetSocket>();
+    let entry: Awaited<ReturnType<typeof startChatgptUnblockEntryProxy>>;
+    let stopping: Promise<void> | undefined;
+    const origin = createServer({ allowHalfOpen: true }, socket => {
+      stopping = entry.stop();
+      accepted.resolve(socket);
+    });
+    origin.listen(0, "127.0.0.1");
+    await once(origin, "listening");
+    const address = origin.address();
+    if (!address || typeof address === "string") throw new Error("missing origin port");
+    entry = await startChatgptUnblockEntryProxy({ originPort: address.port });
+    const client = connectNet({ host: "127.0.0.1", port: entry.port });
+    client.on("error", () => {});
+    let upstream: NetSocket | undefined;
+    try {
+      await once(client, "connect");
+      client.write("CONNECT chatgpt.com:443 HTTP/1.1\r\n\r\n");
+      upstream = await accepted.promise;
+      upstream.on("error", () => {});
+      const closed = new Promise<boolean>(resolve => upstream!.once("close", () => resolve(true)));
+      upstream.resume();
+      await stopping;
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        expect(await Promise.race([closed, new Promise<boolean>(resolve => { deadline = setTimeout(() => resolve(false), 1_000); })])).toBe(true);
+      } finally { clearTimeout(deadline); }
+    } finally {
+      client.destroy();
+      upstream?.destroy();
+      await entry.stop();
+      await new Promise<void>(resolve => origin.close(() => resolve()));
     }
   });
 });
