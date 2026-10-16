@@ -130,6 +130,8 @@ export function withRequestLogId(response: Response, requestId: string): Respons
 }
 
 export interface StartServerDeps {
+  /** Isolated cloud-network transport/helper injection; never read from config or environment. */
+  cloudNetwork?: Parameters<typeof import("./chatgpt-cloud-network-lifecycle").createChatgptCloudNetworkLifecycle>[0];
   /** Test-only seam; production always initializes its own management credential state. */
   managementAuthState?: ManagementAuthState;
   /** Test-only route dependencies, forwarded only after management admission succeeds. */

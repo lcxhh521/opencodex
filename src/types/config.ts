@@ -498,10 +498,10 @@ export interface OcxClientConnectionConfig {
 
 export interface OcxConfig {
   /**
-   * Independent experimental macOS shim/intercept flags, default off; optional fixed TLS port.
+   * Independent experimental macOS shim/intercept/cloud flags, default off; port is intercept-only.
    * `pacFallback` launches the intercepted app with a generated PAC instead of a resolver rule.
    */
-  chatgptDesktop?: { appServerShim?: boolean; unblockSend?: boolean; pacFallback?: boolean; port?: number };
+  chatgptDesktop?: { appServerShim?: boolean; unblockSend?: boolean; pacFallback?: boolean; cloudNetwork?: boolean; port?: number };
   port: number;
   /** Runtime topology role. Absence preserves the historical standalone behavior. */
   runtimeRole?: OcxRuntimeRole;

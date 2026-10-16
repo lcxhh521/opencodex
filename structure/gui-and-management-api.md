@@ -96,6 +96,10 @@ unsupported; deployments that previously relied on such embedding must open it a
 
 ## Authentication boundaries
 
+`src/server/management/chatgpt-network-routes.ts` exposes local status and enable/disable/recover actions.
+Only trusted loopback GUI/admin principals may use them; they cannot install or elevate a helper.
+Persistence and runtime state remain distinct under the [integrated cloud-network contract](clients/chatgpt-desktop.md#integrated-cloud-network).
+
 Kiro management login starts the native device flow only when `POST /api/oauth/login`
 supplies `method: "builder-id"`, `"google"`, or `"github"`. A method-less request retains
 the Kiro CLI flow used by the dashboard chooser. The KiroDeviceLoginDialog and useKiroDeviceLogin GUI modules own the native chooser and polling. The kiro-device-login-finalizer GUI module continues terminal status reads after dialog unmount; a provisional cancel result is never treated as confirmed success. Hook and finalizer share one status-read operation that owns fetch, bounded body consumption, parsing and cancellation. The complete read has a 45-second ceiling, the detached loop remains bounded by flow expiry plus 60 seconds (and 16 minutes maximum), and closing the dialog transfers rather than clones an in-flight reader so an already-observed terminal reply can still win. Native status and cancellation require `flowId`;

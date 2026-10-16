@@ -71,6 +71,16 @@ interface RawTarget {
   port: number;
 }
 
+/** Opaque TLS callers supply an explicit proxy: direct lookup would loop through hosts. */
+export async function dialRawUpstreamTunnel(target: RawTarget, proxy: string, timeout = DEFAULT_CONNECT_TIMEOUT_MS): Promise<Socket | null> {
+  try {
+    if (!/^(?:https?|socks5h?):\/\//i.test(proxy)) return null;
+    return await dialRaw(target, proxy, socks5Route(proxy) ? "socks5" : "http-connect", timeout, undefined, true);
+  } catch {
+    return null;
+  }
+}
+
 function socks5Route(proxy: string | null): boolean {
   return proxy !== null && /^socks5h?:\/\//i.test(proxy.trim());
 }
@@ -91,7 +101,7 @@ export function proxyDialPort(proxyUrl: URL, route: UpstreamTunnel["route"]): nu
   return proxyUrl.protocol === "https:" ? 443 : 80;
 }
 
-async function dialRaw(target: RawTarget, proxy: string | null, route: UpstreamTunnel["route"], timeout: number, ca: string | undefined): Promise<Socket> {
+async function dialRaw(target: RawTarget, proxy: string | null, route: UpstreamTunnel["route"], timeout: number, ca: string | undefined, pauseAfterHandshake = false): Promise<Socket> {
   if (route === "direct") return tcpConnect(target.host, target.port, timeout);
   const proxyUrl = new URL(proxy!);
   const proxyHost = proxyUrl.hostname.replace(/^\[|\]$/g, "");
@@ -120,6 +130,7 @@ async function dialRaw(target: RawTarget, proxy: string | null, route: UpstreamT
   }
   // Handshake done: hand leftover bytes and data events back to the socket so the TLS
   // layer above starts from a clean stream.
+  if (pauseAfterHandshake) plain.pause();
   reader.dispose();
   return plain;
 }

@@ -97,10 +97,20 @@ export const HEAD_CAPABILITIES: readonly HeadCapability[] = [
 export const CAPABILITIES: readonly Capability[] = [
   {
     command: ["chatgpt"],
-    summary: "Experimental ChatGPT shim/intercept: launch, restore, status and watcher management (macOS only).",
+    summary: "Experimental ChatGPT shim/intercept, watcher management and integrated cloud-network routing.",
     routes: [], flags: [], mutates: true, json: "none",
-    bannerLines: ["ocx chatgpt <sub>          Experimental shim/intercept: launch|restore|status|install-watcher|uninstall-watcher (macOS)"],
-    details: ["Default off; launch requires chatgptDesktop.appServerShim or unblockSend. Intercept needs the running proxy and manual CA trust. Watcher manages intercept launches only; restore removes the shim launcher."],
+    bannerLines: ["ocx chatgpt <sub>          Experimental desktop integration: launch|restore|status|network|install-watcher|uninstall-watcher (macOS)"],
+    details: ["Default off; launch requires chatgptDesktop.appServerShim, unblockSend or cloudNetwork. Cloud routing uses the running OpenCodex server and its outbound proxy; install its internal recovery helper with explicit administrator consent, then enable. No separately signed app, system extension or CA is needed. Intercept still needs manual CA trust. Restore disables configured cloud routing before relaunching; network recover handles abandoned mappings."],
+  },
+  {
+    command: ["chatgpt", "network"],
+    summary: "Manage OpenCodex's built-in desktop cloud connection and recovery helper.",
+    routes: [{ method: "GET", path: "/api/chatgpt-network/status" },
+      { method: "POST", path: "/api/chatgpt-network/enable" }, { method: "POST", path: "/api/chatgpt-network/disable" },
+      { method: "POST", path: "/api/chatgpt-network/recover" }],
+    flags: [{ name: "--yes", value: "boolean", summary: "Confirm install/uninstall before the separate administrator prompt." }],
+    mutates: true, json: "payload",
+    details: ["Actions: status, install, enable, disable, recover, uninstall. Install prepares a fixed-domain recovery helper without enabling routing. Enable persists chatgptDesktop.cloudNetwork and starts the live runtime on loopback 443 using the existing outbound proxy. Disable restores the owned mapping before closing listeners. Status distinguishes configured intent from runtime state; a live tunnel does not prove an authenticated desktop session. Recover also works with the proxy stopped. Uninstall requires disabled routing. No arbitrary hosts path or separate proxy-port setting is accepted."],
   },
   {
     command: ["link", "port"],

@@ -18,6 +18,9 @@ const DEFAULT_DEPS: CodexShimAutoRestoreCliDeps = {
 export function skipsCodexShimAutoRestore(command: string | undefined, args: string[]): boolean {
   if (command === "uninstall" || command === "remove") return true;
   if (command === "status" || command === "doctor") return true;
+  // Cloud network management and its elevated helper never repair an unrelated shim.
+  if (command === "chatgpt" && args[1] === "network") return true;
+  if (command === "internal" && args[1] === "chatgpt-cloud-network") return true;
   // `lab` is read-only inspection; it must not trigger shim side effects.
   if (command === "lab") return true;
   // `resolve` is read-only inspection for embedding shells: a lookup made to populate

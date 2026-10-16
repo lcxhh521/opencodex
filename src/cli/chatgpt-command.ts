@@ -6,6 +6,7 @@ import type { OcxConfig } from "../types";
 import { findLiveProxy } from "../server/proxy-liveness";
 import { getConfigDir } from "../config/paths";
 import { claudeInterceptCaCertPath } from "../claude/intercept/local-ca";
+import { CLOUD_HELPER_ROOT } from "../chatgpt/cloud-network/contract";
 import { chatgptCaTrustCommand, inspectChatgptCaTrust } from "../chatgpt/desktop-unblock/ca-trust";
 import { chatgptPacFallbackEnabled, chatgptUnblockEntryPort, chatgptUnblockPacArg, chatgptUnblockPort, chatgptUnblockResolverArg } from "../chatgpt/desktop-unblock/runtime";
 import {
@@ -29,6 +30,7 @@ const USAGE = `Usage (experimental, macOS only):
   ocx chatgpt launch                 Relaunch with configured app-server shim and/or TLS intercept
   ocx chatgpt restore                Relaunch with native networking and remove the shim launcher
   ocx chatgpt status                 Inspect flags, listener, CA trust, watcher and app environment
+  ocx chatgpt network <sub>          Built-in cloud connection: status|install|enable|disable|recover|uninstall
   ocx chatgpt install-watcher [--yes] Install the intercept launch watcher (requires unblockSend: true;
                                      with pacFallback it launches through the PAC instead)
   ocx chatgpt uninstall-watcher      Remove the intercept launch watcher`;
@@ -118,6 +120,7 @@ async function quitApp(install: DesktopAppInstall, launcher: string): Promise<bo
 
 export async function handleChatgptCommand(args: string[], platform: NodeJS.Platform = process.platform): Promise<number> {
   const sub = args[0];
+  if (sub === "network") return (await import("./chatgpt-network-command")).handleChatgptNetworkCommand(args.slice(1), platform);
   if (!sub || ["help", "--help", "-h"].includes(sub)) {
     console.log(USAGE);
     return sub ? 0 : 64;
@@ -141,7 +144,8 @@ export async function handleChatgptCommand(args: string[], platform: NodeJS.Plat
     const config = loadConfig();
     const intercept = config.chatgptDesktop?.unblockSend === true;
     const shim = config.chatgptDesktop?.appServerShim === true;
-    const live = intercept || sub === "status" ? await findLiveProxy().catch(() => null) : null;
+    const cloud = config.chatgptDesktop?.cloudNetwork === true;
+    const live = intercept || cloud || sub === "status" ? await findLiveProxy().catch(() => null) : null;
     const port = intercept && sub !== "restore" && sub !== "status" ? resolveChatgptUnblockPort(config, live?.port) : undefined;
     const pac = port !== undefined ? resolveChatgptPacEntry(config, live?.port) : undefined;
     const launcher = chatgptShimLauncherPath();
@@ -160,6 +164,7 @@ CODEX_CLI_PATH launcher: ${app.shim ? "yes" : "no"}`);
       } catch (error) {
         console.log(`Intercept status unavailable: ${error instanceof Error ? error.message : String(error)}`);
       }
+      await (await import("./chatgpt-network-command")).handleChatgptNetworkCommand(["status"], platform);
       return 0;
     }
     if (sub === "install-watcher") {
@@ -184,13 +189,21 @@ CODEX_CLI_PATH launcher: ${app.shim ? "yes" : "no"}`);
     }
     let binary: string | undefined;
     if (sub === "launch") {
-      if (!shim && !intercept) {
+      if (!shim && !intercept && !cloud) {
         // Read the file only to explain a refusal; restore and a valid launch never touch it.
         const configIssue = chatgptDesktopIssueInFile();
         console.error(configIssue
           ? `ChatGPT desktop launch disabled: config.json ${configIssue}. The whole chatgptDesktop block is ignored until that is fixed.`
-          : "Enable chatgptDesktop.appServerShim or chatgptDesktop.unblockSend before launching.");
+          : "Enable chatgptDesktop.appServerShim, unblockSend or cloudNetwork before launching.");
         return 1;
+      }
+      if (cloud) {
+        const { runtimeRequest } = await import("./runtime-api");
+        const result = await runtimeRequest<{ network: { state: string } }>("/api/chatgpt-network/status");
+        if (result.network.state !== "active") {
+          console.error("Cloud network is not active; inspect with: ocx chatgpt network status");
+          return 1;
+        }
       }
       if (intercept) {
         if (config.runtimeRole === "client" || (await probeChatgptUnblockListener(port!)).state !== "ours") {
@@ -218,6 +231,8 @@ CODEX_CLI_PATH launcher: ${app.shim ? "yes" : "no"}`);
       console.error("Uninstall the launch watcher before restoring native networking.");
       return 1;
     }
+    if (sub === "restore" && (cloud || existsSync(CLOUD_HELPER_ROOT))
+      && await (await import("./chatgpt-network-command")).handleChatgptNetworkCommand(["recover"], platform) !== 0) return 1;
     if (binary) writeChatgptShimLauncher(undefined, binary);
     if (sub === "launch" && intercept) {
       // The intercept script owns the restart under its lock so the watcher cannot race it.

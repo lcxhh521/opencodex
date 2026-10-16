@@ -9,6 +9,7 @@ export const chatgptDesktopSchema = z.object({
   appServerShim: z.boolean().optional(),
   unblockSend: z.boolean().optional(),
   pacFallback: z.boolean().optional(),
+  cloudNetwork: z.boolean().optional(),
   port: z.number().int().min(1).max(65535).optional(),
 }).strict();
 

@@ -532,13 +532,32 @@ Each of these writes. Check the flags column before running one unattended.
 
 ### `ocx chatgpt`
 
-Experimental ChatGPT shim/intercept: launch, restore, status and watcher management (macOS only).
+Experimental ChatGPT shim/intercept, watcher management and integrated cloud-network routing.
 
 Drives no management route.
 
 JSON mode: `none`.
 
-- Default off; launch requires chatgptDesktop.appServerShim or unblockSend. Intercept needs the running proxy and manual CA trust. Watcher manages intercept launches only; restore removes the shim launcher.
+- Default off; launch requires chatgptDesktop.appServerShim, unblockSend or cloudNetwork. Cloud routing uses the running OpenCodex server and its outbound proxy; install its internal recovery helper with explicit administrator consent, then enable. No separately signed app, system extension or CA is needed. Intercept still needs manual CA trust. Restore disables configured cloud routing before relaunching; network recover handles abandoned mappings.
+
+### `ocx chatgpt network`
+
+Manage OpenCodex's built-in desktop cloud connection and recovery helper.
+
+| Method | Route |
+|---|---|
+| GET | `/api/chatgpt-network/status` |
+| POST | `/api/chatgpt-network/enable` |
+| POST | `/api/chatgpt-network/disable` |
+| POST | `/api/chatgpt-network/recover` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--yes` | boolean | Confirm install/uninstall before the separate administrator prompt. |
+
+JSON mode: `payload`.
+
+- Actions: status, install, enable, disable, recover, uninstall. Install prepares a fixed-domain recovery helper without enabling routing. Enable persists chatgptDesktop.cloudNetwork and starts the live runtime on loopback 443 using the existing outbound proxy. Disable restores the owned mapping before closing listeners. Status distinguishes configured intent from runtime state; a live tunnel does not prove an authenticated desktop session. Recover also works with the proxy stopped. Uninstall requires disabled routing. No arbitrary hosts path or separate proxy-port setting is accepted.
 
 ### `ocx link issue`
 
@@ -1332,6 +1351,6 @@ JSON mode: `payload`.
 
 ## Counts
 
-- declared capabilities: 74
-- of those, state-changing: 43
+- declared capabilities: 75
+- of those, state-changing: 44
 - head-resolved invocations: 2
