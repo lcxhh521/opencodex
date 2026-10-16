@@ -273,19 +273,12 @@ describe.skipIf(process.platform === "win32")("ChatGPT unblock process crash rec
       `#!/bin/sh\nprintf '%s\\n' '<dictionary> {' 'HTTPSEnable : 1' 'HTTPSProxy : 127.0.0.1' 'HTTPSPort : ${proxyPort}' '}'\n`, { mode: 0o755 });
     const source = `
       import { strict as assert } from "node:assert";
+      import { freeLoopbackPortPair as freePair } from ${JSON.stringify(repoPath("tests/helpers/free-loopback-port-pair.ts"))};
       import { readFileSync, writeFileSync } from "node:fs";
       import { startChatgptUnblock, chatgptUnblockPacPath, chatgptUnblockReadyPath } from ${JSON.stringify(repoPath("src/chatgpt/desktop-unblock/runtime.ts"))};
       import { probeChatgptUnblockListener } from ${JSON.stringify(repoPath("src/chatgpt/desktop-unblock/launch-watcher.ts"))};
       Object.defineProperty(process, "platform", { value: "darwin" });
       const dir = ${JSON.stringify(dir)};
-      function freePair() {
-        for (;;) {
-          const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
-          const port = probe.port; probe.stop(true);
-          if (port >= 65535) continue;
-          try { Bun.listen({ hostname: "127.0.0.1", port: port + 1, socket: { data() {} } }).stop(true); return port; } catch {}
-        }
-      }
       async function start(port) {
         const handle = await startChatgptUnblock({ config: { chatgptDesktop: { unblockSend: true, pacFallback: true, port } }, publicPort: 0, configDir: dir });
         assert.ok(handle);

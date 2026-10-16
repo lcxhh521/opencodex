@@ -20,10 +20,88 @@ import { CHATGPT_INTERCEPT_HOST } from "../../src/chatgpt/desktop-unblock/listen
 import { chatgptUnblockReadyPath } from "../../src/chatgpt/desktop-unblock/runtime";
 import type { OcxConfig } from "../../src/types";
 import { repoPath } from "../helpers/repo-root";
+import { freeLoopbackPortPair as freePortPair } from "../helpers/free-loopback-port-pair";
 
 function config(overrides: Partial<NonNullable<OcxConfig["chatgptDesktop"]>> = {}): OcxConfig {
   return { chatgptDesktop: { unblockSend: true, ...overrides } } as OcxConfig;
 }
+
+describe("loopback port-pair allocation", () => {
+  const collision = () => Object.assign(new Error("occupied"), { code: "EADDRINUSE" });
+
+  test("retries a neighboring collision while keeping the origin reserved until cleanup", () => {
+    const calls: number[] = [], stopped: number[] = [];
+    const port = freePortPair(requested => {
+      calls.push(requested);
+      if (requested === 12001) {
+        expect(stopped).toEqual([]);
+        throw collision();
+      }
+      if (requested === 13001) expect(stopped).toEqual([12000]);
+      const port = requested || (calls.length === 1 ? 12000 : 13000);
+      return { port, stop(force) { expect(force).toBe(true); stopped.push(port); } };
+    });
+    expect(port).toBe(13000);
+    expect(calls).toEqual([0, 12001, 0, 13001]);
+    expect(stopped).toEqual([12000, 13001, 13000]);
+  });
+
+  test("retries an ephemeral bind collision and a range-boundary probe", () => {
+    const calls: number[] = [], stopped: number[] = [];
+    expect(freePortPair(requested => {
+      calls.push(requested);
+      if (calls.length === 1) throw collision();
+      const port = requested || (calls.length === 2 ? 65535 : 12000);
+      return { port, stop() { stopped.push(port); } };
+    })).toBe(12000);
+    expect(calls).toEqual([0, 0, 0, 12001]);
+    expect(stopped).toEqual([65535, 12001, 12000]);
+  });
+
+  for (const failedBind of [1, 2]) {
+    test(`propagates an unexpected error from bind ${failedBind} without retrying`, () => {
+      const failure = Object.assign(new Error("permission denied"), { code: "EACCES" });
+      let calls = 0, stops = 0;
+      expect(() => freePortPair(() => {
+        if (++calls === failedBind) throw failure;
+        return { port: 12000, stop() { stops++; } };
+      })).toThrow(failure);
+      expect(calls).toBe(failedBind);
+      expect(stops).toBe(failedBind - 1);
+    });
+  }
+
+  test("bounds repeated collisions and preserves the last failure", () => {
+    const failure = collision();
+    let calls = 0, stops = 0;
+    let caught: unknown;
+    try {
+      freePortPair(requested => {
+        calls++;
+        if (requested) throw failure;
+        return { port: 12000, stop() { stops++; } };
+      });
+    } catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain("after 100 attempts");
+    expect((caught as Error).cause).toBe(failure);
+    expect(calls).toBe(200);
+    expect(stops).toBe(100);
+  });
+
+  test("does not retry cleanup errors, and still releases the other probe", () => {
+    const failure = collision();
+    const stopped: number[] = [];
+    let calls = 0;
+    expect(() => freePortPair(requested => {
+      calls++;
+      const port = requested || 12000;
+      return { port, stop() { stopped.push(port); if (requested) throw failure; } };
+    })).toThrow(failure);
+    expect(calls).toBe(2);
+    expect(stopped).toEqual([12001, 12000]);
+  });
+});
 
 describe("chatgpt unblock runtime ports and mode", () => {
   test("the entry port is one after the origin port", () => {
@@ -64,25 +142,6 @@ describe("chatgpt unblock runtime ports and mode", () => {
   });
 
 });
-
-/**
- * A free origin/entry port pair away from the defaults (10300/10301 belong to a local
- * opencodex on the default public port).
- */
-function freePortPair(): number {
-  for (;;) {
-    const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
-    const origin = probe.port;
-    probe.stop(true);
-    if (origin >= 65535) continue;
-    try {
-      Bun.listen({ hostname: "127.0.0.1", port: origin + 1, socket: { data() {} } }).stop(true);
-      return origin;
-    } catch {
-      // the entry half is taken; try another pair
-    }
-  }
-}
 
 /** Whether something accepts TCP connections on a loopback port right now. */
 function accepts(port: number): Promise<boolean> {
@@ -142,15 +201,10 @@ describe.skipIf(process.platform === "win32")("chatgpt unblock PAC startup route
         // Platform dispatch is emulated only inside this isolated process. Every path and
         // command is a temporary fixture; no macOS proxy or trust setting is accessed.
         const source = `
+          import { freeLoopbackPortPair as freePortPair } from ${JSON.stringify(repoPath("tests/helpers/free-loopback-port-pair.ts"))};
           import { startChatgptUnblock } from ${JSON.stringify(repoPath("src", "chatgpt", "desktop-unblock", "runtime.ts"))};
           Object.defineProperty(process, "platform", { value: "darwin" });
-          let port;
-          for (;;) {
-            const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
-            port = probe.port; probe.stop(true);
-            if (port >= 65535) continue;
-            try { Bun.listen({ hostname: "127.0.0.1", port: port + 1, socket: { data() {} } }).stop(true); break; } catch {}
-          }
+          const port = freePortPair();
           let error = "";
           try {
             const handle = await startChatgptUnblock({ config: { chatgptDesktop: { unblockSend: true, pacFallback: true, port } }, publicPort: 0, configDir: ${JSON.stringify(dir)} });
@@ -182,6 +236,7 @@ describe.skipIf(process.platform === "win32")("chatgpt unblock startup readiness
       const source = `
         import { writeFileSync } from "node:fs";
         import { join } from "node:path";
+        import { freeLoopbackPortPair as freePortPair } from ${JSON.stringify(repoPath("tests/helpers/free-loopback-port-pair.ts"))};
         import { startChatgptUnblock } from ${JSON.stringify(repoPath("src", "chatgpt", "desktop-unblock", "runtime.ts"))};
         import { probeChatgptUnblockListener } from ${JSON.stringify(repoPath("src", "chatgpt", "desktop-unblock", "launch-watcher.ts"))};
         Object.defineProperty(process, "platform", { value: "darwin" });
@@ -193,13 +248,7 @@ describe.skipIf(process.platform === "win32")("chatgpt unblock startup readiness
           pacRequested(); return new Response(await pacBody);
         }});
         writeFileSync(join(dir, "scutil"), "#!/bin/sh\\nprintf '%s\\\\n' '<dictionary> {' 'ProxyAutoConfigEnable : 1' 'ProxyAutoConfigURLString : http://127.0.0.1:" + pacServer.port + "/proxy.pac' '}'\\n", { mode: 0o755 });
-        let port;
-        for (;;) {
-          const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
-          port = probe.port; probe.stop(true);
-          if (port >= 65535) continue;
-          try { Bun.listen({ hostname: "127.0.0.1", port: port + 1, socket: { data() {} } }).stop(true); break; } catch {}
-        }
+        const port = freePortPair();
         const starting = startChatgptUnblock({ config: { chatgptDesktop: { unblockSend: true, pacFallback: true, port } }, publicPort: 0, configDir: dir });
         await requested;
         const before = await probeChatgptUnblockListener(port, undefined, undefined, dir);
