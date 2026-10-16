@@ -284,7 +284,7 @@ async function printInterceptStatus(config: OcxConfig, port: number, livePort?: 
   const pacSwitch = pac ? chatgptUnblockPacArg(configDir) : "";
   const launchSwitch = pac ? `${pacSwitch.slice(0, pacSwitch.indexOf(",") + 1)}… (${pacSwitch.length} bytes)` : chatgptUnblockResolverArg(port);
   console.log(`send-unblock TLS intercept (experimental): ${config.chatgptDesktop?.unblockSend === true ? "on" : "off"}
-PAC fallback: ${pac ? `on (entry port ${pac.entryPort}; falls back to the system chain, then DIRECT, when opencodex is down)` : "off"}
+PAC fallback: ${pac ? `on (entry port ${pac.entryPort}; falls back to the captured system routes (embedded PAC errors may still fall back directly), when opencodex is down)` : "off"}
 listener: ${port} (${listener.state === "ours" ? "listening" : listener.state === "foreign" ? "held by another process" : "not listening"})
 launch switch: ${launchSwitch}
 CA trust: ${trust}

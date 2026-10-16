@@ -50,12 +50,6 @@ export function createChatgptUnblockLifecycle<T>(): ChatgptUnblockLifecycle {
             if (handle.entryProxy) {
               const route = handle.pacRoute === "system-pac" ? "the system PAC" : "the system proxy chain";
               console.log(`   PAC fallback on http://127.0.0.1:${handle.entryProxy.port} (other hosts, and chatgpt.com while opencodex is down, follow ${route})`);
-              if (handle.pacRoute === "system-pac-unreadable") {
-                console.warn("⚠ A system PAC is configured but could not be read; the generated PAC routes other hosts through the system proxy chain, then DIRECT, until opencodex restarts with it readable.");
-              }
-              if (handle.pacRoute === "system-pac-too-large") {
-                console.warn("⚠ The system PAC is too large to pass to the app inline; the generated PAC routes other hosts through the system proxy chain, then DIRECT, instead of the system PAC.");
-              }
             }
             console.log("   Launch the ChatGPT app with: ocx chatgpt launch   (or `ocx chatgpt install-watcher` for Dock launches)");
           }
@@ -84,7 +78,7 @@ async function warnIfAppStillRouted(port: number, pacMode: boolean): Promise<voi
     if (app === null) return;
     if (pacMode) {
       if (!chatgptCommandLineHasPac(app, getConfigDir())) return;
-      console.warn("⚠ The ChatGPT app is still launched with opencodex's PAC; its chatgpt.com traffic now falls through to the captured system chain.");
+      console.warn("⚠ The ChatGPT app is still launched with opencodex's PAC; its chatgpt.com traffic now follows the captured system policy and fails if that route is unavailable.");
       console.warn("   To return it to native networking: ocx chatgpt restore");
       return;
     }

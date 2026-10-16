@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { runInNewContext } from "node:vm";
 import { buildChatgptUnblockPac, loadSystemPac, parseScutilOutput, systemProxyChain } from "../../src/chatgpt/desktop-unblock/pac";
+import { repoPath } from "../helpers/repo-root";
 
 /** Evaluate a generated PAC the way Chromium does: run the script, then call the global. */
 function evaluatePac(pac: string, host: string): string {
@@ -23,6 +25,21 @@ function scutilOf(lines: Record<string, string>): ReturnType<typeof systemProxyC
 }
 
 describe("chatgpt unblock scutil parsing", () => {
+  test.skipIf(process.platform === "win32")("command failure, empty output and malformed output cannot become a direct route", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ocx-scutil-failure-"));
+    try {
+      const source = `import { systemProxyChain } from ${JSON.stringify(repoPath("src", "chatgpt", "desktop-unblock", "pac.ts"))}; systemProxyChain();`;
+      for (const body of ['printf "<dictionary> {\\n}\\n"; exit 1', "exit 0", 'printf "unparseable output\\n"']) {
+        writeFileSync(join(dir, "scutil"), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+        const result = spawnSync(process.execPath, ["-e", source], { env: { ...process.env, PATH: dir }, encoding: "utf8" });
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain("Cannot read the system proxy configuration");
+      }
+      writeFileSync(join(dir, "scutil"), '#!/bin/sh\nprintf "<dictionary> {\\n}\\n"\n', { mode: 0o755 });
+      expect(spawnSync(process.execPath, ["-e", source], { env: { ...process.env, PATH: dir } }).status).toBe(0);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   test("the parser reads the colon-separated lines scutil actually prints", () => {
     const raw = "<dictionary> {\n  HTTPSEnable : 1\n  HTTPSProxy : 127.0.0.1\n  HTTPSPort : 7892\n}";
     const chain = systemProxyChain(parseScutilOutput(raw));
@@ -37,7 +54,7 @@ describe("chatgpt unblock scutil parsing", () => {
 });
 
 describe("chatgpt unblock PAC generation", () => {
-  test("an HTTP(S) system proxy becomes the PROXY entry, DIRECT last", () => {
+  test("an HTTP(S) system proxy has no synthetic DIRECT fallback", () => {
     const chain = systemProxyChain(scutilOf({
       HTTPSEnable: "1", HTTPSProxy: "127.0.0.1", HTTPSPort: "7892",
       HTTPEnable: "1", HTTPProxy: "127.0.0.1", HTTPPort: "7890",
@@ -45,8 +62,9 @@ describe("chatgpt unblock PAC generation", () => {
     }));
     expect(chain.entries).toEqual(["PROXY 127.0.0.1:7892", "PROXY 127.0.0.1:7890"]);
     const pac = buildChatgptUnblockPac(10301, chain);
-    expect(pac).toContain(`if (host == "chatgpt.com") return "PROXY 127.0.0.1:10301; PROXY 127.0.0.1:7892; PROXY 127.0.0.1:7890; DIRECT"`);
-    expect(pac).toContain(`return "PROXY 127.0.0.1:7892; PROXY 127.0.0.1:7890; DIRECT"`);
+    expect(pac).toContain(`if (host == "chatgpt.com") return "PROXY 127.0.0.1:10301; PROXY 127.0.0.1:7892; PROXY 127.0.0.1:7890"`);
+    expect(pac).toContain(`return "PROXY 127.0.0.1:7892; PROXY 127.0.0.1:7890"`);
+    expect(pac).not.toContain("DIRECT");
   });
 
   test("SOCKS-only VPNs map to a SOCKS5 entry", () => {
@@ -54,6 +72,7 @@ describe("chatgpt unblock PAC generation", () => {
       HTTPSEnable: "0", HTTPEnable: "0", SOCKSEnable: "1", SOCKSProxy: "10.0.0.1", SOCKSPort: "1080",
     }));
     expect(chain.entries).toEqual(["SOCKS5 10.0.0.1:1080"]);
+    expect(evaluatePac(buildChatgptUnblockPac(10301, chain), "auth.openai.com")).toBe("SOCKS5 10.0.0.1:1080");
   });
 
   test("TUN mode (no system proxy) degrades to DIRECT only", () => {
@@ -66,8 +85,8 @@ describe("chatgpt unblock PAC generation", () => {
     expect(pac).toContain(`return "DIRECT"`);
   });
 
-  test("a missing scutil answer behaves like no proxy, never like an error", () => {
-    expect(systemProxyChain(null).entries).toEqual([]);
+  test("an unreadable scutil answer fails closed instead of claiming no proxy", () => {
+    expect(() => systemProxyChain(null)).toThrow("Cannot read the system proxy configuration");
   });
 
   test("a system-level PAC file is detected and its URL captured", () => {
@@ -89,17 +108,48 @@ describe("chatgpt unblock PAC generation", () => {
 
   test("the generated chain PAC routes as it reads when evaluated", () => {
     const pac = buildChatgptUnblockPac(10301, { entries: ["PROXY 127.0.0.1:7892"], autoConfig: false, autoConfigUrl: null });
-    expect(evaluatePac(pac, "chatgpt.com")).toBe("PROXY 127.0.0.1:10301; PROXY 127.0.0.1:7892; DIRECT");
-    expect(evaluatePac(pac, "auth.openai.com")).toBe("PROXY 127.0.0.1:7892; DIRECT");
+    expect(evaluatePac(pac, "chatgpt.com")).toBe("PROXY 127.0.0.1:10301; PROXY 127.0.0.1:7892");
+    expect(evaluatePac(pac, "auth.openai.com")).toBe("PROXY 127.0.0.1:7892");
   });
 
-  test("placeholder hosts macOS prints as (null) are skipped", () => {
-    const chain = systemProxyChain(scutilOf({
+  test("an enabled proxy with a missing address fails closed", () => {
+    expect(() => systemProxyChain(scutilOf({
       HTTPSEnable: "1", HTTPSProxy: "(null)", HTTPSPort: "0",
       HTTPEnable: "1", HTTPProxy: "", HTTPPort: "0",
       SOCKSEnable: "0",
-    }));
-    expect(chain.entries).toEqual([]);
+    }))).toThrow("An enabled system proxy has an invalid address");
+  });
+
+  test("malformed enabled proxy routes never produce an empty proxy chain", () => {
+    for (const [host, port] of [["127.0.0.1", "0"], ["proxy.test", "65536"], ["proxy.test", "abc"], ["proxy.test; DIRECT", "80"], ["proxy.test/path", "80"], ["user@proxy.test", "80"]]) {
+      expect(() => systemProxyChain(scutilOf({ HTTPEnable: "1", HTTPProxy: host!, HTTPPort: port! }))).toThrow("An enabled system proxy has an invalid address");
+    }
+    expect(() => systemProxyChain(scutilOf({ HTTPEnable: "unknown" }))).toThrow("malformed");
+    expect(() => systemProxyChain(scutilOf({ ProxyAutoDiscoveryEnable: "1" }))).toThrow("Automatic proxy discovery");
+  });
+
+  test("raw and percent-encoded delimiters cannot escape the canonical proxy hostname", () => {
+    for (const host of ['foo"bar', "foo%22bar", "a;b", "a%3bb", "a%3Bb", "foo..bar", "-proxy.test"]) {
+      expect(() => systemProxyChain(scutilOf({ HTTPEnable: "1", HTTPProxy: host, HTTPPort: "80" }))).toThrow("An enabled system proxy has an invalid address");
+    }
+    expect(systemProxyChain(scutilOf({ HTTPEnable: "1", HTTPProxy: "Proxy.Example.test.", HTTPPort: "80" })).entries).toEqual(["PROXY proxy.example.test.:80"]);
+  });
+
+  test("generated chain values are JavaScript string literals even for unexpected quotes", () => {
+    const value = 'PROXY unexpected"quote:80';
+    const pac = buildChatgptUnblockPac(10301, { entries: [value], autoConfig: false, autoConfigUrl: null });
+    expect(pac).toContain(JSON.stringify(value));
+    expect(evaluatePac(pac, "auth.openai.com")).toBe(value);
+  });
+
+  test("IPv6 proxies remain valid bracketed PAC destinations", () => {
+    const chain = systemProxyChain(scutilOf({ SOCKSEnable: "1", SOCKSProxy: "::1", SOCKSPort: "1080" }));
+    expect(chain.entries).toEqual(["SOCKS5 [::1]:1080"]);
+    expect(evaluatePac(buildChatgptUnblockPac(10301, chain), "auth.openai.com")).toBe("SOCKS5 [::1]:1080");
+  });
+
+  test("a configured PAC may not silently use the static chain when its source is missing", () => {
+    expect(() => buildChatgptUnblockPac(10301, { entries: ["PROXY 127.0.0.1:7892"], autoConfig: true, autoConfigUrl: null })).toThrow("The configured system PAC could not be read");
   });
 });
 

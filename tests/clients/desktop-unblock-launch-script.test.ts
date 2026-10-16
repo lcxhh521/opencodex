@@ -116,7 +116,7 @@ case "$STUB_LISTENER" in
   foreign) echo '<html>another server</html>' ;;
   *) exit 7 ;;
 esac`);
-  stub("scutil", `cat "$STUB_DIR/scutil.txt"`);
+  stub("scutil", `[ "$STUB_SCUTIL_FAILS" = 1 ] && exit 1\ncat "$STUB_DIR/scutil.txt"`);
   stub("base64", `[ "$STUB_PAC_ENCODING_FAILS" = 1 ] && { printf 'partial'; exit 1; }
 exec /usr/bin/base64 "$@"`);
   // Quitting removes the app's main process (helpers exit with it only in reality; irrelevant here).
@@ -165,6 +165,7 @@ afterEach(() => {
 function run(mode: "watch" | "launch" | "native", options: {
   app: AppState;
   scutil?: string;
+  scutilFails?: boolean;
   listener?: "ours" | "foreign" | "down";
   quitIgnored?: boolean;
   /** `open` fails, as it does when the bundle is gone or LaunchServices refuses it. */
@@ -232,6 +233,7 @@ function run(mode: "watch" | "launch" | "native", options: {
       PATH: `${stubs}:/usr/bin:/bin`,
       TMPDIR: join(dir, "tmp"),
       STUB_DIR: dir,
+      STUB_SCUTIL_FAILS: options.scutilFails ? "1" : "0",
       STUB_BUNDLE_TRUST: options.bundleTrust ?? "trusted",
       STUB_AFTER_PREFLIGHT_DOWN: options.listenerStopsDuringPreflight ? "1" : "0",
       STUB_LISTENER: options.listener ?? "ours",
@@ -270,11 +272,11 @@ describe.skipIf(process.platform === "win32")("chatgpt launch arguments per netw
     expect(r.openArgs).toEqual([RESOLVER]);
   });
 
-  test("system proxy: explicit proxy with direct fallback, apex host bypassed", () => {
+  test("system proxy: explicit proxy without synthetic direct fallback, apex host bypassed", () => {
     const r = run("launch", { app: "none", scutil: SCUTIL_SYSTEM_PROXY });
     expect(r.openArgs).toEqual([
       RESOLVER,
-      "--proxy-server=http://127.0.0.1:7892,direct://",
+      "--proxy-server=http://127.0.0.1:7892",
       "--proxy-bypass-list=chatgpt.com",
     ]);
   });
@@ -283,19 +285,59 @@ describe.skipIf(process.platform === "win32")("chatgpt launch arguments per netw
     const r = run("launch", { app: "none", scutil: SCUTIL_SOCKS_ONLY });
     expect(r.openArgs).toEqual([
       RESOLVER,
-      "--proxy-server=socks5://10.0.0.2:1080,direct://",
+      "--proxy-server=socks5://10.0.0.2:1080",
       "--proxy-bypass-list=chatgpt.com",
     ]);
   });
+
+  for (const host of ["::1", "[::1]"]) {
+    test(`IPv6 system proxy is bracketed once (${host})`, () => {
+      const r = run("launch", { app: "none", scutil: SCUTIL_SYSTEM_PROXY.replace("HTTPSProxy : 127.0.0.1", `HTTPSProxy : ${host}`) });
+      expect(r.status).toBe(0);
+      expect(r.openArgs).toContain("--proxy-server=http://[::1]:7892");
+    });
+  }
 
   test("PAC proxy: the resolver switch alone, PAC left in charge", () => {
     const r = run("launch", { app: "none", scutil: SCUTIL_PAC });
     expect(r.openArgs).toEqual([RESOLVER]);
   });
 
-  test("unreadable scutil output degrades to the resolver switch alone", () => {
-    const r = run("launch", { app: "none", scutil: "" });
-    expect(r.openArgs).toEqual([RESOLVER]);
+  for (const mode of ["launch", "watch"] as const) {
+    for (const scutil of ["", "unparseable proxy settings", SCUTIL_NO_PROXY.slice(0, -1), SCUTIL_NO_PROXY.replace("HTTPSEnable : 0", "HTTPSEnable : unknown"), SCUTIL_SYSTEM_PROXY.replace("HTTPSProxy : 127.0.0.1", "HTTPSProxy :"), SCUTIL_SYSTEM_PROXY.replace("HTTPSPort : 7892", "HTTPSPort : invalid"), SCUTIL_SYSTEM_PROXY.replace("HTTPSProxy : 127.0.0.1", "HTTPSProxy : proxy.test;DIRECT"), SCUTIL_SYSTEM_PROXY.replace("HTTPSProxy : 127.0.0.1", "HTTPSProxy : ::::1"), SCUTIL_SYSTEM_PROXY.replace("HTTPSProxy : 127.0.0.1", "HTTPSProxy : proxy wrong"), SCUTIL_SYSTEM_PROXY.replace("HTTPSPort : 7892", "HTTPSPort : 8080 garbage")]) {
+      test(`${mode}: unreadable or incomplete proxy policy leaves the app untouched (${JSON.stringify(scutil.slice(0, 25))})`, () => {
+        const r = run(mode, { app: "plain", scutil });
+        expect(r.status).toBe(1);
+        expect(r.calls).toEqual([]);
+        expect(r.log).toContain("cannot read the system proxy policy");
+      });
+    }
+    test(`${mode}: scutil failure leaves the app untouched despite partial output`, () => {
+      const r = run(mode, { app: "plain", scutilFails: true });
+      expect(r.status).toBe(1);
+      expect(r.calls).toEqual([]);
+    });
+  }
+
+  for (const host of [":1:2:3:4:5:6:7:8", "1:2:3:4:5:6:7:8:", "[::1", "::1]", "999.1.2.3", "proxy..invalid", "-proxy.invalid", "099.1.2.3"]) {
+    test(`malformed system proxy leaves the app untouched (${host})`, () => {
+      const r = run("launch", { app: "plain", scutil: SCUTIL_SYSTEM_PROXY.replace("HTTPSProxy : 127.0.0.1", `HTTPSProxy : ${host}`) });
+      expect(r.status).toBe(1);
+      expect(r.calls).toEqual([]);
+    });
+  }
+
+  test("native restore does not depend on reading the system proxy policy", () => {
+    const r = run("native", { app: "flagged", scutilFails: true });
+    expect(r.status).toBe(0);
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.openArgs).toEqual([]);
+  });
+
+  test("PAC launch uses its preflighted snapshot without rereading scutil", () => {
+    const r = run("launch", { app: "plain", pac: true, scutilFails: true });
+    expect(r.status).toBe(0);
+    expect(r.openArgs).toEqual([PAC_SWITCH]);
   });
 });
 

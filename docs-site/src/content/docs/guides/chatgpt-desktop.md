@@ -174,8 +174,8 @@ longer need it, accounting for other integrations using the same authority.
 
 Launch restarts ChatGPT with
 `--host-resolver-rules=MAP chatgpt.com 127.0.0.1:<port>`. Explicit system HTTP/SOCKS
-proxies get an apex-host bypass while other hosts retain the proxy with a direct
-fallback; TUN/direct networking needs only the resolver rule. An existing system
+proxies get an apex-host bypass while other hosts retain the proxy without a synthetic
+direct fallback; TUN/direct networking needs only the resolver rule. An existing system
 PAC cannot be combined with that bypass, so it may prevent the intercept from
 seeing traffic. With `pacFallback` (below) the app is launched through a generated
 PAC instead of the resolver rule.
@@ -188,7 +188,7 @@ checks do not install keychain trust. When OpenCodex
 stops, an app still carrying the resolver rule cannot reach `chatgpt.com`; run
 `ocx chatgpt restore` to relaunch with native networking, or use PAC fallback.
 
-### PAC fallback: keep the app working when OpenCodex stops
+### PAC fallback: preserve your network policy when OpenCodex stops
 
 PAC fallback launches the app with a generated PAC script instead of the resolver
 rule, so the app falls back on its own. The script is passed inline (a `data:` URL)
@@ -212,19 +212,24 @@ is empty, or is not a regular file, it leaves the running app untouched. The PAC
 | Setup | Other hosts, and `chatgpt.com` while OpenCodex is stopped |
 |---|---|
 | No proxy, or VPN in TUN mode | Direct. |
-| VPN in system-proxy mode | The system proxy, then direct. |
+| VPN in system-proxy mode | The configured system proxy chain, without adding direct fallback. |
 | PAC file | The system PAC, embedded in the generated file. |
 
-When OpenCodex stops, the app keeps working on that route without a restart; only
-the send unblock pauses until OpenCodex is back. The route is captured when
+When OpenCodex stops, the app uses the captured route without a restart; the send
+unblock pauses until OpenCodex is back. If every configured proxy is unavailable,
+requests fail instead of silently connecting directly. Embedded system PACs retain
+Chromium’s non-mandatory PAC behavior: invalid results or execution failures can
+still fall back directly. Do not use that mode when a fail-closed system-PAC policy is required. The route is captured when
 OpenCodex starts: after changing the VPN mode, restart OpenCodex and run
 `ocx chatgpt launch`. If a system PAC is set but cannot be read at that moment, or
 is too large to pass to the app (the PAC travels inside one launch argument,
-limited to 512 KiB once encoded), other hosts follow the system proxy, if there is
-one, then go direct, and OpenCodex prints a warning. After turning `pacFallback` on
+limited to 512 KiB once encoded), the optional intercept does not start. An unreadable
+system proxy configuration or automatic proxy discovery also prevents PAC-mode startup; fix it and restart OpenCodex. After turning `pacFallback` on
 or off, restart OpenCodex, run `ocx chatgpt launch`, and run
 `ocx chatgpt install-watcher` again if you use the watcher. `restore` undoes a PAC
-launch the same way as a resolver-rule one.
+launch the same way as a resolver-rule one. Resolver-rule launches likewise reject unreadable
+system proxy settings before quitting the app and never add a direct fallback to an explicit
+proxy. `restore` remains available even when proxy settings cannot be read.
 
 ### Intercept rewrite boundary
 

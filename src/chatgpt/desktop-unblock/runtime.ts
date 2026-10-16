@@ -136,12 +136,10 @@ export interface ChatgptUnblockHandle<T = undefined> extends ChatgptUnblockState
 }
 
 /**
- * `system-proxy`: the scutil proxies (or DIRECT in TUN mode); `system-pac`: the system PAC,
- * embedded; `system-pac-unreadable`: a system PAC is set but could not be read, so the scutil
- * proxies then DIRECT; `system-pac-too-large`: the same fallback, because embedding the system
- * PAC would make the launch switch too long to pass to the app.
+ * `system-proxy`: the scutil proxies (or DIRECT only when none is configured);
+ * `system-pac`: the embedded system PAC. An unreadable or oversized PAC fails startup.
  */
-export type ChatgptUnblockPacRoute = "system-proxy" | "system-pac" | "system-pac-unreadable" | "system-pac-too-large";
+export type ChatgptUnblockPacRoute = "system-proxy" | "system-pac";
 
 /**
  * The longest PAC switch handed to the app. The switch carries the script inline as base64, and
@@ -164,9 +162,9 @@ export function chooseChatgptUnblockPac(
   if (systemPac) {
     const text = buildChatgptUnblockPac(entryPort, chain, systemPac);
     if (chatgptUnblockPacArgFor(text).length <= maxSwitchBytes) return { text, route: "system-pac" };
-    return { text: buildChatgptUnblockPac(entryPort, chain, null), route: "system-pac-too-large" };
+    throw new Error("The system PAC is too large for the app's launch switch; refusing to replace its route.");
   }
-  return { text: buildChatgptUnblockPac(entryPort, chain, null), route: chain.autoConfig ? "system-pac-unreadable" : "system-proxy" };
+  return { text: buildChatgptUnblockPac(entryPort, chain, null), route: "system-proxy" };
 }
 
 export interface StartChatgptUnblockOptions {

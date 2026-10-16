@@ -37,11 +37,11 @@ import { chatgptWatcherBundleProblem } from "./bundle-preflight";
  *   resolver-rule mode (default):
  *   - always `--host-resolver-rules=MAP chatgpt.com 127.0.0.1:<port>`;
  *   - with an HTTP(S)/SOCKS system proxy (a VPN in system-proxy mode), also
- *     `--proxy-server=<proxy>,direct://` and `--proxy-bypass-list=chatgpt.com`. Chromium hands
+ *     `--proxy-server=<proxy>` and `--proxy-bypass-list=chatgpt.com`. Chromium hands
  *     proxied hosts to the proxy unresolved, which would skip the resolver rule, so the apex host
  *     must bypass the proxy. The bypass list only takes effect beside an explicit proxy server,
- *     and a bare hostname there matches that host exactly (subdomains stay on the proxy). The
- *     `direct://` fallback keeps the app working if the VPN is switched off after launch;
+ *     and a bare hostname there matches that host exactly (subdomains stay on the proxy). A
+ *     failed configured proxy does not silently fall back to a direct connection;
  *   - with no proxy, or TUN mode (loopback never enters the tunnel), the resolver rule alone;
  *   - with a PAC file, the resolver rule alone: PAC cannot be combined with a bypass, so
  *     chatgpt.com may stay on the proxy and the composer may lock, but nothing else breaks.
@@ -50,7 +50,7 @@ import { chatgptWatcherBundleProblem } from "./bundle-preflight";
  *   PAC inline (a `file://` PAC is ignored by the app). The
  *   PAC (regenerated at every opencodex start) sends chatgpt.com to the CONNECT entry listener,
  *   which splices onto the TLS origin listener; when opencodex is down the refused CONNECT makes
- *   Chromium fall through to the captured system chain and finally DIRECT -- no resolver rule
+ *   Chromium fall through to the captured system policy (static proxy chains add no DIRECT) -- no resolver rule
  *   may be present, or it would blackhole that fallback to the dead origin port. No app restart
  *   is needed to recover.
  */
@@ -273,17 +273,52 @@ quit_app() {
 proxy_args() {
   [ "$PAC_MODE" = 0 ] || return 0
   local out
-  out=$(scutil --proxy 2>/dev/null) || return 0
-  val() { printf '%s\\n' "$out" | awk -v k="$1" '$1 == k { print $3; exit }'; }
-  [ "$(val ProxyAutoConfigEnable)" = 1 ] && return 0
+  out=$(scutil --proxy 2>/dev/null) || return 1
+  printf '%s\\n' "$out" | grep -q '^[[:space:]]*<dictionary>[[:space:]]*[{]' || return 1
+  printf '%s\\n' "$out" | tail -n 1 | grep -q '[}][[:space:]]*$' || return 1
+  val() { printf '%s\\n' "$out" | awk -v k="$1" '$1 == k { sub(/^[^:=]*[:=][[:space:]]*/, ""); sub(/[[:space:]]*$/, ""); print; exit }'; }
+  local key
+  for key in HTTPSEnable HTTPEnable SOCKSEnable ProxyAutoConfigEnable ProxyAutoDiscoveryEnable; do
+    case "$(val "$key")" in ''|0|1) ;; *) return 1 ;; esac
+  done
+  if [ "$(val ProxyAutoConfigEnable)" = 1 ] || [ "$(val ProxyAutoDiscoveryEnable)" = 1 ]; then return 0; fi
   local scheme host port
   if [ "$(val HTTPSEnable)" = 1 ]; then scheme=http; host=$(val HTTPSProxy); port=$(val HTTPSPort)
   elif [ "$(val HTTPEnable)" = 1 ]; then scheme=http; host=$(val HTTPProxy); port=$(val HTTPPort)
   elif [ "$(val SOCKSEnable)" = 1 ]; then scheme=socks5; host=$(val SOCKSProxy); port=$(val SOCKSPort)
   else return 0
   fi
-  [ -n "$host" ] && [ -n "$port" ] || return 0
-  printf '%s\\n' "--proxy-server=$scheme://$host:$port,direct://" "--proxy-bypass-list=$BYPASS_HOST"
+  [ -n "$host" ] && [ -n "$port" ] || return 1
+  # Reject proxy-list delimiters and malformed addresses instead of letting Chromium discard
+  # the configured proxy. IPv6 literals are validated, then bracketed in the switch.
+  case "$host" in
+    *:*)
+      case "$host" in
+        '['*']') host="\${host#[}"; host="\${host%]}" ;;
+        *'['*|*']'*) return 1 ;;
+      esac
+      printf '%s\\n' "$host" | awk -F: '
+        /[^0-9a-fA-F:]/ || /:::/ || /^:[^:]/ || /[^:]:$/ { exit 1 }
+        { n = split($0, parts, "::"); if (n > 2) exit 1;
+          groups = 0; for (i = 1; i <= NF; i++) { if (length($i) > 4) exit 1; if (length($i)) groups++; }
+          if (n == 2) { if (groups >= 8) exit 1; }
+          else if (groups != 8) exit 1;
+        }' || return 1
+      host="[$host]" ;;
+    *)
+      printf '%s\\n' "$host" | awk -F. '
+        length($0) > 253 { exit 1 }
+        { numeric = ($0 ~ /^[0-9.]+$/); if ($NF == "") NF--;
+          if (numeric && NF != 4) exit 1;
+          for (i = 1; i <= NF; i++) {
+            if (length($i) < 1 || length($i) > 63 || $i !~ /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$/) exit 1;
+            if (numeric && ($i > 255 || (length($i) > 1 && substr($i, 1, 1) == "0"))) exit 1;
+          }
+        }' || return 1 ;;
+  esac
+  case "$port" in *[!0-9]*|'') return 1 ;; esac
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+  printf '%s\\n' "--proxy-server=$scheme://$host:$port" "--proxy-bypass-list=$BYPASS_HOST"
 }
 
 if [ "$MODE" != native ] && ! listener_ours; then
@@ -346,9 +381,10 @@ if [ "$PAC_MODE" = 1 ]; then
 else
   ARGS+=("$RESOLVER_ARG")
 fi
+PROXY_ARGS=$(proxy_args) || { say "cannot read the system proxy policy; leaving the app untouched"; exit 1; }
 while IFS= read -r arg; do
   [ -n "$arg" ] && ARGS+=("$arg")
-done < <(proxy_args)
+done <<< "$PROXY_ARGS"
 OPEN_ENV=()
 if [ "$SHIM_MODE" = 1 ]; then OPEN_ENV=(--env "CODEX_CLI_PATH=$SHIM_SCRIPT"); fi
 # Bundle signature verification can take time. Recheck readiness at the action boundary

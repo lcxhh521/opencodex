@@ -151,16 +151,22 @@ CONNECT entry normally on the listener port + 1 (65534 when the listener port is
 that splices `chatgpt.com:443` onto the TLS listener;
 `pac.ts` reads the scutil proxy chain and any system PAC; `runtime.ts` rewrites
 `chatgpt-unblock.pac` at every start, before the readiness marker, embedding the system PAC only
-while the base64 `data:` switch stays within 512 KiB (`system-pac-unreadable`/`-too-large` fall
-back to the proxy chain, then DIRECT, with a startup warning). An entry bind or PAC write failure
-releases both listeners. The script launches with the inline PAC switch alone, requires the entry
+while the base64 `data:` switch stays within 512 KiB. An unreadable system proxy configuration,
+unreadable/oversized system PAC, entry bind or PAC write failure releases both listeners and fails
+this optional integration's startup. An explicit system proxy chain receives no synthetic DIRECT:
+proxy exhaustion fails the request; only a no-proxy/TUN configuration uses normal DIRECT.
+Automatic proxy discovery cannot be captured and also fails PAC-mode startup. Embedded system
+PACs retain non-mandatory Chromium semantics, including direct fallback on invalid results or
+execution failure; that mode does not establish a fail-closed policy. The script launches with the inline PAC switch alone, requires the entry
 to complete a real CONNECT and authenticated TLS identity exchange. A mere TCP connection, empty
 response, foreign authority, wrong hostname or curl failure is not readiness. Both curl probes disable
 curlrc overrides, and the CONNECT probe forces its explicit loopback proxy despite NO_PROXY. After deciding a launch is needed, it prepares
 all launch arguments before quitting the app, rejecting missing, unreadable, non-file or empty PAC
 input and failed encoding. The same prepared PAC snapshot is passed to open; a failed preflight
 leaves the running app untouched. `native` mode requires no PAC file and undoes any PAC switch,
-inline or the older `file://` form.
+inline or the older `file://` form. Resolver-rule launches also reject unreadable/invalid system
+proxy configuration before quitting the app and never append `direct://` to an explicit proxy.
+Native restore does not depend on reading the proxy configuration.
 
 Intercept regression files use the existing `tests/clients/` domain alongside
 the shim tests; shared handshake coverage is `tests/lib/socks5-handshake.test.ts`.

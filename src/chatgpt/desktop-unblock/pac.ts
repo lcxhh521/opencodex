@@ -10,7 +10,7 @@
  *
  * The system route is captured at generation time, not hard-coded, because it depends on the
  * VPN's mode at the time:
- *  - system proxy mode: the HTTPS / HTTP / SOCKS proxies from `scutil --proxy`, then DIRECT;
+ *  - system proxy mode: only the HTTPS / HTTP / SOCKS proxies from `scutil --proxy`;
  *  - PAC mode: the system PAC script itself, embedded so its per-host rules keep applying;
  *  - TUN mode / no VPN: no system proxy, so DIRECT and Chromium resolves and dials on its own.
  */
@@ -19,6 +19,7 @@ import { execFileSync } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
+import { isIP } from "node:net";
 import { fileURLToPath } from "node:url";
 import { CHATGPT_INTERCEPT_HOST } from "./listener";
 
@@ -53,7 +54,8 @@ export function parseScutilOutput(output: string): ScutilValue {
 
 function runScutil(): ScutilValue | null {
   try {
-    return parseScutilOutput(execFileSync("scutil", ["--proxy"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
+    const output = execFileSync("scutil", ["--proxy"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: SYSTEM_PAC_TIMEOUT_MS });
+    return /^\s*<dictionary>\s*\{[\s\S]*\}\s*$/.test(output) ? parseScutilOutput(output) : null;
   } catch {
     return null;
   }
@@ -64,12 +66,34 @@ function runScutil(): ScutilValue | null {
  * HTTPS), then HTTP, then SOCKS, each once.
  */
 export function systemProxyChain(scutil: ScutilValue | null = runScutil()): SystemProxyChain {
-  if (!scutil) return { entries: [], autoConfig: false, autoConfigUrl: null };
+  if (!scutil) throw new Error("Cannot read the system proxy configuration; refusing to create a direct fallback.");
+  for (const key of ["HTTPSEnable", "HTTPEnable", "SOCKSEnable", "ProxyAutoConfigEnable", "ProxyAutoDiscoveryEnable"]) {
+    const value = scutil.get(key);
+    if (value !== null && value !== "0" && value !== "1") throw new Error("The system proxy configuration is malformed; refusing to replace its route.");
+  }
+  if (scutil.get("ProxyAutoDiscoveryEnable") === "1") throw new Error("Automatic proxy discovery cannot be captured safely; refusing to replace its route.");
   const autoConfig = scutil.get("ProxyAutoConfigEnable") === "1";
   const url = scutil.get("ProxyAutoConfigURLString");
   const entries = new Set<string>();
   const push = (kind: "PROXY" | "SOCKS5", enabled: string | null, host: string | null, port: string | null) => {
-    if (enabled === "1" && host && port && host !== "(null)") entries.add(`${kind} ${host}:${port}`);
+    if (enabled !== "1") return;
+    if (!host || host === "(null)" || !port || !/^\d+$/.test(port) || +port < 1 || +port > 65535) {
+      throw new Error("An enabled system proxy has an invalid address; refusing to create a direct fallback.");
+    }
+    const address = isIP(host) === 6 ? `[${host}]` : host;
+    let endpoint: URL;
+    try { endpoint = new URL(`http://${address}:${port}`); } catch {
+      throw new Error("An enabled system proxy has an invalid address; refusing to create a direct fallback.");
+    }
+    const hostname = endpoint.hostname;
+    const validHostname = isIP(hostname.replace(/^\[|\]$/g, "")) !== 0
+      || (hostname.length <= 254 && hostname.replace(/\.$/, "").split(".")
+        .every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label)));
+    if (endpoint.username || endpoint.password || endpoint.pathname !== "/" || endpoint.search || endpoint.hash
+      || /[\s;/?#@\\]/.test(host) || !validHostname) {
+      throw new Error("An enabled system proxy has an invalid address; refusing to create a direct fallback.");
+    }
+    entries.add(`${kind} ${hostname}:${+port}`);
   };
   push("PROXY", scutil.get("HTTPSEnable"), scutil.get("HTTPSProxy"), scutil.get("HTTPSPort"));
   push("PROXY", scutil.get("HTTPEnable"), scutil.get("HTTPProxy"), scutil.get("HTTPPort"));
@@ -122,14 +146,15 @@ export async function loadSystemPac(rawUrl: string): Promise<string | null> {
   try {
     if (url.protocol === "file:") {
       const path = fileURLToPath(url);
-      if ((await stat(path)).size <= MAX_SYSTEM_PAC_BYTES) text = await readFile(path, "utf8");
+      const info = await stat(path);
+      if (info.isFile() && info.size <= MAX_SYSTEM_PAC_BYTES) text = await readFile(path, "utf8");
     } else if (url.protocol === "http:" || url.protocol === "https:") {
       text = await fetchPacText(url);
     }
   } catch {
     return null;
   }
-  return text && /\bFindProxyForURL\b/.test(text) ? text : null;
+  return text && Buffer.byteLength(text) <= MAX_SYSTEM_PAC_BYTES && /\bFindProxyForURL\b/.test(text) ? text : null;
 }
 
 /**
@@ -158,10 +183,11 @@ var FindProxyForURL = function (url, host) {
 };
 `;
   }
-  const chainText = [...chain.entries, "DIRECT"].join("; ");
+  if (chain.autoConfig) throw new Error("The configured system PAC could not be read; refusing to replace its route.");
+  const chainText = chain.entries.length ? chain.entries.join("; ") : "DIRECT";
   return `${header}function FindProxyForURL(url, host) {
-  if (host == "${CHATGPT_INTERCEPT_HOST}") return "PROXY 127.0.0.1:${entryPort}; ${chainText}";
-  return "${chainText}";
+  if (host == "${CHATGPT_INTERCEPT_HOST}") return ${JSON.stringify(`PROXY 127.0.0.1:${entryPort}; ${chainText}`)};
+  return ${JSON.stringify(chainText)};
 }
 `;
 }

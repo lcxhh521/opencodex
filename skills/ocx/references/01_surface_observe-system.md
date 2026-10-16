@@ -418,7 +418,7 @@ JSON mode: `envelope`.
 
 Usage: `ocx system codex-restart --yes [--json]`
 
-Restart the Codex desktop app and app-servers.
+Restart the Codex app-servers, and the desktop app when its model picker predates the catalog.
 
 State-changing: yes.
 
@@ -428,13 +428,13 @@ State-changing: yes.
 
 | Flag | Value | Meaning |
 |---|---|---|
-| `--yes` | boolean | Required: fully quits and relaunches the operator's Codex desktop app, which may discard unsaved composer drafts, model-picker selections, and pending approval prompts; also restarts its app-servers. |
+| `--yes` | boolean | Required: restarts the Codex app-servers, interrupting running turns, and fully quits and relaunches the operator's Codex desktop app when its model picker predates the current catalog or that cannot be determined, which may discard unsaved composer drafts, model-picker selections, and pending approval prompts. |
 | `--json` | boolean | Emit the restart result as JSON. |
 
 JSON mode: `payload`.
 
 - `sync --restart-codex` is not a substitute: it restarts only as a side effect after a catalog or cache write, so it cannot restart a healthy install on request.
-- Restarts the Codex desktop app as well as the app-servers, through the same module the CLI uses. When the proxy itself runs inside the Codex app it refuses instead, because restarting the app would kill the request.
+- Restarts the app-servers through the same module the CLI uses. The desktop app is quit and relaunched when its model picker predates the current catalog or this request changes the `model_catalog_json` binding, because the picker is built at launch; otherwise it is left running and respawns its own app-server, keeping unsaved client state. An unreadable desktop or catalog state falls back to the full restart. When the proxy itself runs inside the Codex app the desktop restart is refused, because restarting the app would kill the request.
 - --yes is mandatory because this interrupts a running editor session and may discard unsaved composer drafts, model-picker selections, and pending approval prompts; it must never happen because an agent guessed a subcommand.
 
 ### `ocx logs filter`
@@ -626,7 +626,7 @@ JSON mode: `payload`.
 
 ### `ocx observe usage`
 
-Usage: `ocx observe usage [--range <today|1d|7d|30d|all>] [--surface <all|codex|claude|grok>] [--since <epoch-ms|ISO-datetime>] [--until <epoch-ms|ISO-datetime>] [--provider <name>] [--model <id>] [--api-key-id <id>] [--search <text>] [--json]`
+Usage: `ocx observe usage [--range <today|1d|7d|30d|all>] [--surface <all|codex|claude|grok>] [--since <epoch-ms|ISO-datetime>] [--until <epoch-ms|ISO-datetime>] [--provider <name>] [--model <id>] [--api-key-id <id>] [--search <text>] [--top <1-1000>] [--json]`
 
 Read token and estimated-cost usage.
 
@@ -646,13 +646,14 @@ State-changing: no.
 | `--model` | string | Filter model. |
 | `--json` | boolean | Emit the result as JSON. |
 | `--api-key-id` | string | Exact nonblank management key scope; connected clients refuse this before reading their enrolled key. |
-| `--search` | string | Model-row substring view over model/provider/resolvedModel; top100 by tokens. Whole-report totals stay unchanged. |
+| `--top` | number | 1-1000 human model rows; default 10, or 100 with --search. Applied after search; ignored with --json. Totals unchanged. |
+| `--search` | string | Model-row substring view over model/provider/resolvedModel; default top100 by tokens. Whole-report totals stay unchanged. |
 
 JSON mode: `payload`.
 
 - Also available as ocx usage. Connected clients read only their enrolled-key Hub report through /v1/usage; caller --api-key-id is refused before key read/transport and never grants management authority.
 - Nonclient --api-key-id uses /api/usage and requires matching filter acknowledgment. An unknown acknowledged key is empty/matched:false, not404. Custom-window acknowledgment remains required.
-- --search filters only returned model rows after scope acknowledgment. Blank search selects the top100 model rows; modelView reports match/return counts without recomputing totals.
+- --search filters only returned model rows after scope acknowledgment. Blank search selects the top100 model rows by default; modelView reports match/return counts without recomputing totals.
 
 ### `ocx observe storage`
 

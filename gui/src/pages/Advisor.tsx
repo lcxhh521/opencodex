@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Notice } from "../ui";
 import { useDataSurface } from "../data-surface";
 import { useT, type TKey } from "../i18n/shared";
+import { AdvisorModelSelect } from "../components/AdvisorModelSelect";
 
 /**
  * Advisor sidecar configuration (PR1: minimal but real). Reads and writes the RESOLVED
@@ -126,13 +127,11 @@ export function AdvisorEditor({ apiBase, initial }: { apiBase: string; initial: 
         </div>
         <div style={ROW_STYLE}>
           <label htmlFor="advisor-model" style={LABEL_STYLE}>{t("advisor.model")}</label>
-          <input
-            id="advisor-model"
-            type="text"
+          <AdvisorModelSelect
+            apiBase={apiBase}
             value={draft.model}
             disabled={saving}
-            placeholder={t("advisor.modelPlaceholder")}
-            onChange={event => edit({ model: event.target.value })}
+            onChange={model => edit({ model })}
           />
         </div>
         <div style={ROW_STYLE}>
@@ -222,9 +221,14 @@ export default function Advisor({ apiBase }: { apiBase: string }) {
     <section className="panel">
       {heading}
       <p className="muted">{t("advisor.description")}</p>
-      <Notice tone="warn">{t("advisor.costNote")}</Notice>
-      <Notice tone="warn">{t("advisor.privacyNote")}</Notice>
-      <Notice tone="warn">{t("advisor.disclosure")}</Notice>
+      {/* Collapsed by default: three stacked warnings buried the settings below them. The
+          consent checkbox and its required notice stay visible, so folding them hides no gate. */}
+      <details className="advisor-notices" style={{ margin: "0.5rem 0" }}>
+        <summary className="muted text-label" style={{ cursor: "pointer", padding: "2px 2px" }}>{t("advisor.notices")}</summary>
+        <Notice tone="warn">{t("advisor.costNote")}</Notice>
+        <Notice tone="warn">{t("advisor.privacyNote")}</Notice>
+        <Notice tone="warn">{t("advisor.disclosure")}</Notice>
+      </details>
       {state.showSkeleton && <Notice tone="warn">{t("common.loading")}</Notice>}
       {state.showError && !state.showSkeleton && (
         <Notice tone="err">

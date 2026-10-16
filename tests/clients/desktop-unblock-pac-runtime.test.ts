@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   CHATGPT_UNBLOCK_ENTRY_PORT_OFFSET,
   chatgptPacFallbackEnabled,
@@ -17,6 +19,7 @@ import {
 import { CHATGPT_INTERCEPT_HOST } from "../../src/chatgpt/desktop-unblock/listener";
 import { chatgptUnblockReadyPath } from "../../src/chatgpt/desktop-unblock/runtime";
 import type { OcxConfig } from "../../src/types";
+import { repoPath } from "../helpers/repo-root";
 
 function config(overrides: Partial<NonNullable<OcxConfig["chatgptDesktop"]>> = {}): OcxConfig {
   return { chatgptDesktop: { unblockSend: true, ...overrides } } as OcxConfig;
@@ -102,29 +105,72 @@ describe("chatgpt unblock PAC choice", () => {
     expect(pac.text).toContain(systemPac);
   });
 
-  test("a system PAC too large for the launch switch falls back to the proxy chain", () => {
-    // The switch is base64 inside one argv entry; past ARG_MAX `open` fails after the app quit.
+  test("a system PAC too large for the launch switch fails instead of replacing its route", () => {
     const bigger = `${systemPac}\n// ${"x".repeat(3_000)}`;
-    const pac = chooseChatgptUnblockPac(10301, chain, bigger, 2_000);
-    expect(pac.route).toBe("system-pac-too-large");
-    expect(pac.text).not.toContain(bigger);
-    expect(pac.text).toContain("PROXY 127.0.0.1:7892");
-    expect(chatgptUnblockPacArgFor(pac.text).length).toBeLessThanOrEqual(2_000);
+    expect(() => chooseChatgptUnblockPac(10301, chain, bigger, 2_000)).toThrow("The system PAC is too large");
   });
 
-  test("the default limit refuses a whitelist-sized PAC and keeps the switch well under ARG_MAX", () => {
+  test("the default limit refuses a whitelist-sized PAC rather than adding DIRECT", () => {
     const large = `function FindProxyForURL(url, host) { ${"if (dnsDomainIs(host, '.example.test')) return 'DIRECT';\n".repeat(12_000)} return "PROXY 127.0.0.1:7892"; }`;
     expect(large.length).toBeGreaterThan(600 * 1024);
-    const pac = chooseChatgptUnblockPac(10301, chain, large);
-    expect(pac.route).toBe("system-pac-too-large");
-    expect(chatgptUnblockPacArgFor(pac.text).length).toBeLessThanOrEqual(CHATGPT_UNBLOCK_PAC_SWITCH_MAX_BYTES);
+    expect(() => chooseChatgptUnblockPac(10301, chain, large)).toThrow("The system PAC is too large");
     expect(CHATGPT_UNBLOCK_PAC_SWITCH_MAX_BYTES).toBeLessThan(1024 * 1024);
   });
 
-  test("without a system PAC the route says whether one was configured", () => {
-    expect(chooseChatgptUnblockPac(10301, chain, null).route).toBe("system-pac-unreadable");
-    expect(chooseChatgptUnblockPac(10301, { ...chain, autoConfig: false, autoConfigUrl: null }, null).route).toBe("system-proxy");
+  test("an unreadable configured PAC fails even when static proxies are available", () => {
+    expect(() => chooseChatgptUnblockPac(10301, chain, null)).toThrow("The configured system PAC could not be read");
+    expect(() => chooseChatgptUnblockPac(10301, { ...chain, entries: [], autoConfigUrl: null }, null)).toThrow();
   });
+
+  test("no system PAC retains only the configured static proxy route", () => {
+    const pac = chooseChatgptUnblockPac(10301, { ...chain, autoConfig: false, autoConfigUrl: null }, null);
+    expect(pac.route).toBe("system-proxy");
+    expect(pac.text).not.toContain("DIRECT");
+  });
+
+});
+
+describe.skipIf(process.platform === "win32")("chatgpt unblock PAC startup route failures", () => {
+  for (const route of ["scutil-failed", "pac-unreadable", "pac-too-large"]) {
+    test(`${route} releases both listeners and publishes no PAC or readiness marker`, () => {
+      const dir = mkdtempSync(join(tmpdir(), "ocx-pac-route-failure-"));
+      try {
+        const pacPath = join(dir, "system.pac");
+        if (route === "pac-too-large") writeFileSync(pacPath, `function FindProxyForURL(u, h) { return "DIRECT"; }\n//${"x".repeat(500_000)}`);
+        const scutil = route === "scutil-failed" ? "exit 1" : `printf '%s\\n' '<dictionary> {' 'ProxyAutoConfigEnable : 1' 'ProxyAutoConfigURLString : ${pathToFileURL(pacPath).href}' '}'`;
+        writeFileSync(join(dir, "scutil"), `#!/bin/sh\n${scutil}\n`, { mode: 0o755 });
+        // Platform dispatch is emulated only inside this isolated process. Every path and
+        // command is a temporary fixture; no macOS proxy or trust setting is accessed.
+        const source = `
+          import { startChatgptUnblock } from ${JSON.stringify(repoPath("src", "chatgpt", "desktop-unblock", "runtime.ts"))};
+          Object.defineProperty(process, "platform", { value: "darwin" });
+          let port;
+          for (;;) {
+            const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+            port = probe.port; probe.stop(true);
+            if (port >= 65535) continue;
+            try { Bun.listen({ hostname: "127.0.0.1", port: port + 1, socket: { data() {} } }).stop(true); break; } catch {}
+          }
+          let error = "";
+          try {
+            const handle = await startChatgptUnblock({ config: { chatgptDesktop: { unblockSend: true, pacFallback: true, port } }, publicPort: 0, configDir: ${JSON.stringify(dir)} });
+            await handle?.stop();
+          } catch (value) { error = String(value); }
+          for (const target of [port, port + 1]) {
+            // Successful rebind proves cleanup without relying on TCP timing.
+            Bun.listen({ hostname: "127.0.0.1", port: target, socket: { data() {} } }).stop(true);
+          }
+          console.log(JSON.stringify({ error }));
+        `;
+        const result = spawnSync(process.execPath, ["-e", source], { env: { ...process.env, PATH: dir, OPENCODEX_HOME: dir }, encoding: "utf8", timeout: 10_000 });
+        expect(result.status).toBe(0);
+        const expected = route === "scutil-failed" ? "Cannot read the system proxy configuration" : route === "pac-unreadable" ? "The configured system PAC could not be read" : "The system PAC is too large";
+        expect(result.stdout).toContain(expected);
+        expect(existsSync(chatgptUnblockPacPath(dir))).toBe(false);
+        expect(existsSync(chatgptUnblockReadyPath(dir))).toBe(false);
+      } finally { rmSync(dir, { recursive: true, force: true }); }
+    });
+  }
 });
 
 describe.skipIf(process.platform !== "darwin")("chatgpt unblock PAC-mode startup", () => {
