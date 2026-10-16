@@ -62,7 +62,7 @@ mock.module("node:child_process", () => ({ ...childProcess, spawnSync(command: s
   if (command === "/usr/bin/open" && scenario.openFails) return { status: 1, stdout: "", stderr: "fixture open failed" };
   return { status: 0, stdout: "", stderr: "" };
 } }));
-mock.module("../../src/config", () => ({ loadConfig: () => ({ chatgptDesktop: { appServerShim: scenario.flag === true } }) }));
+mock.module("../../src/config", () => ({ loadConfig: () => ({ chatgptDesktop: { appServerShim: scenario.flag === true, unblockSend: scenario.intercept === true } }) }));
 // A refused launch explains a dropped chatgptDesktop block from the config file; never read this
 // machine's config here.
 mock.module("../../src/config/diagnostics", () => ({ readConfigFileSnapshot: () => ({ raw: scenario.configRaw }) }));
@@ -93,9 +93,14 @@ mock.module("../../src/chatgpt/desktop-unblock/launch-watcher", () => ({
       scriptUpToDate: false, plistUpToDate: false,
     };
   },
-  installChatgptUnblockWatcher: () => { throw new Error("fixture: the watcher is out of scope"); },
-  launchChatgptWithRule: () => ({ ok: false, output: "fixture: the intercept launch is out of scope" }),
-  probeChatgptUnblockListener: async () => ({ state: "down" }),
+  installChatgptUnblockWatcher: (options: { appPath: string }) => {
+    calls.push({ command: "watcher-install", args: [options.appPath] });
+  },
+  launchChatgptWithRule: (...args: unknown[]) => {
+    calls.push({ command: "intercept-launch", args: [args[4] as string] });
+    return { ok: true, output: "" };
+  },
+  probeChatgptUnblockListener: async () => ({ state: scenario.intercept ? "ours" : "down" }),
   uninstallChatgptUnblockWatcher: () => undefined,
 }));
 mock.module("../../src/server/proxy-liveness", () => ({ findLiveProxy: async () => null }));
@@ -104,5 +109,5 @@ mock.module("../../src/chatgpt/desktop-unblock/ca-trust", () => ({
   chatgptCaTrustCommand: () => "",
 }));
 const { handleChatgptCommand } = await import("../../src/cli/chatgpt-command");
-const code = await handleChatgptCommand([scenario.sub ?? "restore"], "darwin");
+const code = await handleChatgptCommand([scenario.sub ?? "restore", ...(scenario.sub === "install-watcher" ? ["--yes"] : [])], "darwin");
 console.log(JSON.stringify({ code, calls, launcherExists: fs.existsSync(launcher), launcherContent: fs.existsSync(launcher) ? fs.readFileSync(launcher, "utf8") : null, root, shell, binary }));

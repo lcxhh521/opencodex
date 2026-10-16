@@ -1,14 +1,19 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { X509Certificate } from "node:crypto";
 import { connect as connectSocket } from "node:net";
 import { connect as connectTls } from "node:tls";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { getConfigDir } from "../../config/paths";
+import { claudeInterceptCaCertPath } from "../../claude/intercept/local-ca";
 import { CHATGPT_INTERCEPT_HOST, CHATGPT_UNBLOCK_IDENTITY_PATH, CHATGPT_UNBLOCK_SERVICE_ID } from "./listener";
 import type { PreservedSendBlock } from "./rewrite";
 import { CHATGPT_UNBLOCK_PAC_ARG_PREFIX, chatgptUnblockPacArg, chatgptUnblockPacPath, chatgptUnblockReadyPath, chatgptUnblockResolverArg } from "./runtime";
 import { chatgptShimLauncherPath } from "../app-server-shim/launcher";
+import { selfLaunchArgv } from "../../lib/self-launch-argv";
+import { chatgptWatcherBundleProblem } from "./bundle-preflight";
 
 /**
  * Launch integration for the ChatGPT desktop send-unblock intercept.
@@ -108,12 +113,20 @@ function chatgptUnblockWatcherLogPath(configDir?: string): string {
  * resolver rule [+ proxy/bypass] otherwise. The app is "flagged" by whichever switch the mode
  * uses, so a mode change makes the watcher correct an app launched under the other mode.
  */
+export interface ChatgptWatcherBundle {
+  appPath: string;
+  /** Test seam: the shared trust-check command, without its bundle-path argument. */
+  preflightArgv?: readonly string[];
+}
+
 export function buildChatgptUnblockWatcherScript(
   port: number,
   configDir?: string,
   shimMode = false,
   pac?: { entryPort: number },
+  bundle: ChatgptWatcherBundle = { appPath: CHATGPT_APP_PATH },
 ): string {
+  const preflight = bundle.preflightArgv ?? [process.execPath, ...selfLaunchArgv(["internal", "chatgpt-bundle-preflight"], { sourceEntrypoint: fileURLToPath(new URL("../../cli/index.ts", import.meta.url)) })];
   const pacFile = chatgptUnblockPacPath(configDir ?? getConfigDir());
   return `#!/bin/bash
 # opencodex ChatGPT send-unblock launcher.
@@ -136,8 +149,12 @@ ENTRY_URL=${shellQuote(`http://127.0.0.1:${pac?.entryPort ?? 0}/`)}
 SHIM_MODE=${shimMode ? "1" : "0"}
 SHIM_SCRIPT=${shellQuote(chatgptShimLauncherPath(configDir ?? getConfigDir()))}
 BYPASS_HOST=${shellQuote(CHATGPT_INTERCEPT_HOST)}
-APP_PATTERN='ChatGPT.app/Contents/MacOS/ChatGPT'
-IDENTITY_URL=${shellQuote(`https://127.0.0.1:${port}${CHATGPT_UNBLOCK_IDENTITY_PATH}`)}
+APP_BUNDLE=${shellQuote(bundle.appPath)}
+APP_BINARY=${shellQuote(join(bundle.appPath, "Contents", "MacOS", "ChatGPT"))}
+BUNDLE_PREFLIGHT=(${preflight.map(shellQuote).join(" ")})
+CA_CERT=${shellQuote(claudeInterceptCaCertPath(configDir ?? getConfigDir()))}
+IDENTITY_URL=${shellQuote(`https://${CHATGPT_INTERCEPT_HOST}:${port}${CHATGPT_UNBLOCK_IDENTITY_PATH}`)}
+ENTRY_IDENTITY_URL=${shellQuote(`https://${CHATGPT_INTERCEPT_HOST}${CHATGPT_UNBLOCK_IDENTITY_PATH}`)}
 SERVICE_ID=${shellQuote(`"service":"${CHATGPT_UNBLOCK_SERVICE_ID}"`)}
 LOG=${shellQuote(chatgptUnblockWatcherLogPath(configDir))}
 LOCK_DIR="\${TMPDIR:-/tmp}/opencodex-chatgpt-launch.lock"
@@ -158,7 +175,7 @@ app_pid() {
   local pid
   for pid in $(pgrep -a -x ChatGPT 2>/dev/null); do
     case "$(ps -o command= -p "$pid" 2>/dev/null)" in
-      *"$APP_PATTERN"*) echo "$pid"; return 0 ;;
+      "$APP_BINARY"|"$APP_BINARY "*) echo "$pid"; return 0 ;;
     esac
   done
   return 1
@@ -220,31 +237,29 @@ app_switched() {
   app_has_shim "$pid" && return 0
   return 1
 }
-# The port must be held by opencodex's listener, not just by any process. The listener answers
-# its identity path itself; -k because its certificate names chatgpt.com, --noproxy because a
-# proxy in the environment must not be asked to reach loopback.
+# Authenticate both the local authority and chatgpt.com before accepting the service identity.
+# -q disables curlrc overrides; the explicit loopback mapping and proxy policy prevent a probe
+# from leaving this machine. No user keychain trust is required or changed.
 listener_ours() {
-  curl -sk --noproxy '*' --max-time 3 "$IDENTITY_URL" 2>/dev/null | grep -qF "$SERVICE_ID"
+  local identity
+  identity=$(curl -qfsS --noproxy '*' --max-time 3 --cacert "$CA_CERT" \\
+    --resolve "$BYPASS_HOST:$PORT:127.0.0.1" "$IDENTITY_URL" 2>/dev/null) || return 1
+  printf '%s' "$identity" | grep -qF "$SERVICE_ID"
 }
-# In PAC mode the entry listener must also be up: the PAC points chatgpt.com at it, and a
-# missing entry would send every chatgpt.com request to a dead first hop.
+# Prove that the PAC entry actually CONNECTs to the authenticated intercept, not just that
+# something accepts TCP. Empty/failed responses (including curl exit 56) are never readiness.
 entry_ours() {
   [ "$ENTRY_URL" != ${shellQuote("http://127.0.0.1:0/")} ] || return 1
-  # The probe fetches through the entry as an HTTP proxy (the same job the PAC gives it). It
-  # must not carry --noproxy: that would bypass the very proxy being tested. The identity
-  # host keeps the probe off the network -- the entry refuses non-CONNECT chatgpt.com:443
-  # targets and answers before dialing anything.
-  curl -s --max-time 3 -o /dev/null -x "$ENTRY_URL" ${shellQuote(`http://${CHATGPT_INTERCEPT_HOST}/`)} 2>/dev/null
-  local status=$?
-  # Exit 0 (answered) or 56 (connected, nothing received) means the entry is there; any
-  # connection-level failure (7 and friends) means it is not.
-  [ "$status" -eq 0 ] || [ "$status" -eq 56 ]
+  local identity
+  identity=$(curl -qfsS --noproxy '' --max-time 3 --cacert "$CA_CERT" \\
+    --proxy "$ENTRY_URL" "$ENTRY_IDENTITY_URL" 2>/dev/null) || return 1
+  printf '%s' "$identity" | grep -qF "$SERVICE_ID"
 }
 # \`open\` on a running app only activates it and drops the arguments, so the old instance must
 # be fully gone first. Quit is re-sent because the app can ignore it while starting up.
 quit_app() {
   for attempt in 1 2 3; do
-    osascript -e 'quit app "ChatGPT"' >/dev/null 2>&1
+    osascript -e 'on run argv' -e 'tell application (POSIX file (item 1 of argv) as text) to quit' -e 'end run' "$APP_BUNDLE" >/dev/null 2>&1
     for _ in $(seq 1 20); do
       app_running || return 0
       sleep 0.25
@@ -291,9 +306,10 @@ trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 if [ "$MODE" = native ]; then
   if ! app_running; then say "ChatGPT is not running"; exit 0; fi
   if ! app_switched; then say "ChatGPT is already running without the launch switches"; exit 0; fi
+  "\${BUNDLE_PREFLIGHT[@]}" "$APP_BUNDLE" || { say "ChatGPT bundle verification failed; leaving the app untouched"; exit 1; }
   say "ChatGPT carries the launch switches; restarting it without"
   quit_app || { say "ChatGPT did not quit; quit it manually and reopen it"; exit 1; }
-  open -a ChatGPT || { say "could not relaunch ChatGPT with native networking"; exit 1; }
+  open -a "$APP_BUNDLE" || { say "could not relaunch ChatGPT with native networking"; exit 1; }
   say "relaunched ChatGPT with native networking"
   exit 0
 fi
@@ -320,6 +336,7 @@ elif [ "$MODE" != launch ]; then
   exit 0
 fi
 
+"\${BUNDLE_PREFLIGHT[@]}" "$APP_BUNDLE" || { say "ChatGPT bundle verification failed; leaving the app untouched"; exit 1; }
 # Prepare every launch argument before quitting; open uses this same PAC snapshot even if the
 # file changes while the old app exits. Failed preflight leaves a running app untouched.
 ARGS=()
@@ -334,11 +351,17 @@ while IFS= read -r arg; do
 done < <(proxy_args)
 OPEN_ENV=()
 if [ "$SHIM_MODE" = 1 ]; then OPEN_ENV=(--env "CODEX_CLI_PATH=$SHIM_SCRIPT"); fi
+# Bundle signature verification can take time. Recheck readiness at the action boundary
+# so a listener that stopped during preflight cannot make us quit a healthy native app.
+if ! listener_ours || { [ "$PAC_MODE" = 1 ] && ! entry_ours; }; then
+  say "ChatGPT listener readiness changed during preflight; leaving the app untouched"
+  exit 1
+fi
 if [ "$RESTART_APP" = 1 ]; then
   say "ChatGPT is running without the launch switches; restarting it"
   quit_app || { say "ChatGPT did not quit; leaving it running without the switches"; exit 1; }
 fi
-open -a ChatGPT \${OPEN_ENV[@]+"\${OPEN_ENV[@]}"} --args "\${ARGS[@]}" || { say "could not launch ChatGPT"; exit 1; }
+open -a "$APP_BUNDLE" \${OPEN_ENV[@]+"\${OPEN_ENV[@]}"} --args "\${ARGS[@]}" || { say "could not launch ChatGPT"; exit 1; }
 say "launched ChatGPT with: \${ARGS[*]}"
 `;
 }
@@ -410,6 +433,8 @@ function watcherDomain(): string {
 
 export interface InstallChatgptUnblockWatcherOptions {
   port: number;
+  /** The absolute discovered bundle path, retained and revalidated on every wake. */
+  appPath?: string;
   /** PAC mode: the CONNECT entry port the generated script checks and the app is pointed at. */
   entryPort?: number;
   /** Start the app through the app-server shim (`CODEX_CLI_PATH`). */
@@ -433,8 +458,10 @@ export function installChatgptUnblockWatcher(options: InstallChatgptUnblockWatch
   if (process.platform !== "darwin" && !options.assumeSupported) {
     throw new Error("the ChatGPT launch watcher is only supported on macOS");
   }
-  if (!options.assumeSupported && !existsSync(CHATGPT_APP_PATH)) {
-    throw new Error(`${CHATGPT_APP_PATH} not found; install the ChatGPT desktop app first`);
+  const appPath = options.appPath ?? CHATGPT_APP_PATH;
+  if (!options.assumeSupported) {
+    const problem = chatgptWatcherBundleProblem(appPath);
+    if (problem) throw new Error(`Refusing to install the ChatGPT watcher: ${problem}`);
   }
   const launchctl = options.launchctl ?? defaultLaunchctl;
   const paths = { ...chatgptUnblockWatcherPaths(options.configDir), ...(options.plistPath ? { plistPath: options.plistPath } : {}) };
@@ -451,6 +478,7 @@ export function installChatgptUnblockWatcher(options: InstallChatgptUnblockWatch
       options.configDir,
       options.shimMode === true,
       options.entryPort !== undefined ? { entryPort: options.entryPort } : undefined,
+      { appPath },
     ),
     { mode: 0o700 },
   );
@@ -510,13 +538,14 @@ export function chatgptUnblockWatcherStatus(
   configDir?: string,
   shimMode = false,
   pac?: { entryPort: number },
+  appPath = CHATGPT_APP_PATH,
 ): ChatgptUnblockWatcherStatus {
   const paths = chatgptUnblockWatcherPaths(configDir);
   const scriptInstalled = existsSync(paths.scriptPath);
   const plistInstalled = existsSync(paths.plistPath);
   const agentLoaded = chatgptUnblockWatcherLoaded();
   const scriptUpToDate = scriptInstalled
-    && readFileSync(paths.scriptPath, "utf8") === buildChatgptUnblockWatcherScript(port, configDir, shimMode, pac);
+    && readFileSync(paths.scriptPath, "utf8") === buildChatgptUnblockWatcherScript(port, configDir, shimMode, pac, { appPath });
   const plistUpToDate = plistInstalled
     && readFileSync(paths.plistPath, "utf8") === buildChatgptUnblockWatcherPlist(paths.scriptPath, [paths.lockPath, paths.readyPath], paths.errPath);
   return { scriptInstalled, plistInstalled, agentLoaded, scriptUpToDate, plistUpToDate };
@@ -587,20 +616,35 @@ function loopbackPortOpen(port: number): Promise<boolean> {
  * Not fetch: Bun's fetch sends even loopback requests through HTTP(S)_PROXY from the user's
  * shell and ignores `proxy: false` (Bun 1.4), and a proxy cannot reach this machine's loopback.
  */
-function requestIdentity(port: number): Promise<string | null> {
+function requestIdentity(port: number, configDir = getConfigDir()): Promise<string | null> {
+  let ca: string;
+  try {
+    // Trust exactly the locally published authority, never the OS/default root store. A
+    // missing, invalid or non-CA certificate cannot authorize a listener on this port.
+    const certificate = new X509Certificate(readFileSync(claudeInterceptCaCertPath(configDir)));
+    if (!certificate.ca) return Promise.resolve(null);
+    ca = certificate.toString();
+  } catch {
+    return Promise.resolve(null);
+  }
   return new Promise(resolve => {
     let raw = "";
     let settled = false;
+    let socket: ReturnType<typeof connectTls> | undefined;
     const finish = (body: string | null) => {
       if (settled) return;
       settled = true;
-      socket.destroy();
+      socket?.destroy();
       resolve(body);
     };
-    // The leaf names chatgpt.com, not 127.0.0.1; identity is established by the answer, not TLS.
-    const socket = connectTls({ host: "127.0.0.1", port, servername: CHATGPT_INTERCEPT_HOST, rejectUnauthorized: false }, () => {
-      socket.write(`GET ${CHATGPT_UNBLOCK_IDENTITY_PATH} HTTP/1.1\r\nHost: ${CHATGPT_INTERCEPT_HOST}\r\nConnection: close\r\n\r\n`);
-    });
+    try {
+      socket = connectTls({ host: "127.0.0.1", port, servername: CHATGPT_INTERCEPT_HOST, ca, rejectUnauthorized: true }, () => {
+        socket!.write(`GET ${CHATGPT_UNBLOCK_IDENTITY_PATH} HTTP/1.1\r\nHost: ${CHATGPT_INTERCEPT_HOST}\r\nConnection: close\r\n\r\n`);
+      });
+    } catch {
+      finish(null);
+      return;
+    }
     socket.setTimeout(3000, () => finish(null));
     socket.setEncoding("utf8");
     socket.on("data", (chunk: string) => { raw += chunk; });
@@ -615,15 +659,16 @@ function requestIdentity(port: number): Promise<string | null> {
 /**
  * Ask the port who holds it. A plain TCP connect decides "down" -- error codes for a refused
  * connection vary by runtime and network setup -- and only an open port is asked for its
- * identity through the listener's local identity path.
+ * identity through the listener's local identity path, authenticated by the published local CA.
  */
 export async function probeChatgptUnblockListener(
   port: number,
-  request: (port: number) => Promise<string | null> = requestIdentity,
+  request: (port: number, configDir?: string) => Promise<string | null> = requestIdentity,
   portOpen: (port: number) => Promise<boolean> = loopbackPortOpen,
+  configDir = getConfigDir(),
 ): Promise<ChatgptListenerProbe> {
   if (!(await portOpen(port))) return { state: "down" };
-  const text = await request(port);
+  const text = await request(port, configDir);
   if (text === null) return { state: "foreign" };
   try {
     const body = JSON.parse(text) as { service?: unknown; preservedSendBlocks?: unknown };
@@ -641,6 +686,7 @@ function runLaunchScript(
   configDir?: string,
   shimMode = false,
   pac?: { entryPort: number },
+  appPath = CHATGPT_APP_PATH,
 ): { ok: boolean; output: string } {
   if (process.platform !== "darwin") {
     throw new Error("launching the ChatGPT desktop app is only supported on macOS");
@@ -652,7 +698,7 @@ function runLaunchScript(
   delete env.CODEX_CLI_PATH;
   const result = spawnSync("/bin/bash", ["-s", mode], {
     env,
-    input: buildChatgptUnblockWatcherScript(port, configDir, shimMode, pac),
+    input: buildChatgptUnblockWatcherScript(port, configDir, shimMode, pac, { appPath }),
     encoding: "utf8",
   });
   return { ok: result.status === 0, output: `${result.stdout ?? ""}${result.stderr ?? ""}`.trim() };
@@ -664,8 +710,9 @@ export function launchChatgptWithRule(
   configDir?: string,
   shimMode = false,
   pac?: { entryPort: number },
+  appPath = CHATGPT_APP_PATH,
 ): { ok: boolean; output: string } {
-  return runLaunchScript("launch", port, configDir, shimMode, pac);
+  return runLaunchScript("launch", port, configDir, shimMode, pac, appPath);
 }
 
 /** Restart an app that carries the launch switches without them, returning it to native networking. */
@@ -674,6 +721,7 @@ export function restoreChatgptNative(
   configDir?: string,
   shimMode = false,
   pac?: { entryPort: number },
+  appPath = CHATGPT_APP_PATH,
 ): { ok: boolean; output: string } {
-  return runLaunchScript("native", port, configDir, shimMode, pac);
+  return runLaunchScript("native", port, configDir, shimMode, pac, appPath);
 }

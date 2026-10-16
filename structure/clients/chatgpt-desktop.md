@@ -91,7 +91,9 @@ account's credentials and message traffic. Restore leaves the shared CA and
 keychain trust in place.
 
 `src/server/index/chatgpt-unblock-lifecycle.ts` owns the pending startup promise
-and awaited stop. `src/server/index/optional-listeners.ts` starts it without
+and awaited stop. Each lifecycle is single-shot: the first start owns the promise and configuration,
+subsequent starts do nothing, and all stops share one shutdown, including a stop during startup.
+Stopping before startup permanently closes the instance. `src/server/index/optional-listeners.ts` starts it without
 suspending startServer; startup failures warn and keep other services available.
 Shutdown warns when the app still carries the resolver rule for the closed port, or opencodex's PAC
 in PAC-fallback mode.
@@ -123,7 +125,15 @@ retain the shared empty-password compatibility behavior.
 arguments and the optional launchd script. The watcher has no shim mode. Its launchd agent wakes on the app's `SingletonLock` and on the
 `chatgpt-unblock.ready` marker that `startChatgptUnblock` rewrites once the listener is up, so an
 app that opened before opencodex is still routed. Plist freshness compares both watched paths against
-the installed generation; a legacy lock-only plist is stale. Each run checks listener identity, leaves native
+the installed generation; a legacy lock-only plist is stale. Installation records the discovered absolute
+bundle path. Before quit/open, `src/chatgpt/desktop-unblock/bundle-preflight.ts` rechecks that path using
+the shared ownership, ancestor and strict OpenAI-signature policy plus the `com.openai.codex` identifier.
+The generated script re-enters the current source/compiled CLI through a hidden preflight command;
+a missing runtime or failed validation leaves the app untouched. Process matching, AppleScript quit,
+and open all use the recorded bundle path, including paths containing spaces or quotes.
+Each run authenticates the listener against the published local CA and `chatgpt.com` hostname before
+checking its service identity; missing/invalid CA material fails closed without generating or trusting a CA.
+The direct probe pins loopback and bypasses environment proxies. Each run leaves native
 launches alone while the intercept is down, and serializes corrective restarts; an explicit launch
 that meets another run's lock fails with a message instead of reporting success. In watch mode it
 restarts only an app no more than five minutes old (`ps -o etime=`); a missing or unparseable age
@@ -144,7 +154,9 @@ that splices `chatgpt.com:443` onto the TLS listener;
 while the base64 `data:` switch stays within 512 KiB (`system-pac-unreadable`/`-too-large` fall
 back to the proxy chain, then DIRECT, with a startup warning). An entry bind or PAC write failure
 releases both listeners. The script launches with the inline PAC switch alone, requires the entry
-(curl exit 0 or 56) as well as listener identity. After deciding a launch is needed, it prepares
+to complete a real CONNECT and authenticated TLS identity exchange. A mere TCP connection, empty
+response, foreign authority, wrong hostname or curl failure is not readiness. Both curl probes disable
+curlrc overrides, and the CONNECT probe forces its explicit loopback proxy despite NO_PROXY. After deciding a launch is needed, it prepares
 all launch arguments before quitting the app, rejecting missing, unreadable, non-file or empty PAC
 input and failed encoding. The same prepared PAC snapshot is passed to open; a failed preflight
 leaves the running app untouched. `native` mode requires no PAC file and undoes any PAC switch,

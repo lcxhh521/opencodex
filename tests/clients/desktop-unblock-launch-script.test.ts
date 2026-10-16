@@ -102,15 +102,15 @@ while IFS='|' read -r p name command; do
 done < "$STUB_DIR/processes"
 exit 1`);
   // Only the loopback identity path is probed; no external service is contacted.
-  // The PAC entry probe fetches through the entry as an HTTP proxy (-x plus a target URL) and
-  // answers 0 when the entry is up, a connection-level failure when not. Told apart by "$6" = -x.
-  stub("curl", `if [ "$6" = -x ]; then
+  // The PAC probe requires a successful authenticated CONNECT response, not just TCP presence.
+  stub("curl", `[ "$STUB_AFTER_PREFLIGHT_DOWN" = 1 ] && [ -f "$STUB_DIR/preflight-args" ] && exit 7
+case " $* " in *" --proxy "*)
   case "$STUB_ENTRY" in
-    up) exit 0 ;;
+    up) echo '{"service":"opencodex-chatgpt-unblock","preservedSendBlocks":[]}'; exit 0 ;;
     up56) exit 56 ;;
     *) exit 7 ;;
-  esac
-fi
+  esac ;;
+esac
 case "$STUB_LISTENER" in
   ours) echo '{"service":"opencodex-chatgpt-unblock","preservedSendBlocks":[]}' ;;
   foreign) echo '<html>another server</html>' ;;
@@ -121,6 +121,7 @@ esac`);
 exec /usr/bin/base64 "$@"`);
   // Quitting removes the app's main process (helpers exit with it only in reality; irrelevant here).
   stub("osascript", `echo quit >> "$STUB_DIR/calls"
+printf '%s\\n' "$@" > "$STUB_DIR/quit-all-args"
 [ "$STUB_REMOVE_PAC_ON_QUIT" = 1 ] && rm -f "$STUB_PAC_FILE"
 if [ "$STUB_QUIT_IGNORED" != 1 ]; then
   grep -v '|ChatGPT|' "$STUB_DIR/processes" > "$STUB_DIR/processes.tmp"
@@ -129,6 +130,7 @@ fi`);
   // Records what follows --args (what the app itself receives) and, apart, the --env pairs. The
   // pairs are appended to the process line: `ps eww` shows a process's environment after its command.
   stub("open", `echo open >> "$STUB_DIR/calls"
+printf '%s\\n' "$@" > "$STUB_DIR/open-all-args"
 [ "$STUB_OPEN_FAILS" = 1 ] && { echo "stub open: cannot launch" >&2; exit 1; }
 # What open inherits, separate from the --env pairs it is asked to pass on.
 echo "\${CODEX_CLI_PATH-<unset>}" > "$STUB_DIR/open-inherited"
@@ -142,6 +144,8 @@ done
 [ \${#args[@]} -gt 0 ] && printf '%s\\n' "\${args[@]}" > "$STUB_DIR/open-args"
 [ \${#envs[@]} -gt 0 ] && printf '%s\\n' "\${envs[@]}" > "$STUB_DIR/open-env"
 echo "500|ChatGPT|${APP_BINARY} \${args[*]} \${envs[*]}" >> "$STUB_DIR/processes"`);
+  stub("bundle-preflight", `[ "$STUB_BUNDLE_TRUST" != rejected ] || exit 1
+printf '%s\\n' "$@" > "$STUB_DIR/preflight-args"`);
   stub("sleep", ":");
 });
 
@@ -186,6 +190,9 @@ function run(mode: "watch" | "launch" | "native", options: {
   pacFile?: "missing" | "unreadable" | "directory" | "empty";
   pacEncodingFails?: boolean;
   removePacOnQuit?: boolean;
+  appPath?: string;
+  bundleTrust?: "trusted" | "rejected";
+  listenerStopsDuringPreflight?: boolean;
 }) {
   const pacFile = join(options.configDir ?? dir, "chatgpt-unblock.pac");
   if (options.pac === true && options.pacFile !== "missing") {
@@ -195,12 +202,13 @@ function run(mode: "watch" | "launch" | "native", options: {
       if (options.pacFile === "unreadable") chmodSync(pacFile, 0o000);
     }
   }
+  const appBinary = `${options.appPath ?? "/Applications/ChatGPT.app"}/Contents/MacOS/ChatGPT`;
   const processes = [
-    options.app === "plain" ? `400|ChatGPT|${APP_BINARY}` : null,
-    options.app === "flagged" ? `400|ChatGPT|${APP_BINARY} ${RESOLVER} --proxy-bypass-list=chatgpt.com` : null,
-    options.app === "pac" ? `400|ChatGPT|${APP_BINARY} ${PAC_SWITCH}` : null,
-    options.app === "flagged-shim" ? `400|ChatGPT|${APP_BINARY} ${RESOLVER} --proxy-bypass-list=chatgpt.com CODEX_CLI_PATH=${SHIM_PATH()}` : null,
-    options.app === "shim-only" ? `400|ChatGPT|${APP_BINARY} CODEX_CLI_PATH=${SHIM_PATH()}` : null,
+    options.app === "plain" ? `400|ChatGPT|${appBinary}` : null,
+    options.app === "flagged" ? `400|ChatGPT|${appBinary} ${RESOLVER} --proxy-bypass-list=chatgpt.com` : null,
+    options.app === "pac" ? `400|ChatGPT|${appBinary} ${PAC_SWITCH}` : null,
+    options.app === "flagged-shim" ? `400|ChatGPT|${appBinary} ${RESOLVER} --proxy-bypass-list=chatgpt.com CODEX_CLI_PATH=${SHIM_PATH()}` : null,
+    options.app === "shim-only" ? `400|ChatGPT|${appBinary} CODEX_CLI_PATH=${SHIM_PATH()}` : null,
     // Helpers share the bundle but not the process name; they must never count as the app.
     options.app !== "none" ? `401|ChatGPT Helper|/Applications/ChatGPT.app/Contents/Frameworks/ChatGPT Helper.app/Contents/MacOS/ChatGPT Helper --type=utility ${RESOLVER}` : null,
     options.decoy ? `300|zsh|${DECOY}` : null,
@@ -216,6 +224,7 @@ function run(mode: "watch" | "launch" | "native", options: {
     options.configDir ?? dir,
     options.shim === true,
     options.pac === true ? { entryPort: options.entryPort ?? 10301 } : undefined,
+    { appPath: options.appPath ?? "/Applications/ChatGPT.app", preflightArgv: [join(stubs, "bundle-preflight")] },
   ));
   const result = spawnSync("/bin/bash", [script, mode], {
     encoding: "utf8",
@@ -223,6 +232,8 @@ function run(mode: "watch" | "launch" | "native", options: {
       PATH: `${stubs}:/usr/bin:/bin`,
       TMPDIR: join(dir, "tmp"),
       STUB_DIR: dir,
+      STUB_BUNDLE_TRUST: options.bundleTrust ?? "trusted",
+      STUB_AFTER_PREFLIGHT_DOWN: options.listenerStopsDuringPreflight ? "1" : "0",
       STUB_LISTENER: options.listener ?? "ours",
       STUB_QUIT_IGNORED: options.quitIgnored ? "1" : "0",
       STUB_OPEN_FAILS: options.openFails ? "1" : "0",
@@ -242,6 +253,9 @@ function run(mode: "watch" | "launch" | "native", options: {
     stderr: result.stderr,
     calls: read("calls").split("\n").filter(Boolean),
     openArgs: read("open-args").split("\n").filter(Boolean),
+    openAllArgs: read("open-all-args").split("\n").filter(Boolean),
+    quitAllArgs: read("quit-all-args").split("\n").filter(Boolean),
+    preflightArgs: read("preflight-args").split("\n").filter(Boolean),
     openEnv: read("open-env").split("\n").filter(Boolean),
     openInherited: read("open-inherited").trim(),
     log: read("chatgpt-unblock-watcher.log"),
@@ -657,10 +671,10 @@ describe.skipIf(process.platform === "win32")("chatgpt launch in PAC-fallback mo
     expect(r.calls).toEqual([]);
   });
 
-  test("the entry probe accepts curl exit 56 (connected, empty answer) as up", () => {
-    const r = run("launch", { app: "none", pac: true, entry: "up56" });
-    expect(r.status).toBe(0);
-    expect(r.openArgs).toEqual([PAC_SWITCH]);
+  test("the entry probe rejects curl exit 56 (connected, empty answer)", () => {
+    const r = run("launch", { app: "plain", pac: true, entry: "up56" });
+    expect(r.status).toBe(1);
+    expect(r.calls).toEqual([]);
   });
 
   test("the shim composes with PAC-fallback mode", () => {
@@ -699,4 +713,38 @@ describe.skipIf(process.platform === "win32")("generated watcher script syntax",
       }
     }
   });
+});
+
+
+describe.skipIf(process.platform === "win32")("verified watcher bundle", () => {
+  for (const mode of ["watch", "launch", "native"] as const) {
+    test(`${mode} leaves a running untrusted bundle untouched`, () => {
+      const r = run(mode, { app: mode === "native" ? "flagged" : "plain", bundleTrust: "rejected" });
+      expect(r.status).toBe(1);
+      expect(r.calls).toEqual([]);
+      expect(r.processes).toContain("400|ChatGPT|");
+    });
+    test(`${mode} quits and opens the same verified absolute bundle path`, () => {
+      const appPath = "/Applications/Other installs/it's \"Codex\".app";
+      const r = run(mode, { app: mode === "native" ? "flagged" : "plain", appPath });
+      expect(r.status).toBe(0);
+      expect(r.calls).toEqual(["quit", "open"]);
+      expect(r.openAllArgs.slice(0, 2)).toEqual(["-a", appPath]);
+      expect(r.quitAllArgs.at(-1)).toBe(appPath);
+      expect(r.preflightArgs).toEqual([appPath]);
+    });
+  }
+});
+
+
+describe.skipIf(process.platform === "win32")("readiness after bundle preflight", () => {
+  for (const pac of [false, true]) {
+    test(`listener stopping during preflight leaves the running app untouched (PAC=${pac})`, () => {
+      const r = run("launch", { app: "plain", pac, listenerStopsDuringPreflight: true });
+      expect(r.status).toBe(1);
+      expect(r.calls).toEqual([]);
+      expect(r.processes).toContain("400|ChatGPT|");
+      expect(r.log).toContain("readiness changed during preflight");
+    });
+  }
 });

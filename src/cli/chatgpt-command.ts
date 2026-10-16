@@ -168,7 +168,7 @@ launcher: ${existsSync(launcher) ? "present" : "absent"}
 app: ${install === undefined ? "unknown (app discovery failed)" : install ? (app.running === null ? "unknown (process inspection failed)" : app.running ? "running" : "not running") : "not installed"}
 CODEX_CLI_PATH launcher: ${app.shim === null ? "unknown" : app.shim ? "yes" : "no"}`);
       try {
-        await printInterceptStatus(config, resolveChatgptUnblockPort(config, live?.port), live?.port);
+        await printInterceptStatus(config, resolveChatgptUnblockPort(config, live?.port), live?.port, install?.root);
       } catch (error) {
         console.log(`Intercept status unavailable: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -179,13 +179,17 @@ CODEX_CLI_PATH launcher: ${app.shim === null ? "unknown" : app.shim ? "yes" : "n
         console.error("Enable chatgptDesktop.unblockSend in a server config before installing the watcher.");
         return 1;
       }
+      if (!install) {
+        console.error("ChatGPT bundle discovery failed or no app was found; no watcher was changed.");
+        return 1;
+      }
       console.log(WATCHER_CONSENT);
       if (!args.includes("--yes") && (!process.stdin.isTTY
         || !(await interactiveConfirm({ question: "Install the experimental intercept watcher?", defaultYes: false })))) {
         console.error("Watcher not installed; re-run with --yes to confirm.");
         return 1;
       }
-      installChatgptUnblockWatcher({ port: port!, ...(pac ? { entryPort: pac.entryPort } : {}) });
+      installChatgptUnblockWatcher({ port: port!, appPath: install.root, ...(pac ? { entryPort: pac.entryPort } : {}) });
       console.log(`Experimental intercept launch watcher installed for port ${port}${pac ? ` (PAC fallback, entry port ${pac.entryPort})` : ""}.`);
       return 0;
     }
@@ -242,7 +246,7 @@ CODEX_CLI_PATH launcher: ${app.shim === null ? "unknown" : app.shim ? "yes" : "n
     if (binary) writeChatgptShimLauncher(undefined, binary);
     if (sub === "launch" && intercept) {
       // The intercept script owns the restart under its lock so the watcher cannot race it.
-      const result = launchChatgptWithRule(port!, undefined, shim, pac);
+      const result = launchChatgptWithRule(port!, undefined, shim, pac, install.root);
       if (result.output) (result.ok ? console.log : console.error)(result.output);
       return result.ok ? 0 : 1;
     }
@@ -267,11 +271,11 @@ CODEX_CLI_PATH launcher: ${app.shim === null ? "unknown" : app.shim ? "yes" : "n
   }
 }
 
-async function printInterceptStatus(config: OcxConfig, port: number, livePort?: number): Promise<void> {
+async function printInterceptStatus(config: OcxConfig, port: number, livePort?: number, appPath?: string): Promise<void> {
   const configDir = getConfigDir();
   const pac = resolveChatgptPacEntry(config, livePort);
   const listener = await probeChatgptUnblockListener(port);
-  const watcher = chatgptUnblockWatcherStatus(port, undefined, false, pac);
+  const watcher = chatgptUnblockWatcherStatus(port, undefined, false, pac, appPath);
   const app = chatgptAppCommandLine();
   const flagged = app !== null && (pac ? chatgptCommandLineHasPac(app, configDir) : chatgptCommandLineHasRule(app, port));
   const caPath = claudeInterceptCaCertPath(configDir);

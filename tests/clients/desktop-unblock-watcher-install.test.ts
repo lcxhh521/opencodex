@@ -14,7 +14,7 @@ import {
   type LaunchctlRunner,
 } from "../../src/chatgpt/desktop-unblock/launch-watcher";
 import { CHATGPT_UNBLOCK_SERVICE_ID, startChatgptUnblockListener } from "../../src/chatgpt/desktop-unblock/listener";
-import { createLocalInterceptCa, issueLocalInterceptLeaf } from "../../src/claude/intercept/local-ca";
+import { ensureLocalInterceptCa, issueLocalInterceptLeaf } from "../../src/claude/intercept/local-ca";
 
 let dir: string;
 let plistPath: string;
@@ -196,12 +196,12 @@ describe("chatgpt listener probe", () => {
 
   test("a real listener is recognised even with a proxy in the environment", async () => {
     // Bun's fetch would send this loopback request to HTTPS_PROXY; the probe must not.
-    const listener = startChatgptUnblockListener({ leaf: issueLocalInterceptLeaf(createLocalInterceptCa(), ["chatgpt.com"]) });
+    const listener = startChatgptUnblockListener({ leaf: issueLocalInterceptLeaf(ensureLocalInterceptCa(dir), ["chatgpt.com"]) });
     const saved = { HTTPS_PROXY: process.env.HTTPS_PROXY, HTTP_PROXY: process.env.HTTP_PROXY };
     process.env.HTTPS_PROXY = "http://127.0.0.1:9";
     process.env.HTTP_PROXY = "http://127.0.0.1:9";
     try {
-      const probe = await probeChatgptUnblockListener(listener.port!);
+      const probe = await probeChatgptUnblockListener(listener.port!, undefined, undefined, dir);
       expect(probe).toEqual({ state: "ours", preservedSendBlocks: [] });
     } finally {
       for (const [key, value] of Object.entries(saved)) {

@@ -6,7 +6,9 @@ import type { ChatgptUnblockHandle, StartChatgptUnblockOptions } from "../../cha
  * Owns the ChatGPT desktop send-unblock listener on behalf of `startServer`. The listener is
  * an optional integration: a bind failure degrades to a warning, never to a startup failure,
  * because every other duty keeps working without it. `startServer` stays synchronous, so the
- * start is fire-and-forget and `stop()` awaits whatever it produced.
+ * start is fire-and-forget and `stop()` awaits whatever it produced. Each instance is
+ * single-shot: the first start owns its configuration and promise, later starts are no-ops,
+ * and stopping (even before starting) permanently closes it. Repeated stops join one shutdown.
  *
  * The intercept modules (TLS listener, local CA, WebSocket relay, launch watcher) load only when
  * the feature is enabled. A default install starts the server without evaluating any of them,
@@ -28,13 +30,16 @@ function unblockRequested(config: Pick<OcxConfig, "chatgptDesktop" | "runtimeRol
 
 export function createChatgptUnblockLifecycle<T>(): ChatgptUnblockLifecycle {
   let pending: Promise<ChatgptUnblockHandle<T> | null> = Promise.resolve(null);
+  let started = false;
+  let stopping: Promise<void> | undefined;
   let pacMode = false;
   return {
     start(options) {
-      if (!unblockRequested(options.config)) {
-        pending = Promise.resolve(null);
-        return;
-      }
+      // Latch before the feature gate: a disabled or concurrent start must not replace
+      // the promise whose eventual listener this instance is responsible for stopping.
+      if (started || stopping) return;
+      started = true;
+      if (!unblockRequested(options.config)) return;
       // Mirrors `chatgptPacFallbackEnabled`, which implies the request checked above.
       pacMode = options.config.chatgptDesktop?.pacFallback === true;
       pending = import("../../chatgpt/desktop-unblock/runtime")
@@ -61,11 +66,12 @@ export function createChatgptUnblockLifecycle<T>(): ChatgptUnblockLifecycle {
           return null;
         });
     },
-    async stop() {
-      const handle = await pending;
-      if (!handle) return;
-      await handle.stop();
-      await warnIfAppStillRouted(handle.port, pacMode);
+    stop() {
+      return stopping ??= pending.then(async handle => {
+        if (!handle) return;
+        await handle.stop();
+        await warnIfAppStillRouted(handle.port, pacMode);
+      });
     },
   };
 }

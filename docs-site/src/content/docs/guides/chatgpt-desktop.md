@@ -182,7 +182,9 @@ PAC instead of the resolver rule.
 
 If both flags are true, `ocx chatgpt launch` applies the existing app-server shim
 and the intercept together. The shim alone still works without a running proxy.
-The intercept requires OpenCodex's identity-confirmed listener. When OpenCodex
+The intercept requires a listener authenticated by the published local CA and the `chatgpt.com` hostname,
+then confirmed by its service identity. Missing or invalid CA files leave the app untouched; these
+checks do not install keychain trust. When OpenCodex
 stops, an app still carrying the resolver rule cannot reach `chatgpt.com`; run
 `ocx chatgpt restore` to relaunch with native networking, or use PAC fallback.
 
@@ -252,8 +254,13 @@ counts as fresh, and explicit `ocx chatgpt launch` is not age-limited. This can 
 startup work; it does nothing while the listener is unavailable. It manages
 **intercept launches only**; use explicit launch for the app-server shim. A loaded
 watcher must be uninstalled before `restore`, so it cannot put the switches back.
-In PAC-fallback mode the watcher also waits for the CONNECT entry and launches
-with the PAC switch instead of the resolver rule.
+The watcher records the absolute bundle path discovered at installation. Before each restart,
+it rechecks the bundle identifier, ownership, parent permissions and OpenAI signature, then quits
+and opens that same path. If the bundle or OpenCodex runtime moved, reinstall the watcher; a failed
+check leaves the running app untouched.
+In PAC-fallback mode the watcher also verifies a complete CONNECT and CA-authenticated identity
+exchange through the entry, and launches with the PAC switch instead of the resolver rule. A foreign
+listener or an entry that only accepts TCP is not considered ready.
 
 ### Evidence and decision limits
 
