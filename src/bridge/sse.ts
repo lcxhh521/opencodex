@@ -1,6 +1,7 @@
 import { anthropicProgressItems } from "../responses/anthropic-progress";
 import type {
   AdapterEvent,
+  AnthropicServerBlocks,
   OcxMessagePhase,
   OcxProviderContinuationState,
   OcxProviderOpaqueToolCallMetadata,
@@ -90,6 +91,7 @@ export function bridgeToResponsesSSE(
      * response.completed — codex-rs collect_compaction_output requires exactly one.
      */
     compaction?: boolean;
+    compactionRetention?: { encode(summary: string): string; commit(): void };
     /** One-shot: first non-empty text/thinking/raw-reasoning/tool-input delta observed. */
     onFirstOutput?: () => void;
     onTerminal?: (status: ResponsesTerminalStatus) => void;
@@ -684,12 +686,15 @@ export function bridgeToResponsesSSE(
       // leaves a "Searching the web" spinner spinning forever.
       // `sources` rides on the done item (additive field; codex-rs serde ignores unknown fields) so
       // downstream translators (claude outbound) can fill web_search_tool_result content.
-      const closeCurrentWebSearch = (status: "completed" | "failed", queries: string[], sources?: { url: string; title?: string }[]) => {
+      // `anthropic` (Anthropic's server-side call) rides verbatim as `anthropic_blocks`, for the same
+      // claude outbound translator; a web_fetch makes the cell a page open.
+      const closeCurrentWebSearch = (status: "completed" | "failed", queries: string[], sources?: { url: string; title?: string }[], anthropic?: AnthropicServerBlocks) => {
         if (!currentWebSearch) return;
         const item = {
           type: "web_search_call", id: currentWebSearch.itemId, status,
-          action: webSearchAction(queries),
+          action: webSearchAction(queries, anthropic),
           ...(sources && sources.length > 0 ? { sources } : {}),
+          ...(anthropic ? { anthropic_blocks: anthropic } : {}),
         };
         emit("response.output_item.done", { output_index: currentWebSearch.outputIndex, item });
         retainFinishedItem(item as OutputItem);
@@ -1227,7 +1232,7 @@ export function bridgeToResponsesSSE(
                 currentWebSearch = { itemId: wsItemId2, eventId: event.id, outputIndex };
               }
               const safeSources = safeWebSearchSources(event.sources);
-              closeCurrentWebSearch(event.status ?? "completed", event.queries, safeSources);
+              closeCurrentWebSearch(event.status ?? "completed", event.queries, safeSources, event.anthropic);
               // Queue this search's sources for the next assistant message (dedup by URL).
               if (safeSources.length > 0) {
                 for (const source of safeSources) {
@@ -1265,7 +1270,7 @@ export function bridgeToResponsesSSE(
                 // Exactly one compaction item per turn; codex-rs takes the first and fatals on 0.
                 const item = {
                   type: "compaction", id: `cmp_${uuid()}`,
-                  encrypted_content: event.compactionEncryptedContent ?? encodeCompactionSummary(joinChunks(compaction)),
+                  encrypted_content: event.compactionEncryptedContent ?? (options?.compactionRetention?.encode(joinChunks(compaction)) ?? encodeCompactionSummary(joinChunks(compaction))),
                 };
                 emit("response.output_item.done", { output_index: outputIndex, item });
                 retainFinishedItem(item as OutputItem, event.compactionEncryptedContent ? 0 : compaction.bytes);
@@ -1303,6 +1308,7 @@ export function bridgeToResponsesSSE(
                 emit("response.completed", {
                   response,
                 });
+                if (!closed && !terminated && options?.compaction && !event.compactionEncryptedContent) options.compactionRetention?.commit();
                 reportTerminal("completed");
               }
               terminalEvent = true;
