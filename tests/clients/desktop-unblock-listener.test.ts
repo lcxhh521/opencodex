@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   CHATGPT_UNBLOCK_IDENTITY_PATH,
   MAX_REWRITE_BODY_BYTES,
+  MAX_REWRITE_SSE_LINE_CHARS,
   CHATGPT_UNBLOCK_SERVICE_ID,
   ChatgptUnblockDiagnostics,
   relayWithSendUnblock,
@@ -122,6 +123,33 @@ describe("chatgpt unblock SSE rewriting", () => {
   // A window at 100% is the plain-quota evidence the gate rewrite requires before it opens the flags.
   const locked = JSON.stringify({ usage: { rate_limit: { allowed: false, limit_reached: true, primary_window: { used_percent: 100 } } } });
   const opened = JSON.stringify({ usage: { rate_limit: { allowed: true, limit_reached: false, primary_window: { used_percent: 100 } } } });
+
+  test("oversized SSE lines stream unchanged before newline and later lines still rewrite", async () => {
+    const transform = sseRewriteStream({ surface: "usage" });
+    const writer = transform.writable.getWriter(), reader = transform.readable.getReader();
+    const chunk = new TextEncoder().encode("data: " + "x".repeat(MAX_REWRITE_SSE_LINE_CHARS));
+    const write = writer.write(chunk);
+    const first = await reader.read();
+    expect(first.done).toBe(false);
+    expect(first.value).toEqual(chunk);
+    await write;
+    const tail = `more\r\ndata: ${locked}\n\n`;
+    const remainder = new Response(new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        const next = await reader.read();
+        if (next.done) controller.close(); else controller.enqueue(next.value);
+      },
+    })).text();
+    await writer.write(new TextEncoder().encode(tail));
+    await writer.close();
+    expect(await remainder).toBe(`more\r\ndata: ${opened}\n\n`);
+  });
+
+  test("an oversized unterminated SSE line remains byte-complete on close", async () => {
+    const text = "data: " + "x".repeat(MAX_REWRITE_SSE_LINE_CHARS + 1);
+    const source = new Response(text).body!;
+    expect(await collect(source.pipeThrough(sseRewriteStream({ surface: "usage" })))).toBe(text);
+  });
 
   test("a data line split across chunks is rewritten once and every other byte survives", async () => {
     const frame = `event: snapshot\ndata: ${locked}\n\n: keep-alive\n\n`;

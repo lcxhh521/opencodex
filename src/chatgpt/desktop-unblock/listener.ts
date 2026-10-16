@@ -88,9 +88,12 @@ function responseHeaders(source: Response): Headers {
   return headers;
 }
 
+/** Maximum buffered SSE line length; larger lines stream unchanged until their newline. */
+export const MAX_REWRITE_SSE_LINE_CHARS = 8 * 1024 * 1024;
+
 /**
  * Line-oriented SSE rewriter. Complete lines are checked one at a time so an untouched stream
- * keeps its exact chunking and line endings; only `data:` lines whose JSON loses an entry are
+ * preserves its content and line endings; only bounded `data:` lines whose JSON loses an entry are
  * re-serialized.
  */
 export function sseRewriteStream(options: {
@@ -106,18 +109,36 @@ export function sseRewriteStream(options: {
     options.diagnostics?.record(preserved);
     return rewritten;
   };
-  return new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      pending += decoder.decode(chunk, { stream: true });
-      let index: number;
-      while ((index = pending.indexOf("\n")) !== -1) {
-        const line = pending.slice(0, index);
-        pending = pending.slice(index + 1);
-        const rewritten = rewriteLine(line);
-        controller.enqueue(encoder.encode(`${rewritten ?? line}\n`));
+  let passthrough = false;
+  const accept = (text: string, controller: TransformStreamDefaultController<Uint8Array>) => {
+    let offset = 0;
+    while (offset < text.length) {
+      const newline = text.indexOf("\n", offset);
+      const end = newline === -1 ? text.length : newline;
+      const part = text.slice(offset, end);
+      if (!passthrough && pending.length + part.length > MAX_REWRITE_SSE_LINE_CHARS) {
+        if (pending) controller.enqueue(encoder.encode(pending));
+        pending = "";
+        passthrough = true;
       }
-    },
+      if (passthrough) {
+        if (part) controller.enqueue(encoder.encode(part));
+        if (newline !== -1) { controller.enqueue(encoder.encode("\n")); passthrough = false; }
+      } else {
+        pending += part;
+        if (newline !== -1) {
+          const rewritten = rewriteLine(pending);
+          controller.enqueue(encoder.encode(`${rewritten ?? pending}\n`));
+          pending = "";
+        }
+      }
+      offset = newline === -1 ? text.length : newline + 1;
+    }
+  };
+  return new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) { accept(decoder.decode(chunk, { stream: true }), controller); },
     flush(controller) {
+      accept(decoder.decode(), controller);
       if (pending.length === 0) return;
       const rewritten = rewriteLine(pending);
       controller.enqueue(encoder.encode(rewritten ?? pending));

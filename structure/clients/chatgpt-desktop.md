@@ -115,7 +115,8 @@ reasons and exhausted send progress entries are removed; unknown non-quota block
 remain. Usage gate rewriting imports the existing app-server shim gate owner
 instead of maintaining a duplicate. Display data remains unchanged. JSON bodies
 above the bounded rewrite ceiling stream through. SSE lines preserve untouched
-framing. A local identity endpoint reports preserved block names/reasons and
+framing; lines over 8 Mi UTF-16 code units stream unchanged without further buffering or JSON
+rewriting until their newline, after which normal rewriting resumes. A local identity endpoint reports preserved block names/reasons and
 timestamps; request bodies and credentials are not logged.
 
 `src/chatgpt/desktop-unblock/ws-relay.ts`, `ws-frame.ts` and `ws-upstream.ts`
