@@ -16,8 +16,9 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
-import { get as httpGet } from "node:http";
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
+import { get as httpGet, type ClientRequest } from "node:http";
 import { get as httpsGet } from "node:https";
 import { isIP } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -106,29 +107,54 @@ function fetchPacText(url: URL): Promise<string | null> {
   // server (the usual VPN-client setup) must be reached directly, the way Chromium reaches it.
   const get = url.protocol === "https:" ? httpsGet : httpGet;
   return new Promise(resolve => {
-    const request = get(url, { timeout: SYSTEM_PAC_TIMEOUT_MS }, response => {
-      if (response.statusCode !== 200) {
-        response.resume();
-        resolve(null);
-        return;
-      }
-      const chunks: Buffer[] = [];
-      let size = 0;
-      response.on("data", (chunk: Buffer) => {
-        size += chunk.length;
-        if (size > MAX_SYSTEM_PAC_BYTES) {
-          request.destroy();
-          resolve(null);
-          return;
-        }
-        chunks.push(chunk);
+    let request: ClientRequest | undefined;
+    let settled = false;
+    const finish = (text: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (text === null) request?.destroy();
+      resolve(text);
+    };
+    // A socket inactivity timeout alone lets a slow stream keep startup pending indefinitely.
+    const deadline = setTimeout(() => finish(null), SYSTEM_PAC_TIMEOUT_MS);
+    try {
+      request = get(url, { timeout: SYSTEM_PAC_TIMEOUT_MS }, response => {
+        if (response.statusCode !== 200) { finish(null); return; }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        response.on("data", (chunk: Buffer) => {
+          if (settled) return;
+          size += chunk.length;
+          if (size > MAX_SYSTEM_PAC_BYTES) { finish(null); return; }
+          chunks.push(chunk);
+        });
+        response.on("end", () => { if (!settled) finish(Buffer.concat(chunks).toString("utf8")); });
+        response.on("error", () => finish(null));
+        response.on("aborted", () => finish(null));
       });
-      response.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-      response.on("error", () => resolve(null));
-    });
-    request.on("timeout", () => request.destroy());
-    request.on("error", () => resolve(null));
+      request.on("timeout", () => finish(null));
+      request.on("error", () => finish(null));
+    } catch { finish(null); }
   });
+}
+
+async function readPacText(path: string): Promise<string | null> {
+  // Keep symlinked PACs working, but do not block opening a FIFO before the regular-file check.
+  const file = await open(path, constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NONBLOCK));
+  try {
+    const info = await file.stat();
+    if (!info.isFile() || info.size > MAX_SYSTEM_PAC_BYTES) return null;
+    // Read through one descriptor, with an extra byte to detect growth after stat without truncation.
+    const bytes = Buffer.alloc(MAX_SYSTEM_PAC_BYTES + 1);
+    let used = 0;
+    while (used < bytes.length) {
+      const { bytesRead } = await file.read(bytes, used, Math.min(64 * 1024, bytes.length - used), null);
+      if (bytesRead === 0) break;
+      used += bytesRead;
+    }
+    return used > MAX_SYSTEM_PAC_BYTES ? null : bytes.subarray(0, used).toString("utf8");
+  } finally { await file.close(); }
 }
 
 /**
@@ -145,9 +171,7 @@ export async function loadSystemPac(rawUrl: string): Promise<string | null> {
   let text: string | null = null;
   try {
     if (url.protocol === "file:") {
-      const path = fileURLToPath(url);
-      const info = await stat(path);
-      if (info.isFile() && info.size <= MAX_SYSTEM_PAC_BYTES) text = await readFile(path, "utf8");
+      text = await readPacText(fileURLToPath(url));
     } else if (url.protocol === "http:" || url.protocol === "https:") {
       text = await fetchPacText(url);
     }

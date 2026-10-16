@@ -156,7 +156,9 @@ PAC fallback (`chatgptDesktop.pacFallback`, effective only when `unblockSend` is
 the app keeps a route while opencodex is down. `src/chatgpt/desktop-unblock/entry-proxy.ts` binds a
 CONNECT entry normally on the listener port + 1 (65534 when the listener port is 65535)
 that splices `chatgpt.com:443` onto the TLS listener;
-`pac.ts` reads the scutil proxy chain and any system PAC; `runtime.ts` rewrites
+`pac.ts` reads the scutil proxy chain and any system PAC. Downloads have a 3-second total deadline;
+file reads use one regular-file descriptor and consume at most 4 MiB + 1 byte to detect oversize,
+including growth during reading. Read failures close the request or descriptor. `runtime.ts` rewrites
 `chatgpt-unblock.pac` at every start, before the readiness marker, embedding the system PAC only
 while the base64 `data:` switch stays within 512 KiB. An unreadable system proxy configuration,
 unreadable/oversized system PAC, entry bind or PAC write failure releases both listeners and fails

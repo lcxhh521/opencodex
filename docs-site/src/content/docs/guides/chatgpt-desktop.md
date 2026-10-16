@@ -234,7 +234,8 @@ requests fail instead of silently connecting directly. Embedded system PACs reta
 Chromium’s non-mandatory PAC behavior: invalid results or execution failures can
 still fall back directly. Do not use that mode when a fail-closed system-PAC policy is required. The route is captured when
 OpenCodex starts: after changing the VPN mode, restart OpenCodex and run
-`ocx chatgpt launch`. If a system PAC is set but cannot be read at that moment, or
+`ocx chatgpt launch`. PAC downloads must finish within 3 seconds; downloads and local file
+reads are capped at 4 MiB. If a system PAC is set but cannot be read at that moment, or
 is too large to pass to the app (the PAC travels inside one launch argument,
 limited to 512 KiB once encoded), the optional intercept does not start. An unreadable
 system proxy configuration or automatic proxy discovery also prevents PAC-mode startup; fix it and restart OpenCodex. After turning `pacFallback` on

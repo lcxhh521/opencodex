@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -226,6 +227,112 @@ describe("chatgpt unblock system PAC loading", () => {
         else process.env[key] = value;
       }
     }
+  });
+
+  test("a continuously streaming PAC download still has a total deadline and closes its socket", async () => {
+    let closed = false;
+    const slow = createServer((_request, response) => {
+      response.writeHead(200);
+      response.write(PAC);
+      const drip = setInterval(() => response.write(" "), 50);
+      const finish = setTimeout(() => response.end(), 5_000);
+      response.on("close", () => { closed = true; clearInterval(drip); clearTimeout(finish); });
+    });
+    await new Promise<void>(resolve => slow.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = slow.address();
+      if (!address || typeof address === "string") throw new Error("Missing fixture port");
+      expect(await loadSystemPac(`http://127.0.0.1:${address.port}/proxy.pac`)).toBeNull();
+      for (let i = 0; i < 100 && !closed; i++) await Bun.sleep(10);
+      expect(closed).toBe(true);
+    } finally { slow.closeAllConnections(); await new Promise<void>(resolve => slow.close(() => resolve())); }
+  }, 8_000);
+
+  test("non-success and oversized downloads close their response sockets immediately", async () => {
+    for (const status of [404, 200]) {
+      let closed = false;
+      const rejected = createServer((_request, response) => {
+        response.writeHead(status);
+        response.write(status === 404 ? "missing" : "x".repeat(4 * 1024 * 1024 + 1));
+        response.on("close", () => { closed = true; });
+      });
+      await new Promise<void>(resolve => rejected.listen(0, "127.0.0.1", resolve));
+      try {
+        const address = rejected.address();
+        if (!address || typeof address === "string") throw new Error("Missing fixture port");
+        expect(await loadSystemPac(`http://127.0.0.1:${address.port}/proxy.pac`)).toBeNull();
+        for (let i = 0; i < 100 && !closed; i++) await Bun.sleep(10);
+        expect(closed).toBe(true);
+      } finally { rejected.closeAllConnections(); await new Promise<void>(resolve => rejected.close(() => resolve())); }
+    }
+  });
+
+  test.skipIf(process.platform === "win32")("a FIFO is rejected without waiting for a writer", () => {
+    const path = join(dir, "pipe.pac");
+    expect(spawnSync("mkfifo", [path]).status).toBe(0);
+    const source = `
+      import assert from "node:assert/strict";
+      import { loadSystemPac } from ${JSON.stringify(repoPath("src", "chatgpt", "desktop-unblock", "pac.ts"))};
+      assert.equal(await loadSystemPac(${JSON.stringify(pathToFileURL(path).href)}), null);
+    `;
+    const result = spawnSync(process.execPath, ["-e", source], { encoding: "utf8", timeout: 2_000 });
+    expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: "" });
+  });
+
+  for (const change of ["grow", "replace", "short-read", "read-error"] as const) {
+    test(`PAC descriptor reads handle ${change} without unbounded reads or leaked handles`, () => {
+      // Isolate filesystem spies so other importers and parallel tests retain real filesystem APIs.
+      const source = `
+        import assert from "node:assert/strict";
+        import fs from "node:fs/promises";
+        import { appendFileSync, renameSync, writeFileSync } from "node:fs";
+        import { mock, spyOn } from "bun:test";
+        const path = ${JSON.stringify(join(dir, `race-${change}.pac`))};
+        const pac = ${JSON.stringify(PAC)};
+        const limit = 4 * 1024 * 1024;
+        writeFileSync(path, pac);
+        let changed = false, readBytes = 0, unboundedReads = 0, closes = 0;
+        function changeFile() {
+          if (changed) return;
+          changed = true;
+          if (${JSON.stringify(change)} === "grow") appendFileSync(path, "x".repeat(limit + 1));
+          else if (${JSON.stringify(change)} === "replace") { renameSync(path, path + ".old"); writeFileSync(path, 'function FindProxyForURL() { return "DIRECT"; }'); }
+        }
+        const stat = fs.stat.bind(fs), open = fs.open.bind(fs), readFile = fs.readFile.bind(fs);
+        mock.module("node:fs/promises", () => ({ ...fs,
+          stat: async (...args) => { const info = await stat(...args); changeFile(); return info; },
+          readFile: async (...args) => { unboundedReads++; return readFile(...args); },
+          open: async (...args) => {
+          const file = await open(...args), stat = file.stat.bind(file), read = file.read.bind(file), close = file.close.bind(file);
+          spyOn(file, "stat").mockImplementation(async (...args) => { const info = await stat(...args); changeFile(); return info; });
+          spyOn(file, "read").mockImplementation(async (...args) => {
+            if (${JSON.stringify(change)} === "read-error") throw new Error("fixture read failure");
+            if (${JSON.stringify(change)} === "short-read") args[2] = Math.min(args[2], 7);
+            const result = await read(...args); readBytes += result.bytesRead; return result;
+          });
+          spyOn(file, "close").mockImplementation(async () => { closes++; return close(); });
+          return file;
+        }}));
+        const { loadSystemPac } = await import(${JSON.stringify(repoPath("src", "chatgpt", "desktop-unblock", "pac.ts"))});
+        const result = await loadSystemPac(${JSON.stringify(pathToFileURL(join(dir, `race-${change}.pac`)).href)});
+        assert.equal(changed, true);
+        assert.equal(result, ["grow", "read-error"].includes(${JSON.stringify(change)}) ? null : pac);
+        assert.equal(unboundedReads, 0);
+        assert.ok(readBytes <= limit + 1);
+        assert.equal(closes, 1);
+      `;
+      const result = spawnSync(process.execPath, ["-e", source], { encoding: "utf8", timeout: 10_000 });
+      expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: "" });
+    });
+  }
+
+  test("the exact file byte limit is accepted and one byte more is rejected", async () => {
+    const path = join(dir, "boundary.pac");
+    const text = PAC.padEnd(4 * 1024 * 1024, " ");
+    writeFileSync(path, text);
+    expect(await loadSystemPac(pathToFileURL(path).href)).toBe(text);
+    writeFileSync(path, text + " ");
+    expect(await loadSystemPac(pathToFileURL(path).href)).toBeNull();
   });
 
   test("unreadable, non-PAC, oversized or unsupported sources give null", async () => {
