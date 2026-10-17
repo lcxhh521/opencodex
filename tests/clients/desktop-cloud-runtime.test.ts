@@ -105,6 +105,98 @@ describe.skipIf(process.platform === "win32")("formal mapping helper in isolated
 });
 
 describe("server-owned cloud lifecycle", () => {
+  for (const reason of ["mapping_edited", "resolver_flush_failed", "mapping_journal_invalid", "mapping_io_failed", "helper_disconnected"]) {
+    test(`startup recovery failure ${reason} remains pending when disabling without a handle`, async () => {
+      const saved = config(true);
+      let recoveryFails = true, starts = 0;
+      const recover = mock(async () => { if (recoveryFails) throw new CloudNetworkError(reason); });
+      const lifecycle = createChatgptCloudNetworkLifecycle({ platform: "darwin", warn: () => {}, recover,
+        start: async () => {
+          if (++starts > 1) throw new CloudNetworkError("cloud_proxy_missing");
+          throw reason === "helper_disconnected" ? new CloudNetworkError(reason)
+            : CloudNetworkError.fromReply({ protocol: 1, ok: false, state: "recovery_required", error: reason }, "mapping_failed");
+        } });
+      lifecycle.start(saved); await lifecycle.settled();
+      expect(lifecycle.status()).toMatchObject({ configured: true, state: "unavailable", reason });
+      if (reason === "helper_disconnected") {
+        await lifecycle.configure(true, () => {});
+        expect(lifecycle.status().reason).toBe("cloud_proxy_missing");
+      }
+      const persist = () => { saved.chatgptDesktop!.cloudNetwork = false; };
+      await expect(lifecycle.configure(false, persist)).rejects.toThrow(reason);
+      expect(lifecycle.status()).toMatchObject({ configured: false, state: "unavailable", reason: "recovery_failed" });
+      recoveryFails = false;
+      expect(await lifecycle.configure(false, persist)).toMatchObject({ configured: false, state: "disabled" });
+      expect(recover).toHaveBeenCalledTimes(2);
+      await lifecycle.stop();
+      expect(recover).toHaveBeenCalledTimes(2);
+    });
+  }
+
+  test("shutdown retries a startup recovery failure before reporting stopped", async () => {
+    let recoveryFails = true;
+    const recover = mock(async () => { if (recoveryFails) throw new CloudNetworkError("mapping_edited"); });
+    const lifecycle = createChatgptCloudNetworkLifecycle({ platform: "darwin", warn: () => {}, recover,
+      start: async () => { throw CloudNetworkError.fromReply({ protocol: 1, ok: false, state: "recovery_required", error: "mapping_edited" }, "mapping_failed"); } });
+    lifecycle.start(config(true)); await lifecycle.settled();
+    await expect(lifecycle.stop()).rejects.toThrow("mapping_edited");
+    expect(lifecycle.status()).toMatchObject({ state: "unavailable", reason: "recovery_failed" });
+    recoveryFails = false;
+    await lifecycle.stop();
+    expect(lifecycle.status().state).toBe("stopped");
+    expect(lifecycle.status().reason).toBeUndefined();
+    expect(recover).toHaveBeenCalledTimes(2);
+    await lifecycle.stop();
+    expect(recover).toHaveBeenCalledTimes(2);
+  });
+
+  for (const action of ["disable", "stop"] as const) test(`helper loss survives a failed re-enable until ${action} recovers`, async () => {
+    const saved = config(true);
+    let lose!: (lost: boolean) => void;
+    const lost = new Promise<boolean>(resolve => { lose = resolve; });
+    let starts = 0, recoveryFails = true;
+    const recover = mock(async () => { if (recoveryFails) throw new CloudNetworkError("resolver_flush_failed"); });
+    const lifecycle = createChatgptCloudNetworkLifecycle({ platform: "darwin", warn: () => {}, recover,
+      start: async () => {
+        if (++starts > 1) throw new CloudNetworkError("cloud_proxy_missing");
+        return { endpoints: [], stop: async () => {}, lost };
+      } });
+    lifecycle.start(saved); await lifecycle.settled();
+    lose(true); await Bun.sleep(0);
+    expect(lifecycle.status().reason).toBe("helper_disconnected");
+    await lifecycle.configure(true, () => {});
+    expect(lifecycle.status().reason).toBe("cloud_proxy_missing");
+    const finish = () => action === "disable"
+      ? lifecycle.configure(false, () => { saved.chatgptDesktop!.cloudNetwork = false; }) : lifecycle.stop();
+    await expect(finish()).rejects.toThrow("resolver_flush_failed");
+    expect(lifecycle.status()).toMatchObject({ state: "unavailable", reason: "recovery_failed" });
+    recoveryFails = false;
+    await finish();
+    expect(lifecycle.status().state).toBe(action === "disable" ? "disabled" : "stopped");
+    expect(lifecycle.status().reason).toBeUndefined();
+    expect(recover).toHaveBeenCalledTimes(2);
+    await lifecycle.stop();
+    expect(recover).toHaveBeenCalledTimes(2);
+  });
+
+  test("successful reacquisition clears startup recovery debt before normal release", async () => {
+    const saved = config(true);
+    let starts = 0;
+    const recover = mock(async () => { throw new Error("unexpected recovery without a handle"); });
+    const stop = mock(async () => {});
+    const lifecycle = createChatgptCloudNetworkLifecycle({ platform: "darwin", warn: () => {}, recover,
+      start: async () => {
+        if (++starts === 1) throw CloudNetworkError.fromReply({ protocol: 1, ok: false, state: "recovery_required", error: "resolver_flush_failed" }, "mapping_failed");
+        return { endpoints: [], stop, lost: new Promise<boolean>(() => {}) };
+      } });
+    lifecycle.start(saved); await lifecycle.settled();
+    expect((await lifecycle.configure(true, () => {})).state).toBe("active");
+    expect((await lifecycle.configure(false, () => { saved.chatgptDesktop!.cloudNetwork = false; })).state).toBe("disabled");
+    await lifecycle.stop();
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(recover).not.toHaveBeenCalled();
+  });
+
   test("retrying disable after failed release cannot report disabled before recovery succeeds", async () => {
     const saved = config(true);
     const stop = mock(async () => { throw new CloudNetworkError("resolver_flush_failed"); });

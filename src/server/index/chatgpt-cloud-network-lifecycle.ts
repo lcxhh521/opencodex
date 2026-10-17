@@ -20,6 +20,7 @@ export function createChatgptCloudNetworkLifecycle(deps: {
 } = {}): CloudNetworkLifecycle {
   let config: OcxConfig | undefined;
   let handle: Handle | undefined;
+  let needsRecovery = false;
   let stopped = false;
   let snapshot: CloudNetworkStatus = { configured: false, state: "disabled", applicationHandshake: "unverified" };
   let pending: Promise<unknown> = Promise.resolve();
@@ -42,12 +43,12 @@ export function createChatgptCloudNetworkLifecycle(deps: {
         const recover = deps.recover ?? (await import("../../chatgpt/cloud-network/runtime")).recoverCloudNetwork;
         await recover();
       }
-    } catch (error) { fail("recovery_failed"); throw error; }
+      needsRecovery = false;
+    } catch (error) { needsRecovery = true; fail("recovery_failed"); throw error; }
   };
-  const recoveryPending = () => snapshot.reason === "recovery_failed" || snapshot.reason === "helper_disconnected";
   const reconcile = async () => {
     if (stopped || config?.chatgptDesktop?.cloudNetwork !== true) {
-      await stopHandle(recoveryPending());
+      await stopHandle(needsRecovery);
       snapshot = { configured: false, state: stopped ? "stopped" : "disabled", applicationHandshake: "unverified" };
       return status();
     }
@@ -59,13 +60,15 @@ export function createChatgptCloudNetworkLifecycle(deps: {
       const runtime = deps.start ? undefined : await import("../../chatgpt/cloud-network/runtime");
       const current = await (deps.start ?? runtime!.startCloudNetwork)();
       handle = current;
+      needsRecovery = false;
       snapshot = { configured: true, state: "active", applicationHandshake: "unverified" };
       void current.lost.then(lost => {
-        if (lost && handle === current) { handle = undefined; fail("helper_disconnected"); }
+        if (lost && handle === current) { handle = undefined; needsRecovery = true; fail("helper_disconnected"); }
       });
     } catch (error) {
       // Fixed reason codes only: never print an upstream URL or raw socket error.
       const { CloudNetworkError } = await import("../../chatgpt/cloud-network/contract");
+      if (error instanceof CloudNetworkError && (error.recoveryRequired || error.message === "helper_disconnected")) needsRecovery = true;
       fail(error instanceof CloudNetworkError ? error.message : "startup_failed");
     }
     return status();
@@ -96,7 +99,10 @@ export function createChatgptCloudNetworkLifecycle(deps: {
     settled: async () => { await pending; },
     stop() {
       stopped = true;
-      return enqueue(async () => { await stopHandle(recoveryPending()); snapshot = { ...snapshot, state: "stopped" }; });
+      return enqueue(async () => {
+        await stopHandle(needsRecovery);
+        snapshot = { configured: status().configured, state: "stopped", applicationHandshake: "unverified" };
+      });
     },
   };
 }

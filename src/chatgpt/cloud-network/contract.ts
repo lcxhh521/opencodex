@@ -20,4 +20,10 @@ export interface CloudNetworkStatus {
   applicationHandshake: "unverified";
 }
 
-export class CloudNetworkError extends Error {}
+export class CloudNetworkError extends Error {
+  constructor(message: string, readonly recoveryRequired = false) { super(message); }
+
+  static fromReply(reply: CloudHelperReply, fallback: string): CloudNetworkError {
+    return new CloudNetworkError(reply.error ?? fallback, reply.state === "recovery_required");
+  }
+}

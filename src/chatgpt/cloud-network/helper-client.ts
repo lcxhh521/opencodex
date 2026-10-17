@@ -48,14 +48,14 @@ export async function acquireCloudMapping(socketPath = CLOUD_HELPER_SOCKET) {
   const connection = openHelper(socketPath);
   try {
     const reply = await connection.request("acquire");
-    if (!reply.ok) throw new CloudNetworkError(reply.error ?? "mapping_failed");
+    if (!reply.ok) throw CloudNetworkError.fromReply(reply, "mapping_failed");
   } catch (error) { connection.close(); throw error; }
   return {
     closed: connection.closed,
     async release(): Promise<void> {
       try {
         const reply = await connection.request("release");
-        if (!reply.ok) throw new CloudNetworkError(reply.error ?? "recovery_required");
+        if (!reply.ok) throw CloudNetworkError.fromReply(reply, "recovery_required");
       } finally { connection.close(); }
     },
   };

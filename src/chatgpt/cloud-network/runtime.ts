@@ -26,7 +26,7 @@ export async function startCloudNetwork(options: {
   const proxy = cloudNetworkProxy(options.env);
   const helperSocket = options.helperSocket ?? CLOUD_HELPER_SOCKET;
   const helper = await cloudHelperRequest("status", helperSocket);
-  if (!helper.ok) throw new CloudNetworkError(helper.error ?? "recovery_required");
+  if (!helper.ok) throw CloudNetworkError.fromReply(helper, "recovery_required");
   if (helper.state === "active") throw new CloudNetworkError("mapping_busy");
   let entry: Awaited<ReturnType<typeof startCloudEntry>>;
   try { entry = await startCloudEntry({ proxy, port: options.listenPort ?? 443 }); }
@@ -56,5 +56,5 @@ export async function startCloudNetwork(options: {
 
 export async function recoverCloudNetwork(): Promise<void> {
   const result = await cloudHelperRequest("recover");
-  if (!result.ok) throw new CloudNetworkError(result.error ?? "recovery_required");
+  if (!result.ok) throw CloudNetworkError.fromReply(result, "recovery_required");
 }

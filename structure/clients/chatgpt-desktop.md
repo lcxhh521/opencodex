@@ -14,8 +14,10 @@ synchronous at the composition root. Disabled installations do not import the tr
 or contact the helper. Enabled startup runs asynchronously, only on macOS outside the
 client role; a failure records unavailable state without failing the model proxy.
 Stop joins pending activation and removes the mapping before releasing owned sockets.
-After a failed release or lost helper, disable/shutdown retries helper recovery before
-reporting disabled/stopped; persisting the off flag alone never clears a recovery error.
+After a failed release, lost helper or startup reply requiring recovery, disable/shutdown
+retries helper recovery before reporting disabled/stopped, even when startup returned no
+runtime handle. The helper's recovery-required state survives independently of its reason
+code until recovery or acquisition succeeds; persisting the off flag alone never clears it.
 
 `runtime.ts` selects the existing outbound environment with `effectiveProxyFor`,
 after server startup's `applyProxyEnv`. It refuses matching NO_PROXY, missing proxy
