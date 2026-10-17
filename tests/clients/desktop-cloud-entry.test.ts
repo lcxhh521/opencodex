@@ -1,11 +1,32 @@
 import { expect, test } from "bun:test";
 import { connect, createServer, type TLSSocket } from "node:tls";
-import type { AddressInfo } from "node:net";
+import { connect as connectTcp, type AddressInfo, type Socket } from "node:net";
 import { createLocalInterceptCa, issueLocalInterceptLeaf } from "../../src/claude/intercept/local-ca";
 import { CLOUD_HOST } from "../../src/chatgpt/cloud-network/contract";
 import { startCloudNetwork } from "../../src/chatgpt/cloud-network/runtime";
 import { cloudFixture } from "../helpers/cloud-network-fixture";
 import { cloudTestProxy } from "../helpers/cloud-network-proxy";
+import { startCloudEntry } from "../../src/chatgpt/cloud-network/entry";
+
+test("stopping the entry cancels pending proxy establishment", async () => {
+  const options = { stall: false };
+  const proxy = await cloudTestProxy(options);
+  let entry: Awaited<ReturnType<typeof startCloudEntry>> | undefined;
+  let client: Socket | undefined;
+  try {
+    entry = await startCloudEntry({ proxy: `http://127.0.0.1:${proxy.port}`, port: 0 });
+    options.stall = true;
+    client = connectTcp(entry.endpoints[0]!);
+    client.on("error", () => {});
+    for (let i = 0; i < 100 && proxy.requests.length < 2; i++) await Bun.sleep(10);
+    expect(proxy.requests).toHaveLength(2); // successful preflight, then a stalled client CONNECT
+    await entry.stop();
+    for (let i = 0; i < 100 && proxy.connectionCount > 0; i++) await Bun.sleep(10);
+    expect(proxy.connectionCount).toBe(0);
+  } finally {
+    client?.destroy(); await entry?.stop(); await proxy.stop();
+  }
+});
 
 test.skipIf(process.platform === "win32")("IPv4/IPv6 preserve end-to-end TLS and binary bytes; wrong hostname is rejected", async () => {
   const ca = createLocalInterceptCa();

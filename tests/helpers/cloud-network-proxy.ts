@@ -34,6 +34,7 @@ export async function cloudTestProxy(options: { targetPort?: number; refuse?: bo
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   return {
     port: (server.address() as AddressInfo).port, requests,
+    get connectionCount() { return sockets.size; },
     async stop() {
       for (const socket of sockets) socket.destroy();
       await new Promise<void>(resolve => server.close(() => resolve()));

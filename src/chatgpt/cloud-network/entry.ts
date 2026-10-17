@@ -24,16 +24,18 @@ function proxyRoute(proxy: string): OpaqueProxyRoute {
 export async function startCloudEntry({ proxy, port }: { proxy: string; port: number }) {
   const servers: Server[] = [];
   const sockets = new Set<Socket>();
+  const establishment = new AbortController();
   let stopped = false;
   const dial = async () => {
     try {
-      return await dialTunnel(`${TARGET.host}:${TARGET.port}`, proxyRoute(proxy));
+      return await dialTunnel(`${TARGET.host}:${TARGET.port}`, proxyRoute(proxy), { signal: establishment.signal });
     } catch {
       return null;
     }
   };
   const stop = async () => {
     stopped = true;
+    establishment.abort();
     for (const socket of sockets) socket.destroy();
     await Promise.all(servers.map(server => new Promise<void>(resolve => server.close(() => resolve()))));
   };

@@ -24,7 +24,9 @@ after server startup's `applyProxyEnv`. It refuses matching NO_PROXY, missing pr
 and obvious local-443 loops. `entry.ts` binds IPv4/IPv6 loopback 443 and preflights
 the fixed cloud target through HTTP(S) CONNECT or SOCKS5 before acquiring a mapping.
 It reuses `dialTunnel` in `src/lib/opaque-proxy-tunnel.ts`, whose handshake returns
-a paused raw socket. All client TLS remains opaque; no CA, payload logging,
+a paused raw socket. Entry shutdown aborts in-flight tunnel establishment as well as
+closing established sockets, so pending CONNECT/SOCKS handshakes cannot outlive teardown.
+All client TLS remains opaque; no CA, payload logging,
 account reads or direct fallback is added. The relay resumes the socket only after
 attaching the client pipes; existing WebSocket transports remain unchanged.
 
