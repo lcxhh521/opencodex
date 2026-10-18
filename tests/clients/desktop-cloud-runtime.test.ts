@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, spyOn, test } from "bun:test";
 import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createChatgptCloudNetworkLifecycle } from "../../src/server/index/chatgpt-cloud-network-lifecycle";
 import { cloudNetworkProxy, startCloudNetwork } from "../../src/chatgpt/cloud-network/runtime";
@@ -9,8 +9,51 @@ import { chatgptDesktopSchema } from "../../src/config/schema/chatgpt-desktop";
 import type { OcxConfig } from "../../src/types";
 import { cloudFixture } from "../helpers/cloud-network-fixture";
 import { cloudTestProxy } from "../helpers/cloud-network-proxy";
+import { createTempHome } from "../helpers/temp-home";
+import { createOptionalListenerSet } from "../../src/server/index/optional-listeners";
+import { emptyLinkStore } from "../../src/link/store";
+import { decisionQuotaSinkActive } from "../../src/lib/decision-quota-sink";
+import { notifyLiveConfigObservers } from "../../src/lib/state-store-registrations";
 
 const config = (enabled = false): OcxConfig => ({ providers: {}, defaultProvider: "openai", chatgptDesktop: { cloudNetwork: enabled } });
+
+for (const releaseFails of [false, true]) test(`optional listeners retain cloud and JEV lifecycle with failed release=${releaseFails}`, async () => {
+  const home = createTempHome("ocn-optional-");
+  const saved: OcxConfig = { ...config(true), claudeCode: { enabled: false, intercept: { enabled: false } },
+    combos: { fixture: { strategy: "jev", targets: [], decisionQuotaSignals: true } } };
+  const stop = mock(async () => {
+    expect(decisionQuotaSinkActive()).toBe(true);
+    if (releaseFails) throw new CloudNetworkError("resolver_flush_failed");
+  });
+  const recover = mock(async () => {});
+  const listeners = createOptionalListenerSet({ readStore: () => emptyLinkStore() }, { platform: "darwin", warn: () => {}, recover,
+    start: async () => ({ endpoints: [], stop, lost: new Promise<boolean>(() => {}) }) });
+  const cloud = listeners.cloudNetwork();
+  const originalStart = cloud.start;
+  const start = spyOn(cloud, "start").mockImplementation(value => {
+    expect(decisionQuotaSinkActive()).toBe(false); // JEV activation remains last.
+    originalStart(value);
+  });
+  const supervisorStop = mock(async () => {});
+  try {
+    listeners.start({ config: saved, publicPort: 0, requestedPort: 0, maxRequestBodySize: 1024, dispatch: async () => new Response() });
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(decisionQuotaSinkActive()).toBe(true);
+    await cloud.settled();
+    expect(cloud.status().state).toBe("active");
+    listeners.registerSupervisorStop(supervisorStop);
+    if (releaseFails) await expect(listeners.stop()).rejects.toThrow("resolver_flush_failed");
+    else await listeners.stop();
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(supervisorStop).toHaveBeenCalledTimes(1);
+    expect(decisionQuotaSinkActive()).toBe(false);
+    notifyLiveConfigObservers(saved);
+    expect(decisionQuotaSinkActive()).toBe(false); // Teardown removes the live observer too.
+    await listeners.stop();
+    expect(recover).toHaveBeenCalledTimes(releaseFails ? 1 : 0);
+    expect(cloud.status().state).toBe("stopped");
+  } finally { start.mockRestore(); await listeners.stop(); home.remove(); }
+});
 
 test("cloud config is strictly opt-in and uses the existing proxy selection", () => {
   expect(chatgptDesktopSchema.parse({})).toEqual({});

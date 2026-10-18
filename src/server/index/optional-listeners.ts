@@ -18,6 +18,7 @@ import { createLinkSupervisor, type LinkSupervisor } from "../../link/supervisor
 import { linkManagementRouteAllowed } from "../../link/management-routes";
 import { saveConfigPreservingClaudeCode } from "../../config/live-reconcile";
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
+import { startJevQuotaActivation } from "../../combos/jev-quota-activation";
 export { LINK_INGRESS_HOSTNAME } from "./link-listener";
 import type { ServerIngress } from "./serve-options";
 
@@ -54,6 +55,7 @@ export function createOptionalListenerSet<T>(linkDeps: LinkListenerDeps = {}, cl
   const cloudNetwork = createChatgptCloudNetworkLifecycle(cloudDeps);
   const linkListener: LinkListenerLifecycle<T> = createLinkListenerLifecycle<T>(linkDeps);
   let activeConfig: OcxConfig | undefined;
+  let stopJevQuotaActivation: (() => void) | undefined;
   const supervisor = createLinkSupervisor({
     apiKeys: () => activeConfig?.apiKeys ?? [],
     revokeApiKey: id => {
@@ -119,6 +121,8 @@ export function createOptionalListenerSet<T>(linkDeps: LinkListenerDeps = {}, cl
         dispatch: ctx.dispatch,
       });
       cloudNetwork.start(ctx.config);
+      // Last, after every listener started: JEV advisory quota follows the live config while serving.
+      stopJevQuotaActivation = startJevQuotaActivation(ctx.config);
     },
     ensureStarted: () => linkListener.ensureStarted(),
     close: () => linkListener.close(),
@@ -138,6 +142,8 @@ export function createOptionalListenerSet<T>(linkDeps: LinkListenerDeps = {}, cl
       try { await claudeIntercept.stop(); } catch (error) { failure ??= error; }
       unregisterSupervisorAdmission?.();
       unregisterSupervisorAdmission = undefined;
+      stopJevQuotaActivation?.();
+      stopJevQuotaActivation = undefined;
       if (failure) throw failure;
     },
   };

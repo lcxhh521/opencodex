@@ -13,6 +13,8 @@ recover/uninstall. This is the only cloud-network implementation and public entr
 synchronous at the composition root. Disabled installations do not import the transport
 or contact the helper. Enabled startup runs asynchronously, only on macOS outside the
 client role; a failure records unavailable state without failing the model proxy.
+The composition root starts JEV quota activation last, after scheduling cloud startup;
+cloud recovery failure does not skip the remaining optional-listener cleanup or JEV teardown.
 Stop joins pending activation and removes the mapping before releasing owned sockets.
 After a failed release, lost helper or startup reply requiring recovery, disable/shutdown
 retries helper recovery before reporting disabled/stopped, even when startup returned no

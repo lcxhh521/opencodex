@@ -28,7 +28,7 @@ These answer in the CLI head and never reach the proxy, so they work with nothin
 | [lifecycle](01_surface_lifecycle.md) | 14 |
 | [providers-models](01_surface_providers-models.md) | 49 |
 | [accounts](01_surface_accounts.md) | 42 |
-| [agents-routing](01_surface_agents-routing.md) | 51 |
+| [agents-routing](01_surface_agents-routing.md) | 62 |
 | [integrations](01_surface_integrations.md) | 41 |
 | [observe-system](01_surface_observe-system.md) | 96 |
 | [access-remote](01_surface_access-remote.md) | 32 |
@@ -662,6 +662,50 @@ Original invocation order. These headings preserve links to the previous single-
 ### `ocx advisor`
 
 [State-changing task](01_surface_agents-routing.md#ocx-advisor)
+
+### `ocx message enable`
+
+[State-changing task](01_surface_agents-routing.md#ocx-message-enable)
+
+### `ocx message disable`
+
+[State-changing task](01_surface_agents-routing.md#ocx-message-disable)
+
+### `ocx message status`
+
+[Read-oriented task](01_surface_agents-routing.md#ocx-message-status)
+
+### `ocx message serve`
+
+[State-changing task](01_surface_agents-routing.md#ocx-message-serve)
+
+### `ocx message hosts probe`
+
+[Read-oriented task](01_surface_agents-routing.md#ocx-message-hosts-probe)
+
+### `ocx message hosts add`
+
+[State-changing task](01_surface_agents-routing.md#ocx-message-hosts-add)
+
+### `ocx message hosts allow-inbound`
+
+[State-changing task](01_surface_agents-routing.md#ocx-message-hosts-allow-inbound)
+
+### `ocx message hosts deny-inbound`
+
+[State-changing task](01_surface_agents-routing.md#ocx-message-hosts-deny-inbound)
+
+### `ocx message hosts list`
+
+[Read-oriented task](01_surface_agents-routing.md#ocx-message-hosts-list)
+
+### `ocx message hosts remove`
+
+[State-changing task](01_surface_agents-routing.md#ocx-message-hosts-remove)
+
+### `ocx message hosts abandon`
+
+[State-changing task](01_surface_agents-routing.md#ocx-message-hosts-abandon)
 
 ### `ocx agent status`
 
@@ -1433,6 +1477,6 @@ Original invocation order. These headings preserve links to the previous single-
 
 ## Counts
 
-- declared capabilities: 346
-- of those, state-changing: 210
+- declared capabilities: 357
+- of those, state-changing: 218
 - head-resolved invocations: 2
