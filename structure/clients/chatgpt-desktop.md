@@ -76,7 +76,8 @@ Protocol v2 rejects older helpers that cannot own 443. The model proxy stays unp
 Its fixed job requests KeepAlive and RunAtLoad; recovery is after service restart,
 not instantaneous after SIGKILL or power loss. Source/npm installation bundles
 `helper-system.ts` and copies Bun; standalone installation copies the CLI and enters
-the hidden helper command. Installed code and its parents must be root-owned and
+the hidden helper command. The copied runtime's owner is set explicitly before it
+replaces the installed executable. Installed code and its parents must be root-owned and
 not group/other-writable. The socket grants only the installing uid access.
 The helper reads no user config or proxy credentials. Updating/removing it requires
 idle routing and explicit authorization, never an ordinary proxy update side effect.

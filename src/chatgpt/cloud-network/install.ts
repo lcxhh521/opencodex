@@ -1,4 +1,4 @@
-import { copyFileSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, chmodSync, chownSync, constants, existsSync, lstatSync, mkdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -114,6 +114,8 @@ export async function installCloudHelper(action: "install" | "uninstall", option
     const next = join(root, "runtime.next");
     removeOwnedFile(next, owner);
     copyFileSync(options.executable, next, constants.COPYFILE_EXCL);
+    // macOS copies may preserve the source owner's metadata even when copied by root.
+    chownSync(next, owner, -1);
     chmodSync(next, 0o755);
     renameSync(next, join(root, "runtime"));
     if (bundled !== undefined) installFile(join(root, "helper.js"), bundled, 0o644, owner);

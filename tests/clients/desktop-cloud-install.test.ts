@@ -30,11 +30,14 @@ test.skipIf(process.platform === "win32")("the real installer copies owned files
   try {
     expect(await installCloudHelper("install", options)).toBe(0);
     expect(readFileSync(join(root, "runtime"), "utf8")).toBe("fixture-runtime");
+    expect(statSync(join(root, "runtime")).uid).toBe(uid);
     expect(statSync(join(root, "runtime")).mode & 0o777).toBe(0o755);
     expect(readFileSync(options.plist, "utf8")).toContain(`${root}/runtime`);
     expect(readFileSync(options.plist, "utf8")).not.toContain(executable);
     expect(f.read()).not.toContain(CLOUD_HOST);
     expect(commands).toEqual([["print", `system/${CLOUD_HELPER_LABEL}`], ["bootstrap", "system", options.plist]]);
+    expect(await installCloudHelper("install", options)).toBe(0);
+    expect(statSync(join(root, "runtime")).uid).toBe(uid);
     const lease = await acquireCloudMapping(f.socketPath);
     await expect(installCloudHelper("uninstall", options)).rejects.toThrow("disable_cloud_network_before_install_or_uninstall");
     expect(existsSync(join(root, "runtime"))).toBe(true);
