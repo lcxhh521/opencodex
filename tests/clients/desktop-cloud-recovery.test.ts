@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { appendFileSync, existsSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { cloudFixture } from "../helpers/cloud-network-fixture";
 import { cloudTestProxy } from "../helpers/cloud-network-proxy";
@@ -8,6 +8,27 @@ import { CloudHostsMapping, SYSTEM_CLOUD_MAPPING } from "../../src/chatgpt/cloud
 import { withCloudHelperLock } from "../../src/chatgpt/cloud-network/helper-system";
 import { serveCloudMapping } from "../../src/chatgpt/cloud-network/helper";
 import { acquireCloudMapping, cloudHelperRequest } from "../../src/chatgpt/cloud-network/helper-client";
+import * as helperClient from "../../src/chatgpt/cloud-network/helper-client";
+import { createCloudFixtureLifecycle } from "../helpers/cloud-network-process";
+
+test("process fixture recovery stays on its isolated helper socket, including failed-stop retries", async () => {
+  const socketPath = "/fixture-only/helper.sock";
+  let fails = true;
+  const request = spyOn(helperClient, "cloudHelperRequest").mockImplementation(async () => fails
+    ? { protocol: 1, ok: false, state: "recovery_required", error: "resolver_flush_failed" }
+    : { protocol: 1, ok: true, state: "idle" });
+  const lifecycle = createCloudFixtureLifecycle(socketPath);
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  lifecycle.start({ providers: {}, defaultProvider: "openai", chatgptDesktop: { cloudNetwork: false } });
+  try {
+    await expect(lifecycle.recover(() => {})).rejects.toThrow("resolver_flush_failed");
+    await expect(lifecycle.stop()).rejects.toThrow("resolver_flush_failed");
+    fails = false;
+    await lifecycle.stop();
+    expect(lifecycle.status().state).toBe("stopped");
+    expect(request.mock.calls).toEqual(Array.from({ length: 3 }, () => ["recover", socketPath]));
+  } finally { request.mockRestore(); warn.mockRestore(); }
+});
 
 describe.skipIf(process.platform === "win32")("one mapping implementation for normal and crash recovery", () => {
   test("journal before replacement and abandoned mapping recover without losing unrelated bytes", () => {

@@ -5,6 +5,18 @@ import { withCloudHelperLock } from "../../src/chatgpt/cloud-network/helper-syst
 import { startCloudNetwork } from "../../src/chatgpt/cloud-network/runtime";
 import { applyProxyEnv } from "../../src/config/proxy-env";
 import { createChatgptCloudNetworkLifecycle } from "../../src/server/index/chatgpt-cloud-network-lifecycle";
+import { cloudHelperRequest } from "../../src/chatgpt/cloud-network/helper-client";
+import { CloudNetworkError } from "../../src/chatgpt/cloud-network/contract";
+
+export function createCloudFixtureLifecycle(socketPath: string) {
+  return createChatgptCloudNetworkLifecycle({ platform: "darwin",
+    start: () => startCloudNetwork({ helperSocket: socketPath, listenPort: 0 }),
+    recover: async () => {
+      const reply = await cloudHelperRequest("recover", socketPath);
+      if (!reply.ok) throw CloudNetworkError.fromReply(reply, "recovery_required");
+    },
+  });
+}
 
 // Test-only subprocess harness. Production internal commands accept none of these fixture paths.
 if (import.meta.main) {
@@ -25,7 +37,7 @@ if (import.meta.main) {
   } else {
     const config = { providers: {}, defaultProvider: "openai", proxy: `http://127.0.0.1:${port}`, chatgptDesktop: { cloudNetwork: true } };
     applyProxyEnv(config);
-    const lifecycle = createChatgptCloudNetworkLifecycle({ platform: "darwin", start: () => startCloudNetwork({ helperSocket: socketPath, listenPort: 0 }) });
+    const lifecycle = createCloudFixtureLifecycle(socketPath);
     lifecycle.start(config); await lifecycle.settled();
     console.log(JSON.stringify({ ready: lifecycle.status().state === "active", role, network: lifecycle.status() }));
     await interrupted;
