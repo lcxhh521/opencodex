@@ -123,7 +123,7 @@ export async function installCloudHelper(action: "install" | "uninstall", option
     installFile(join(root, "install.json"), JSON.stringify({ protocol: 1, uid, gid }) + "\n", 0o644, owner);
     trustedDirectory(options.plistDirectory, 0o755, owner);
     installFile(options.plist, cloudHelperPlist(cloudHelperLaunchArgv(root, standalone)), 0o644, owner);
-  });
+  }, 5_000); // A stopped helper may still be finishing shutdown and releasing its process lock.
   if (action === "uninstall") {
     const socket = lstatSync(options.socketPath, { throwIfNoEntry: false });
     if (socket) {

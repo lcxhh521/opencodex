@@ -32,7 +32,9 @@ export async function handleInternalCommand(args: readonly string[]): Promise<nu
       return await (await import("../chatgpt/cloud-network/install")).manageSystemCloudHelper(args[1] as "install" | "uninstall");
     } catch (error) {
       const { CloudNetworkError } = await import("../chatgpt/cloud-network/contract");
-      console.error(`Cloud network helper failed (${error instanceof CloudNetworkError ? error.message : "system_operation_failed"}); inspect with: ocx chatgpt network status`);
+      const code = error instanceof CloudNetworkError ? error.message
+        : error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : "system_operation_failed";
+      console.error(`Cloud network helper failed (${code}); inspect with: ocx chatgpt network status`);
       return 1;
     }
   }

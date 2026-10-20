@@ -6,7 +6,7 @@ import { CloudHostsMapping } from "../../src/chatgpt/cloud-network/hosts";
 import { installCloudHelper } from "../../src/chatgpt/cloud-network/install";
 import { serveCloudMapping } from "../../src/chatgpt/cloud-network/helper";
 import { cloudHelperRequest, acquireCloudMapping } from "../../src/chatgpt/cloud-network/helper-client";
-import { CLOUD_HOST, CLOUD_HELPER_LABEL } from "../../src/chatgpt/cloud-network/contract";
+import { CLOUD_HOST, CLOUD_HELPER_LABEL, CLOUD_NETWORK_PROTOCOL } from "../../src/chatgpt/cloud-network/contract";
 
 test.skipIf(process.platform === "win32")("the real installer copies owned files, starts idle, refuses active uninstall and removes only its files", async () => {
   const f = cloudFixture(), root = join(f.root, "install"), executable = join(f.root, "source-runtime");
@@ -48,4 +48,44 @@ test.skipIf(process.platform === "win32")("the real installer copies owned files
     expect(readFileSync(executable, "utf8")).toBe("fixture-runtime");
     expect(f.read()).not.toContain(CLOUD_HOST);
   } finally { await service?.stop(); f.cleanup(); }
+});
+
+test.skipIf(process.platform === "win32")("reinstall waits for the stopped helper to release its process lock", async () => {
+  const f = cloudFixture(), executable = join(f.root, "source-runtime");
+  writeFileSync(executable, "fixture-runtime", { mode: 0o755 });
+  const child = Bun.spawn([process.execPath, "-e", `
+    import { Database } from "bun:sqlite";
+    const lock = new Database(process.argv[1], { create: true });
+    lock.exec("BEGIN IMMEDIATE");
+    process.once("SIGTERM", async () => {
+      await Bun.sleep(100);
+      lock.close();
+      process.exit(0);
+    });
+    setInterval(() => {}, 1000);
+    console.log("ready");
+  `, join(f.root, "state/owner.sqlite")], { stdout: "pipe", stderr: "pipe" });
+  try {
+    const reader = child.stdout.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value).trim()).toBe("ready");
+    reader.releaseLock();
+    const result = await installCloudHelper("install", {
+      root: f.root, parents: [], plist: join(f.root, "launchdaemons/cloud.plist"),
+      plistDirectory: join(f.root, "launchdaemons"), socketPath: f.socketPath,
+      uid: process.getuid!(), gid: process.getgid!(), owner: process.getuid!(),
+      executable, standalone: false, mapping: f.mapping, bundle: async () => "// fixture\n",
+      request: async () => ({ protocol: CLOUD_NETWORK_PROTOCOL, ok: true, state: "idle" }),
+      launchctl: async args => {
+        if (args[0] === "bootout") child.kill("SIGTERM");
+        return 0;
+      },
+    });
+    expect(result).toBe(0);
+    expect(await child.exited).toBe(0);
+    expect(readFileSync(join(f.root, "runtime"), "utf8")).toBe("fixture-runtime");
+  } finally {
+    if (child.exitCode === null) child.kill("SIGKILL");
+    await child.exited;
+    f.cleanup();
+  }
 });

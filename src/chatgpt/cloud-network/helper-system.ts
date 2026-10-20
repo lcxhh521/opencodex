@@ -30,9 +30,9 @@ export function readHelperOwner(root = CLOUD_HELPER_ROOT, fileOwner = 0): { uid:
 }
 
 /** OS-held lock spans the service lifetime and excludes an installer or another helper. */
-export async function withCloudHelperLock<T>(root: string, work: () => Promise<T>): Promise<T> {
+export async function withCloudHelperLock<T>(root: string, work: () => Promise<T>, waitMs = 0): Promise<T> {
   const lock = new Database(join(root, "state/owner.sqlite"), { create: true });
-  try { lock.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE"); return await work(); }
+  try { lock.exec(`PRAGMA busy_timeout = ${waitMs}; BEGIN IMMEDIATE`); return await work(); }
   finally { lock.close(); }
 }
 

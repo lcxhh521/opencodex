@@ -81,6 +81,9 @@ replaces the installed executable. Installed code and its parents must be root-o
 not group/other-writable. The socket grants only the installing uid access.
 The helper reads no user config or proxy credentials. Updating/removing it requires
 idle routing and explicit authorization, never an ordinary proxy update side effect.
+After stopping the helper, installation/removal waits at most five seconds for its
+process lock to be released. A second helper still fails immediately. Native system
+error codes are preserved by the internal command without dumping paths or payloads.
 Uninstall restores first and removes fixed owned files; unknown leftovers are retained.
 
 The entire network namespace, including its internal privileged entry, bypasses
