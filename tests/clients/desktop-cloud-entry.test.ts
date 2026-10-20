@@ -7,6 +7,7 @@ import { startCloudNetwork } from "../../src/chatgpt/cloud-network/runtime";
 import { cloudFixture } from "../helpers/cloud-network-fixture";
 import { cloudTestProxy } from "../helpers/cloud-network-proxy";
 import { startCloudEntry } from "../../src/chatgpt/cloud-network/entry";
+import { startPrivilegedCloudRelay } from "../../src/chatgpt/cloud-network/privileged-relay";
 
 test("stopping the entry cancels pending proxy establishment", async () => {
   const options = { stall: false };
@@ -55,7 +56,7 @@ for (const close of ["destroy", "resetAndDestroy"] as const) test(`client ${clos
   }
 });
 
-test.skipIf(process.platform === "win32")("IPv4/IPv6 preserve end-to-end TLS and binary bytes; wrong hostname is rejected", async () => {
+test.skipIf(process.platform === "win32")("helper forwarding and runtime preserve IPv4/IPv6 TLS and binary bytes; wrong hostname is rejected", async () => {
   const ca = createLocalInterceptCa();
   const leaf = issueLocalInterceptLeaf(ca, [CLOUD_HOST]);
   const sockets = new Set<TLSSocket>();
@@ -70,10 +71,11 @@ test.skipIf(process.platform === "win32")("IPv4/IPv6 preserve end-to-end TLS and
   const proxy = await cloudTestProxy({ targetPort: (origin.address() as AddressInfo).port });
   const f = cloudFixture(), helper = await f.startHelper();
   const entry = await startCloudNetwork({ helperSocket: f.socketPath, listenPort: 0, env: { HTTPS_PROXY: `http://127.0.0.1:${proxy.port}` } });
+  const bridge = await startPrivilegedCloudRelay(0, entry.endpoints[0]!.port);
   try {
     const payload = Buffer.alloc(512 * 1024);
     for (let i = 0; i < payload.length; i++) payload[i] = i % 251;
-    for (const endpoint of entry.endpoints) {
+    for (const endpoint of bridge.endpoints) {
       await new Promise<void>((resolve, reject) => {
         const client = connect({ ...endpoint, servername: CLOUD_HOST, ca: ca.certPem });
         const received: Buffer[] = [];
@@ -90,14 +92,14 @@ test.skipIf(process.platform === "win32")("IPv4/IPv6 preserve end-to-end TLS and
       });
     }
     await new Promise<void>((resolve, reject) => {
-      const client = connect({ ...entry.endpoints[0], servername: "wrong.test", ca: ca.certPem });
+      const client = connect({ ...bridge.endpoints[0], servername: "wrong.test", ca: ca.certPem });
       client.once("error", () => { expect(client.authorized).toBe(false); client.destroy(); resolve(); });
       client.once("secureConnect", () => { client.destroy(); reject(new Error("wrong certificate accepted")); });
     });
     expect(proxy.requests).toHaveLength(4); // readiness probe plus three client connections
     expect(proxy.requests.every(line => line === `CONNECT ${CLOUD_HOST}:443 HTTP/1.1`)).toBe(true);
   } finally {
-    await entry.stop(); await helper.stop(); f.cleanup(); await proxy.stop();
+    await bridge.stop(); await entry.stop(); await helper.stop(); f.cleanup(); await proxy.stop();
     for (const socket of sockets) socket.destroy();
     await new Promise<void>(resolve => origin.close(() => resolve()));
   }

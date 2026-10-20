@@ -1,7 +1,7 @@
 import { effectiveProxyFor, noProxyMatches, normalizeProxyHostname, type ProxyEnvMap } from "../../lib/proxy-env";
 import { startCloudEntry } from "./entry";
 import { acquireCloudMapping, cloudHelperRequest } from "./helper-client";
-import { CLOUD_HOST, CLOUD_HELPER_SOCKET, CloudNetworkError } from "./contract";
+import { CLOUD_HOST, CLOUD_HELPER_SOCKET, CLOUD_ENTRY_PORT, CloudNetworkError } from "./contract";
 
 export function cloudNetworkProxy(env: ProxyEnvMap = process.env): string {
   const target = new URL(`https://${CLOUD_HOST}`);
@@ -12,7 +12,7 @@ export function cloudNetworkProxy(env: ProxyEnvMap = process.env): string {
   const hostname = normalizeProxyHostname(endpoint.hostname);
   // URL canonicalizes IPv4-mapped IPv6, including dotted-decimal forms, to this spelling.
   if (hostname === CLOUD_HOST || (["localhost", "127.0.0.1", "::1", "::ffff:7f00:1"].includes(hostname)
-    && (endpoint.port || (endpoint.protocol === "https:" ? "443" : "80")) === "443")) {
+    && [443, CLOUD_ENTRY_PORT].includes(Number(endpoint.port || (endpoint.protocol === "https:" ? "443" : "80"))))) {
     throw new CloudNetworkError("cloud_proxy_loop");
   }
   return proxy;
@@ -31,7 +31,7 @@ export async function startCloudNetwork(options: {
   if (!helper.ok) throw CloudNetworkError.fromReply(helper, "recovery_required");
   if (helper.state === "active") throw new CloudNetworkError("mapping_busy");
   let entry: Awaited<ReturnType<typeof startCloudEntry>>;
-  try { entry = await startCloudEntry({ proxy, port: options.listenPort ?? 443 }); }
+  try { entry = await startCloudEntry({ proxy, port: options.listenPort ?? CLOUD_ENTRY_PORT }); }
   catch { throw new CloudNetworkError("cloud_listener_or_upstream_failed"); }
   let mapping: Awaited<ReturnType<typeof acquireCloudMapping>>;
   try { mapping = await acquireCloudMapping(helperSocket); }

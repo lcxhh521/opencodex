@@ -10,7 +10,7 @@ import { readHelperOwner, systemCloudMapping, withCloudHelperLock } from "./help
 import type { CloudMappingOperations } from "./helper";
 import type { CloudHelperReply } from "./contract";
 
-export const CLOUD_INSTALL_CONSENT = "Install OpenCodex's internal cloud-network recovery helper with administrator permission. It can manage only the fixed cloud hostname in hosts and flush the resolver cache. Installation does not enable routing. No CA, system extension, model credentials or proxy-service changes.";
+export const CLOUD_INSTALL_CONSENT = "Install OpenCodex's internal cloud-network recovery helper with administrator permission. It manages the fixed cloud hostname in hosts, flushes the resolver cache and owns loopback 443 while enabled, forwarding opaque bytes only to the fixed local runtime entry. Installation does not enable routing. No CA, system extension, model credentials or proxy-service changes.";
 
 function xml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
@@ -103,7 +103,7 @@ export async function installCloudHelper(action: "install" | "uninstall", option
   const label = `system/${CLOUD_HELPER_LABEL}`;
   if (await options.launchctl(["print", label]) === 0 && await options.launchctl(["bootout", label]) !== 0) throw new CloudNetworkError("helper_stop_failed");
   await withCloudHelperLock(root, async () => {
-    options.mapping.recover();
+    await options.mapping.recover();
     if (action === "uninstall") {
       for (const path of [options.plist, join(root, "helper.js"), join(root, "runtime"), join(root, "install.json")]) removeOwnedFile(path, owner);
       return;

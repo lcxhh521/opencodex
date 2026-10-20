@@ -20,7 +20,7 @@ function proxyRoute(proxy: string): OpaqueProxyRoute {
   } as OpaqueProxyRoute;
 }
 
-/** The runtime binds loopback 443; isolated tests supply ephemeral ports. */
+/** The ordinary-user runtime binds a high port; the system helper owns loopback 443. */
 export async function startCloudEntry({ proxy, port }: { proxy: string; port: number }) {
   const servers: Server[] = [];
   const sockets = new Set<Socket>();

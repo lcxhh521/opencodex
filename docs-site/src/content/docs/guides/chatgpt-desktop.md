@@ -34,7 +34,8 @@ Installation asks for confirmation and then administrator permission through sud
 `--yes` skips only the initial confirmation, not OS authorization.
 It installs an OpenCodex-owned recovery helper and leaves routing off. It does not
 restart the proxy or desktop. The helper is internal implementation, not a separately
-configured proxy: its launchd job owns only the fixed mapping and resolver recovery.
+configured proxy: its launchd job owns the fixed mapping, resolver recovery and
+loopback 443 listener. It forwards opaque bytes only to the local OpenCodex entry.
 The network relay, outbound proxy selection, configuration and lifecycle belong to OpenCodex.
 
 `enable` requires the running server and calls its authenticated local management
@@ -59,8 +60,11 @@ The same proxy/environment precedence as other OpenCodex transports applies, inc
 HTTP(S) CONNECT and SOCKS5. A missing proxy, a matching NO_PROXY bypass or a local-443
 proxy loop refuses activation. There is no direct fallback through the mapped hostname.
 
-The runtime binds IPv4 and IPv6 loopback port 443 and verifies CONNECT acceptance before
-requesting the mapping. An occupied or unavailable listener port leaves the mapping off.
+The ordinary-user runtime binds loopback 10443 and verifies CONNECT acceptance first.
+The privileged helper then binds IPv4 and IPv6 loopback 443 before applying the mapping;
+the model proxy never runs as root. An occupied or unavailable listener port leaves the
+mapping off. The helper cannot select a different destination or read TLS payloads.
+This requires helper protocol v2: after updating from v1, reinstall the helper before enabling.
 Status distinguishes intent, active runtime and failures; `applicationHandshake`
 remains `unverified`. Active forwarding is not proof of a logged-in cloud session.
 `ocx chatgpt status` includes cloud status, and a cloud-only `ocx chatgpt launch`

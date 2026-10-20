@@ -1,5 +1,7 @@
 export const CLOUD_HOST = "codex-cloud-backend.chatgpt.com";
-export const CLOUD_NETWORK_PROTOCOL = 1;
+// v2 requires the helper to own privileged 443; v1 helpers must not accept this runtime.
+export const CLOUD_NETWORK_PROTOCOL = 2;
+export const CLOUD_ENTRY_PORT = 10443;
 export const CLOUD_HELPER_LABEL = "com.opencodex.cloud-network";
 export const CLOUD_HELPER_ROOT = "/Library/Application Support/OpenCodex/cloud-network";
 export const CLOUD_HELPER_SOCKET = "/var/run/com.opencodex.cloud-network.sock";

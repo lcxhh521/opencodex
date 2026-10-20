@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { CLOUD_HELPER_ROOT, CLOUD_HELPER_SOCKET, CloudNetworkError } from "./contract";
 import { CloudHostsMapping } from "./hosts";
 import { serveCloudMapping } from "./helper";
+import { privilegedCloudMapping } from "./privileged-relay";
 
 export function flushCloudResolver(): void {
   for (const [command, ...args] of [["/usr/bin/dscacheutil", "-flushcache"], ["/usr/bin/killall", "-HUP", "mDNSResponder"]]) {
@@ -45,7 +46,7 @@ export async function runSystemCloudHelper(): Promise<number> {
     process.once("SIGTERM", finish);
     process.once("SIGINT", finish);
     try {
-      const service = await serveCloudMapping({ socketPath: CLOUD_HELPER_SOCKET, mapping: systemCloudMapping(), ...owner });
+      const service = await serveCloudMapping({ socketPath: CLOUD_HELPER_SOCKET, mapping: privilegedCloudMapping(systemCloudMapping()), ...owner });
       await shutdown;
       await service.stop();
       return 0;

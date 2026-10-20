@@ -31,7 +31,8 @@ code until recovery or acquisition succeeds; persisting the off flag alone never
 
 `runtime.ts` selects the existing outbound environment with `effectiveProxyFor`,
 after server startup's `applyProxyEnv`. It refuses matching NO_PROXY, missing proxy
-and normalized local-443 loops, including IPv4-mapped IPv6. `entry.ts` binds IPv4/IPv6 loopback 443 and preflights
+and normalized local-443/10443 loops, including IPv4-mapped IPv6. `entry.ts` binds
+IPv4/IPv6 loopback 10443 as the ordinary proxy user and preflights
 the fixed cloud target through HTTP(S) CONNECT or SOCKS5 before acquiring a mapping.
 It reuses `dialTunnel` in `src/lib/opaque-proxy-tunnel.ts`, whose handshake returns
 a paused raw socket. Entry shutdown aborts in-flight tunnel establishment as well as
@@ -54,7 +55,9 @@ the config flag is already off but the recovery helper remains installed.
 
 `helper.ts` owns the mapping while one authorized Unix-socket connection remains.
 `helper-client.ts` sends only fixed protocol actions, never a path, command or secret.
-Disconnect releases the mapping; an active owner excludes another runtime/recover.
+Disconnect releases the mapping and privileged listeners; an active owner excludes another runtime/recover.
+Listener activation is asynchronous, so requests and disconnect recovery are serialized.
+An owner that disconnects during activation is recovered before the next lease is processed.
 Helper status derives from the live owner and any recovery error, not a second state machine.
 Acquisition delegates stale recovery to the same mapping implementation used at startup.
 `hosts.ts` records a durable journal before atomic replacement, preserves file mode/
@@ -65,7 +68,11 @@ SQLite lock and recovers before accepting clients. No public path/environment ov
 redirects its privileged operations; tests inject temporary paths into the lower layers.
 
 `install.ts` requires explicit sudo authorization and separates installation from
-activation. launchd owns the small recovery helper, not a second traffic proxy.
+activation. launchd owns the small helper. `privileged-relay.ts` binds loopback 443
+inside that root helper and forwards opaque bytes only to the fixed local 10443 entry.
+Both address families must bind before the hosts mapping is applied; failure releases
+partial listeners. Recovery removes the mapping before closing these listeners.
+Protocol v2 rejects older helpers that cannot own 443. The model proxy stays unprivileged.
 Its fixed job requests KeepAlive and RunAtLoad; recovery is after service restart,
 not instantaneous after SIGKILL or power loss. Source/npm installation bundles
 `helper-system.ts` and copies Bun; standalone installation copies the CLI and enters
@@ -91,6 +98,8 @@ separate test processes. No parallel sandbox mapping or worker implementation sh
 `tests/clients/desktop-cloud-entry.test.ts` drives the integrated runtime on ephemeral
 ports to verify IPv4/IPv6 TLS hostname validation and byte forwarding without OS trust changes.
 `tests/clients/desktop-cloud-recovery.test.ts` verifies process-loss and journal recovery.
+`tests/clients/desktop-cloud-privileged-relay.test.ts` covers listener ownership, partial
+bind cleanup, asynchronous acquisition disconnect and legacy-helper refusal.
 The native system-extension candidate and old public sandbox command are not in the source tree.
 
 ## App-server shim
