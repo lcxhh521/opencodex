@@ -26,9 +26,9 @@ export async function startCloudEntry({ proxy, port }: { proxy: string; port: nu
   const sockets = new Set<Socket>();
   const establishment = new AbortController();
   let stopped = false;
-  const dial = async () => {
+  const dial = async (signal = establishment.signal) => {
     try {
-      return await dialTunnel(`${TARGET.host}:${TARGET.port}`, proxyRoute(proxy), { signal: establishment.signal });
+      return await dialTunnel(`${TARGET.host}:${TARGET.port}`, proxyRoute(proxy), { signal });
     } catch {
       return null;
     }
@@ -40,11 +40,12 @@ export async function startCloudEntry({ proxy, port }: { proxy: string; port: nu
     await Promise.all(servers.map(server => new Promise<void>(resolve => server.close(() => resolve()))));
   };
   const accept = async (client: Socket) => {
+    const disconnected = new AbortController();
     sockets.add(client);
     client.pause();
     client.on("error", () => client.destroy());
-    client.once("close", () => sockets.delete(client));
-    const upstream = await dial();
+    client.once("close", () => { sockets.delete(client); disconnected.abort(); });
+    const upstream = await dial(AbortSignal.any([establishment.signal, disconnected.signal]));
     if (!upstream || stopped || client.destroyed) { upstream?.destroy(); client.destroy(); return; }
     sockets.add(upstream);
     upstream.on("error", () => { client.destroy(); upstream.destroy(); });

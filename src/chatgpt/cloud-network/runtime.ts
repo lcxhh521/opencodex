@@ -1,4 +1,4 @@
-import { effectiveProxyFor, noProxyMatches, type ProxyEnvMap } from "../../lib/proxy-env";
+import { effectiveProxyFor, noProxyMatches, normalizeProxyHostname, type ProxyEnvMap } from "../../lib/proxy-env";
 import { startCloudEntry } from "./entry";
 import { acquireCloudMapping, cloudHelperRequest } from "./helper-client";
 import { CLOUD_HOST, CLOUD_HELPER_SOCKET, CloudNetworkError } from "./contract";
@@ -9,7 +9,9 @@ export function cloudNetworkProxy(env: ProxyEnvMap = process.env): string {
   const proxy = effectiveProxyFor(target, env);
   if (!proxy) throw new CloudNetworkError("cloud_proxy_missing");
   const endpoint = new URL(proxy);
-  if (endpoint.hostname === CLOUD_HOST || (["localhost", "127.0.0.1", "[::1]"].includes(endpoint.hostname)
+  const hostname = normalizeProxyHostname(endpoint.hostname);
+  // URL canonicalizes IPv4-mapped IPv6, including dotted-decimal forms, to this spelling.
+  if (hostname === CLOUD_HOST || (["localhost", "127.0.0.1", "::1", "::ffff:7f00:1"].includes(hostname)
     && (endpoint.port || (endpoint.protocol === "https:" ? "443" : "80")) === "443")) {
     throw new CloudNetworkError("cloud_proxy_loop");
   }

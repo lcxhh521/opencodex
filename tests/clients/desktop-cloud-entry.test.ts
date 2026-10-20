@@ -28,6 +28,33 @@ test("stopping the entry cancels pending proxy establishment", async () => {
   }
 });
 
+for (const close of ["destroy", "resetAndDestroy"] as const) test(`client ${close} cancels only its pending proxy establishment`, async () => {
+  const options = { stall: false };
+  const proxy = await cloudTestProxy(options);
+  let entry: Awaited<ReturnType<typeof startCloudEntry>> | undefined;
+  const clients: Socket[] = [];
+  try {
+    entry = await startCloudEntry({ proxy: `http://127.0.0.1:${proxy.port}`, port: 0 });
+    options.stall = true;
+    const client = connectTcp(entry.endpoints[0]!);
+    clients.push(client); client.on("error", () => {});
+    for (let i = 0; i < 100 && proxy.requests.length < 2; i++) await Bun.sleep(10);
+    expect(proxy.requests).toHaveLength(2);
+    client[close]();
+    for (let i = 0; i < 100 && proxy.connectionCount > 0; i++) await Bun.sleep(10);
+    expect(proxy.connectionCount).toBe(0);
+    options.stall = false;
+    const next = connectTcp(entry.endpoints[1]!);
+    clients.push(next); next.on("error", () => {});
+    for (let i = 0; i < 100 && proxy.requests.length < 3; i++) await Bun.sleep(10);
+    expect(proxy.requests).toHaveLength(3);
+    expect(proxy.connectionCount).toBe(1); // The listener and other clients remain usable.
+  } finally {
+    for (const client of clients) client.destroy();
+    await entry?.stop(); await proxy.stop();
+  }
+});
+
 test.skipIf(process.platform === "win32")("IPv4/IPv6 preserve end-to-end TLS and binary bytes; wrong hostname is rejected", async () => {
   const ca = createLocalInterceptCa();
   const leaf = issueLocalInterceptLeaf(ca, [CLOUD_HOST]);

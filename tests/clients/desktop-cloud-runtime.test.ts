@@ -66,6 +66,17 @@ test("cloud config is strictly opt-in and uses the existing proxy selection", ()
   expect(() => cloudNetworkProxy({ HTTPS_PROXY: "https://localhost" })).toThrow("cloud_proxy_loop");
 });
 
+test("cloud proxy refuses normalized self-listener and mapped-target aliases", () => {
+  for (const proxy of ["http://localhost.:443", "https://LOCALHOST.", "socks5h://localhost.:443",
+    "http://[::1]:443", "http://[::ffff:127.0.0.1]:443", "http://[::ffff:7f00:0001]:443",
+    "http://127.1:443", `http://${CLOUD_HOST}.:8123`]) {
+    expect(() => cloudNetworkProxy({ HTTPS_PROXY: proxy })).toThrow("cloud_proxy_loop");
+  }
+  for (const proxy of ["http://localhost.:8123", "http://[::ffff:127.0.0.1]:8123", "socks5h://localhost."]) {
+    expect(cloudNetworkProxy({ HTTPS_PROXY: proxy })).toBe(proxy);
+  }
+});
+
 describe.skipIf(process.platform === "win32")("formal mapping helper in isolated filesystem", () => {
   test("journal recovery preserves user edits, file mode and resolver ordering", () => {
     const f = cloudFixture();

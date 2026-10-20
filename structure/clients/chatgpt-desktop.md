@@ -23,11 +23,12 @@ code until recovery or acquisition succeeds; persisting the off flag alone never
 
 `runtime.ts` selects the existing outbound environment with `effectiveProxyFor`,
 after server startup's `applyProxyEnv`. It refuses matching NO_PROXY, missing proxy
-and obvious local-443 loops. `entry.ts` binds IPv4/IPv6 loopback 443 and preflights
+and normalized local-443 loops, including IPv4-mapped IPv6. `entry.ts` binds IPv4/IPv6 loopback 443 and preflights
 the fixed cloud target through HTTP(S) CONNECT or SOCKS5 before acquiring a mapping.
 It reuses `dialTunnel` in `src/lib/opaque-proxy-tunnel.ts`, whose handshake returns
 a paused raw socket. Entry shutdown aborts in-flight tunnel establishment as well as
 closing established sockets, so pending CONNECT/SOCKS handshakes cannot outlive teardown.
+An incoming client close aborts only its pending handshake; other clients and the listener remain active.
 All client TLS remains opaque; no CA, payload logging,
 account reads or direct fallback is added. The relay resumes the socket only after
 attaching the client pipes; existing WebSocket transports remain unchanged.
