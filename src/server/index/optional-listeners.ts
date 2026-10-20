@@ -1,4 +1,5 @@
 import { createChatgptUnblockLifecycle } from "./chatgpt-unblock-lifecycle";
+import { createChatgptCloudNetworkLifecycle, type CloudNetworkLifecycle } from "./chatgpt-cloud-network-lifecycle";
 import { serviceApiTokenFingerprint } from "../../lib/service-secrets";
 import type { Server } from "bun";
 import type { OcxConfig } from "../../types";
@@ -32,6 +33,7 @@ export interface OptionalListenerStartContext<T> {
 export interface OptionalListenerSet<T> {
   ensureClaudeIntercept(): ReturnType<ClaudeInterceptLifecycle<T>["ensure"]>;
   claudeInterceptOutcome(): ReturnType<ClaudeInterceptLifecycle<T>["lastOutcome"]>;
+  cloudNetwork(): CloudNetworkLifecycle;
   ingressOf(server: Server<T>): ServerIngress | undefined;
   linkRouteAllowed(url: URL, req: Request): boolean;
   linkAdmissionKeyIds(): ReadonlySet<string>;
@@ -47,9 +49,10 @@ export interface OptionalListenerSet<T> {
   stop(): Promise<void>;
 }
 
-export function createOptionalListenerSet<T>(linkDeps: LinkListenerDeps = {}): OptionalListenerSet<T> {
+export function createOptionalListenerSet<T>(linkDeps: LinkListenerDeps = {}, cloudDeps: Parameters<typeof createChatgptCloudNetworkLifecycle>[0] = {}): OptionalListenerSet<T> {
   const claudeIntercept: ClaudeInterceptLifecycle<T> = createClaudeInterceptLifecycle<T>();
   const chatgptUnblock = createChatgptUnblockLifecycle<T>();
+  const cloudNetwork = createChatgptCloudNetworkLifecycle(cloudDeps);
   const linkListener: LinkListenerLifecycle<T> = createLinkListenerLifecycle<T>(linkDeps);
   let activeConfig: OcxConfig | undefined;
   const supervisor = createLinkSupervisor({
@@ -75,6 +78,7 @@ export function createOptionalListenerSet<T>(linkDeps: LinkListenerDeps = {}): O
   return {
     ensureClaudeIntercept: () => claudeIntercept.ensure(),
     claudeInterceptOutcome: () => claudeIntercept.lastOutcome(),
+    cloudNetwork: () => cloudNetwork,
     ingressOf(server) {
       if (linkListener.ownsListener(server)) return "hub-link";
       if (claudeIntercept.ownsListener(server)) return "claude-intercept";
@@ -115,6 +119,7 @@ export function createOptionalListenerSet<T>(linkDeps: LinkListenerDeps = {}): O
         dispatch: ctx.dispatch,
       });
       chatgptUnblock.start({ config: ctx.config, publicPort: ctx.publicPort });
+      cloudNetwork.start(ctx.config);
     },
     ensureStarted: () => linkListener.ensureStarted(),
     close: () => linkListener.close(),
@@ -126,6 +131,7 @@ export function createOptionalListenerSet<T>(linkDeps: LinkListenerDeps = {}): O
     },
     async stop() {
       let failure: unknown;
+      try { await cloudNetwork.stop(); } catch (error) { failure = error; }
       if (supervisorStop) {
         try { await supervisorStop(); } catch (error) { failure = error; }
       }

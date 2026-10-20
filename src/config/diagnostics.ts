@@ -127,6 +127,9 @@ function validFileConfigDiagnostics(config: OcxConfig, rawParsed: unknown): Conf
   const normalized = normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, rawParsed), rawParsed);
   const warnings = configPlaceholderWarnings(normalized);
   if (rawForce !== undefined && !isSubagentModelEntry(rawForce)) warnings.push("claudeCode.subagentModelForce ignored: expected a safe roster-style model id");
+  if (normalized.chatgptDesktop?.cloudNetwork === true && process.platform !== "darwin") {
+    warnings.push("chatgptDesktop.cloudNetwork is macOS only; ignored on this platform");
+  }
   if (normalized.chatgptDesktop?.appServerShim === true && process.platform !== "darwin") {
     warnings.push("chatgptDesktop.appServerShim is experimental and macOS only; ignored on this platform");
   }

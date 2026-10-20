@@ -17,6 +17,8 @@ const DEFAULT_DEPS: CodexShimAutoRestoreCliDeps = {
 
 /** Identify command namespaces whose execution must not trigger automatic shim repair. */
 export function skipsCodexShimAutoRestore(command: string | undefined, args: string[]): boolean {
+  if (command === "chatgpt" && args[1] === "network") return true;
+  if (command === "internal" && args[1] === "chatgpt-cloud-network") return true;
   if (command === "uninstall" || command === "remove") return true;
   if (command === "status" || command === "doctor") return true;
   // `lab` is read-only inspection; it must not trigger shim side effects.

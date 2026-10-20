@@ -1,4 +1,11 @@
 {
+  "desktop-cloud-network.test.ts": "clients",
+  "desktop-cloud-install.test.ts": "clients",
+  "desktop-cloud-runtime.test.ts": "clients",
+  "desktop-cloud-management.test.ts": "clients",
+  "desktop-cloud-recovery.test.ts": "clients",
+  "desktop-cloud-entry.test.ts": "clients",
+  "desktop-cloud-launch.test.ts": "clients",
   "messages-native-empty-inline.test.ts": "claude-integration",
   "explicit-empty-tool-catalog.test.ts": "responses",
   "explicit-empty-tool-catalog-history.test.ts": "responses",

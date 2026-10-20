@@ -23,9 +23,11 @@ import {
 } from "../chatgpt/app-server-shim/launcher";
 import { untrustedChatgptBundleReason } from "../chatgpt/app-server-shim/bundle-trust";
 import { darwinDefaultExec, darwinDesktopAppAdapter } from "../codex/desktop-app/darwin";
+import { CLOUD_HELPER_SOCKET, CLOUD_HELPER_PLIST } from "../chatgpt/cloud-network/contract";
 import type { DesktopAppInstall } from "../codex/desktop-app/types";
 
 const USAGE = `Usage (experimental, macOS only):
+  ocx chatgpt network <action>        Manage opt-in cloud routing and its recovery helper
   ocx chatgpt launch                 Relaunch with configured app-server shim and/or TLS intercept
   ocx chatgpt restore                Relaunch with native networking and remove the shim launcher
   ocx chatgpt status                 Inspect flags, listener, CA trust, watcher and app environment
@@ -129,6 +131,7 @@ async function quitApp(install: DesktopAppInstall, launcher: string): Promise<bo
 
 export async function handleChatgptCommand(args: string[], platform: NodeJS.Platform = process.platform): Promise<number> {
   const sub = args[0];
+  if (sub === "network") return (await import("./chatgpt-network-command")).handleChatgptNetworkCommand(args.slice(1), platform);
   if (!sub || ["help", "--help", "-h"].includes(sub)) {
     console.log(USAGE);
     return sub ? 0 : 64;
@@ -152,7 +155,8 @@ export async function handleChatgptCommand(args: string[], platform: NodeJS.Plat
     const config = loadConfig();
     const intercept = config.chatgptDesktop?.unblockSend === true;
     const shim = config.chatgptDesktop?.appServerShim === true;
-    const live = intercept || sub === "status" ? await findLiveProxy().catch(() => null) : null;
+    const cloud = config.chatgptDesktop?.cloudNetwork === true;
+    const live = intercept || cloud || sub === "status" ? await findLiveProxy().catch(() => null) : null;
     const port = intercept && sub !== "restore" && sub !== "status" ? resolveChatgptUnblockPort(config, live?.port) : undefined;
     const pac = port !== undefined ? resolveChatgptPacEntry(config, live?.port) : undefined;
     const launcher = chatgptShimLauncherPath();
@@ -172,6 +176,7 @@ CODEX_CLI_PATH launcher: ${app.shim === null ? "unknown" : app.shim ? "yes" : "n
       } catch (error) {
         console.log(`Intercept status unavailable: ${error instanceof Error ? error.message : String(error)}`);
       }
+      await (await import("./chatgpt-network-command")).handleChatgptNetworkCommand(["status"], platform);
       return 0;
     }
     if (sub === "install-watcher") {
@@ -200,13 +205,21 @@ CODEX_CLI_PATH launcher: ${app.shim === null ? "unknown" : app.shim ? "yes" : "n
     }
     let binary: string | undefined;
     if (sub === "launch") {
-      if (!shim && !intercept) {
+      if (!shim && !intercept && !cloud) {
         // Read the file only to explain a refusal; restore and a valid launch never touch it.
         const configIssue = chatgptDesktopIssueInFile();
         console.error(configIssue
           ? `ChatGPT desktop launch disabled: config.json ${configIssue}. The whole chatgptDesktop block is ignored until that is fixed.`
-          : "Enable chatgptDesktop.appServerShim or chatgptDesktop.unblockSend before launching.");
+          : "Enable chatgptDesktop.appServerShim, unblockSend or cloudNetwork before launching.");
         return 1;
+      }
+      if (cloud) {
+        const { runtimeRequest } = await import("./runtime-api");
+        const result = await runtimeRequest<{ network: { state: string } }>("/api/chatgpt-network/status");
+        if (result.network.state !== "active") {
+          console.error("Cloud network is not active; inspect with: ocx chatgpt network status");
+          return 1;
+        }
       }
       if (intercept) {
         if (config.runtimeRole === "client" || (await probeChatgptUnblockListener(port!)).state !== "ours") {
@@ -234,6 +247,8 @@ CODEX_CLI_PATH launcher: ${app.shim === null ? "unknown" : app.shim ? "yes" : "n
       console.error("Uninstall the launch watcher before restoring native networking.");
       return 1;
     }
+    if (sub === "restore" && (cloud || existsSync(CLOUD_HELPER_SOCKET) || existsSync(CLOUD_HELPER_PLIST))
+      && await (await import("./chatgpt-network-command")).handleChatgptNetworkCommand(["recover"], platform) !== 0) return 1;
     // Preflight before changing the launcher. quitApp rechecks at the action boundary.
     if (appState(install, launcher).running === null) {
       console.error("ChatGPT process inspection failed; no launcher was changed and no app was opened. Retry after resolving inspection.");

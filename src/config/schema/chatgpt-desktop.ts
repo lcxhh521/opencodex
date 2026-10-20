@@ -3,9 +3,10 @@ import { redactSecretString } from "../../lib/redact";
 
 /**
  * Experimental macOS ChatGPT desktop integration: the app-server shim, the send-unblock intercept,
- * and its PAC-fallback launch mode.
+ * its PAC-fallback launch mode, and independent opaque cloud networking.
  */
 export const chatgptDesktopSchema = z.object({
+  cloudNetwork: z.boolean().optional(),
   appServerShim: z.boolean().optional(),
   unblockSend: z.boolean().optional(),
   pacFallback: z.boolean().optional(),

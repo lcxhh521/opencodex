@@ -25,7 +25,7 @@ These answer in the CLI head and never reach the proxy, so they work with nothin
 
 | Chapter | Declared capabilities |
 |---|---|
-| [lifecycle](01_surface_lifecycle.md) | 12 |
+| [lifecycle](01_surface_lifecycle.md) | 13 |
 | [providers-models](01_surface_providers-models.md) | 47 |
 | [accounts](01_surface_accounts.md) | 40 |
 | [agents-routing](01_surface_agents-routing.md) | 51 |
@@ -799,6 +799,10 @@ Original invocation order. These headings preserve links to the previous single-
 
 [State-changing task](01_surface_agents-routing.md#ocx-agent-compaction-routing-clear)
 
+### `ocx chatgpt network`
+
+[State-changing task](01_surface_lifecycle.md#ocx-chatgpt-network)
+
 ### `ocx grok status`
 
 [Read-oriented task](01_surface_integrations.md#ocx-grok-status)
@@ -1393,6 +1397,6 @@ Original invocation order. These headings preserve links to the previous single-
 
 ## Counts
 
-- declared capabilities: 336
-- of those, state-changing: 205
+- declared capabilities: 337
+- of those, state-changing: 206
 - head-resolved invocations: 2

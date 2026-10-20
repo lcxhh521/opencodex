@@ -94,6 +94,10 @@ export interface ManagementRoute {
 
 /** Every reachable management route. */
 export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
+  { method: "GET", path: "/api/chatgpt-network/status", module: "server/management/chatgpt-network-routes", mutates: false },
+  { method: "POST", path: "/api/chatgpt-network/enable", module: "server/management/chatgpt-network-routes", mutates: true },
+  { method: "POST", path: "/api/chatgpt-network/disable", module: "server/management/chatgpt-network-routes", mutates: true },
+  { method: "POST", path: "/api/chatgpt-network/recover", module: "server/management/chatgpt-network-routes", mutates: true },
   // server/management-api
   { method: "POST", path: "/api/stop", module: "server/management-api", mutates: true },
   // codex/auth-api

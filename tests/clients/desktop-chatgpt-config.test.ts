@@ -113,6 +113,15 @@ describe("experimental ChatGPT desktop config", () => {
       expect(validateConfigCandidate(candidate).ok).toBe(false);
     }
   });
+  test("cloud flag is independent and preserves the existing desktop flags", () => {
+    for (const cloudNetwork of [undefined, false, true]) {
+      const chatgptDesktop = { unblockSend: true, appServerShim: true, pacFallback: true, port: 10300, cloudNetwork };
+      const candidate = { ...base, chatgptDesktop };
+      expect(configSchema.parse(candidate).chatgptDesktop).toEqual(chatgptDesktop);
+      expect(validateConfigCandidate(candidate).ok).toBe(true);
+    }
+    expect(validateConfigCandidate({ ...base, chatgptDesktop: { cloudNetwork: "true" } }).ok).toBe(false);
+  });
   test("all operations reject non-macOS without app side effects", async () => {
     for (const sub of ["launch", "restore", "status", "install-watcher", "uninstall-watcher"]) expect(await handleChatgptCommand([sub], "linux")).toBe(1);
   });

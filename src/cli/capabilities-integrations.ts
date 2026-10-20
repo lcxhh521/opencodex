@@ -2,6 +2,16 @@ import type { Capability } from "./capability-types";
 
 export const INTEGRATION_CAPABILITIES: readonly Capability[] = [
   {
+    command: ["chatgpt", "network"],
+    summary: "Manage OpenCodex's built-in desktop cloud connection and recovery helper.",
+    routes: [{ method: "GET", path: "/api/chatgpt-network/status" },
+      { method: "POST", path: "/api/chatgpt-network/enable" }, { method: "POST", path: "/api/chatgpt-network/disable" },
+      { method: "POST", path: "/api/chatgpt-network/recover" }],
+    flags: [{ name: "--yes", value: "boolean", summary: "Confirm install/uninstall before the separate administrator prompt." }],
+    mutates: true, json: "payload",
+    details: ["Actions: status, install, enable, disable, recover, uninstall. Install prepares a fixed-domain recovery helper without enabling routing. Enable persists chatgptDesktop.cloudNetwork and starts the live runtime on loopback 443 using the existing outbound proxy. Disable restores the owned mapping before closing listeners. Status distinguishes configured intent from runtime state; a live tunnel does not prove an authenticated desktop session. Recover also works with the proxy stopped. Uninstall requires disabled routing. No arbitrary hosts path or separate proxy-port setting is accepted."],
+  },
+  {
     command: ["grok", "status"],
     usage: "ocx grok status [--json]",
     summary: "Read Grok model fence state and catalog.",
