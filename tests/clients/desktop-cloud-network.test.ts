@@ -24,6 +24,70 @@ describe("integrated cloud network CLI", () => {
     }
   });
 
+  test("JSON is order-independent only for payload actions and never grants installer consent", () => {
+    for (const action of ["status", "enable", "disable", "recover"]) {
+      for (const args of [[action, "--json"], ["--json", action]]) {
+        const original = [...args];
+        expect(cloudNetworkArguments(args)).toEqual({ action, json: true, yes: false });
+        expect(args).toEqual(original);
+      }
+    }
+    for (const action of ["install", "uninstall"]) {
+      expect(cloudNetworkArguments([action, "--yes"])).toEqual({ action, json: false, yes: true });
+      for (const args of [[action, "--json"], ["--json", action], [action, "--yes", "--json"]]) {
+        expect(() => cloudNetworkArguments(args)).toThrow("Usage");
+      }
+    }
+    for (const args of [["status", "--json", "--json"], ["status", "--json=true"],
+      ["enable", "--json", "--yes"], ["recover", "--json", "extra"]]) {
+      expect(() => cloudNetworkArguments(args)).toThrow("Usage");
+    }
+  });
+
+  test("JSON requests emit exactly the existing live payload and preserve failed exit status", async () => {
+    const payload = { ok: true, network: { state: "active", applicationHandshake: "unverified" } };
+    const fetchImpl = mock(async () => Response.json(payload));
+    const deps = { baseUrl: "http://127.0.0.1:1", fetchImpl: fetchImpl as unknown as typeof fetch };
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    const error = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      for (const action of ["status", "enable", "disable", "recover"]) {
+        for (const args of [[action], [action, "--json"], ["--json", action]]) {
+          log.mockClear();
+          expect(await handleChatgptNetworkCommand(args, "darwin", deps)).toBe(0);
+          expect(log).toHaveBeenCalledTimes(1);
+          expect(JSON.parse(log.mock.calls.map(call => call.join(" ")).join("\n"))).toEqual(payload);
+        }
+      }
+      expect(fetchImpl).toHaveBeenCalledTimes(12);
+      expect(error).not.toHaveBeenCalled();
+      log.mockClear();
+      expect(await handleChatgptNetworkCommand(["enable", "--json"], "darwin", { ...deps,
+        fetchImpl: (async () => Response.json({ error: "helper missing" }, { status: 409 })) as typeof fetch })).toBe(1);
+      expect(log).not.toHaveBeenCalled();
+      expect(error.mock.calls.flat().join(" ")).toContain("helper missing");
+    } finally { log.mockRestore(); error.mockRestore(); }
+  });
+
+  test("unsupported JSON and repeated flags refuse before runtime or administrator operations", async () => {
+    const unexpected = mock(() => { throw new Error("unexpected runtime access"); });
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    const error = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      for (const args of [["install", "--json"], ["uninstall", "--yes", "--json"],
+        ["status", "--json", "--json"], ["enable", "--json", "--yes"]]) {
+        // A parser regression must fail safely at the platform gate, never invoke sudo.
+        expect(await handleChatgptNetworkCommand(args, "linux", {
+          findLiveProxy: unexpected, fetchImpl: unexpected as unknown as typeof fetch,
+        })).toBe(64);
+      }
+      expect(unexpected).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+      expect(error).toHaveBeenCalledTimes(4);
+      expect(error.mock.calls.every(call => String(call[0]).startsWith("Usage"))).toBe(true);
+    } finally { log.mockRestore(); error.mockRestore(); }
+  });
+
   test("help and non-macOS refusal have no installation or runtime side effects", async () => {
     const log = spyOn(console, "log").mockImplementation(() => {});
     const error = spyOn(console, "error").mockImplementation(() => {});

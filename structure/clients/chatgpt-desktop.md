@@ -7,6 +7,11 @@ integration. `src/config/schema/chatgpt-desktop.ts` validates this independent b
 `src/types/config.ts` carries it independently of the app-server shim flag.
 The public `src/cli/chatgpt-network-command.ts` supplies status/install/enable/disable/
 recover/uninstall. This is the only cloud-network implementation and public entry.
+Status/enable/disable/recover always emit their JSON payload and accept order-independent
+`--json`. Usage and thrown command errors go to stderr; a failed recovery can instead
+return a JSON payload without stderr, so exit status remains authoritative. Install/uninstall reject
+`--json` before config, confirmation or administrator operations and retain `--yes`
+as confirmation only. Unknown or repeated flags fail usage validation before effects.
 
 `src/server/index/chatgpt-cloud-network-lifecycle.ts` joins the existing
 `src/server/index/optional-listeners.ts` startup and awaited shutdown. Startup remains

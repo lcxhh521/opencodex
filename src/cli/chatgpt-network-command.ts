@@ -1,27 +1,34 @@
-import { runtimeRequest, runtimeBaseUrl, type RuntimeApiDeps } from "./runtime-api";
+import { runtimeRequest, runtimeBaseUrl, takeFlag, type RuntimeApiDeps } from "./runtime-api";
 import { findLiveProxy } from "../server/proxy-liveness";
 import { cloudHelperRequest } from "../chatgpt/cloud-network/helper-client";
 import { CloudNetworkError } from "../chatgpt/cloud-network/contract";
 import { interactiveConfirm } from "./interactive-confirm";
 
 export const CHATGPT_NETWORK_USAGE = `Usage (macOS, built into OpenCodex):
-  ocx chatgpt network status
+  ocx chatgpt network status [--json]
   ocx chatgpt network install [--yes]    Authorize the internal recovery helper; routing stays off
-  ocx chatgpt network enable            Save cloudNetwork=true and start the live integration
-  ocx chatgpt network disable           Save cloudNetwork=false and restore the owned mapping
-  ocx chatgpt network recover           Disable and retry mapping/cache recovery
+  ocx chatgpt network enable [--json]   Save cloudNetwork=true and start the live integration
+  ocx chatgpt network disable [--json]  Save cloudNetwork=false and restore the owned mapping
+  ocx chatgpt network recover [--json]  Disable and retry mapping/cache recovery
   ocx chatgpt network uninstall [--yes]  Remove the idle internal helper after disable
 Uses OpenCodex's configured outbound proxy and loopback 443. No CA, signed app or system extension.
 Only codex-cloud-backend.chatgpt.com is mapped; this affects all OS-resolver clients of that host.
-Enable requires an installed helper and a running OpenCodex server.`;
+Enable requires an installed helper and a running OpenCodex server.
+Status/enable/disable/recover emit JSON with or without --json; check the exit status for failure.
+Usage and thrown command errors go to stderr; failed recovery may instead return a JSON payload.
+Install/uninstall are interactive administrator operations and do not support --json.`;
 
 export function cloudNetworkArguments(args: string[]) {
-  const action = args[0];
+  const remaining = [...args];
+  const json = takeFlag(remaining, "--json");
+  const yes = takeFlag(remaining, "--yes");
+  const action = remaining[0];
+  const installer = action === "install" || action === "uninstall";
   if (!["status", "install", "enable", "disable", "recover", "uninstall"].includes(action ?? "")
-    || args.length > 2 || (args.length === 2 && (!["install", "uninstall"].includes(action!) || args[1] !== "--yes"))) {
+    || remaining.length !== 1 || (yes && !installer) || (json && installer)) {
     throw new Error(CHATGPT_NETWORK_USAGE);
   }
-  return { action: action as "status" | "install" | "enable" | "disable" | "recover" | "uninstall", yes: args[1] === "--yes" };
+  return { action: action as "status" | "install" | "enable" | "disable" | "recover" | "uninstall", yes, json };
 }
 
 export async function handleChatgptNetworkCommand(args: string[], platform: NodeJS.Platform = process.platform, deps: RuntimeApiDeps = {}): Promise<number> {

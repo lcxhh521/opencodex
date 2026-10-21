@@ -63,6 +63,11 @@ The runtime binds IPv4 and IPv6 loopback port 443 and verifies CONNECT acceptanc
 requesting the mapping. An occupied or unavailable listener port leaves the mapping off.
 Status distinguishes intent, active runtime and failures; `applicationHandshake`
 remains `unverified`. Active forwarding is not proof of a logged-in cloud session.
+`status`, `enable`, `disable` and `recover` always print a JSON payload and accept
+an explicit `--json` before or after the action. Check the exit status for failure:
+a failed recovery can return a JSON payload without stderr. Usage and thrown command
+errors go to stderr. `install` and `uninstall` do not support `--json`: they retain human
+confirmation and separate administrator authorization; `--yes` skips only confirmation.
 `ocx chatgpt status` includes cloud status, and a cloud-only `ocx chatgpt launch`
 requires that runtime to be active.
 

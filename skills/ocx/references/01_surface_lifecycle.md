@@ -38,6 +38,8 @@ Drives no management route.
 
 ### `ocx chatgpt network`
 
+Usage: `ocx chatgpt network <status|enable|disable|recover> [--json]; ocx chatgpt network <install|uninstall> [--yes]`
+
 Manage OpenCodex's built-in desktop cloud connection and recovery helper.
 
 State-changing: yes. JSON mode: `payload`.
@@ -52,8 +54,10 @@ State-changing: yes. JSON mode: `payload`.
 | Flag | Value | Meaning |
 |---|---|---|
 | `--yes` | boolean | Confirm install/uninstall before the separate administrator prompt. |
+| `--json` | boolean | Request the existing JSON payload for status/enable/disable/recover; not supported by install/uninstall. |
 
 - Actions: status, install, enable, disable, recover, uninstall. Install prepares a fixed-domain recovery helper without enabling routing. Enable persists chatgptDesktop.cloudNetwork and starts the live runtime on loopback 443 using the existing outbound proxy. Disable restores the owned mapping before closing listeners. Status distinguishes configured intent from runtime state; a live tunnel does not prove an authenticated desktop session. Recover also works with the proxy stopped. Uninstall requires disabled routing. No arbitrary hosts path or separate proxy-port setting is accepted.
+- Status/enable/disable/recover emit JSON payloads with or without --json. Check the exit status: a failed recovery can return JSON without stderr; usage and thrown command errors go to stderr. Install/uninstall retain human confirmation and separate administrator authorization and reject --json before any operation.
 
 ### `ocx status`
 
