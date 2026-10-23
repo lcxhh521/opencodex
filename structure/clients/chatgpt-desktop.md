@@ -11,7 +11,7 @@ writes reject malformed values and unknown fields.
 ## Integrated cloud network
 
 `src/chatgpt/cloud-network/` owns the opt-in `chatgptDesktop.cloudNetwork`
-integration. `src/config/schema/leaf-validators.ts` validates this independent boolean;
+integration. `src/config/schema/chatgpt-desktop.ts` validates this independent boolean;
 `src/types/config.ts` carries it independently of the app-server shim flag.
 The public `src/cli/chatgpt-network-command.ts` supplies status/install/enable/disable/
 recover/uninstall. This is the only cloud-network implementation and public entry.
@@ -34,6 +34,16 @@ after server startup's `applyProxyEnv`. It refuses matching NO_PROXY, missing pr
 and normalized local-443/10443 loops, including IPv4-mapped IPv6. `entry.ts` binds
 IPv4/IPv6 loopback 10443 as the ordinary proxy user and preflights
 the fixed cloud target through HTTP(S) CONNECT or SOCKS5 before acquiring a mapping.
+`src/chatgpt/cloud-network/dns.ts` resolves that hostname through the same outbound
+proxy using the fixed HTTPS endpoint
+`https://1.1.1.1/dns-query?name=codex-cloud-backend.chatgpt.com&type=A`.
+It accepts IPv4 A records, shares one pending lookup between concurrent callers,
+rotates returned addresses and caches them until the shortest returned TTL expires.
+The next request after expiry refreshes the cache; failed refreshes neither reuse
+expired answers nor fall back to ordinary hostname resolution. The lookup has a
+12-second timeout and is cancelled by entry shutdown. CONNECT/SOCKS targets the
+resolved IPv4 address on port 443, while the client's original TLS stream and SNI
+remain unchanged. Failed DNS or tunnel preflight leaves the hosts mapping untouched.
 It reuses `dialTunnel` in `src/lib/opaque-proxy-tunnel.ts`, whose handshake returns
 a paused raw socket. Entry shutdown aborts in-flight tunnel establishment as well as
 closing established sockets, so pending CONNECT/SOCKS handshakes cannot outlive teardown.
@@ -49,9 +59,19 @@ it. Enable/disable share the existing config transaction before runtime reconcil
 failed persistence does not start a listener. Failed activation retains configured
 intent and reports a non-success result, distinct from active state.
 The endpoint cannot install, elevate, choose a hosts path or supply an upstream proxy.
-`ocx chatgpt status` includes cloud state; cloud-only launch checks active state;
+`ocx chatgpt status` includes cloud state; every launch with cloud networking enabled checks active state;
 restore recovers cloud routing before relaunching the trusted desktop, including when
 the config flag is already off but the recovery helper remains installed.
+
+Cloud launch arguments keep Chromium requests on the local hosts route. With an
+explicit system HTTP/SOCKS proxy, `src/cli/chatgpt-command.ts` adds the fixed cloud
+hostname to the proxy bypass list; cloud-only launches retain the system proxy for
+other hosts. With a system PAC, the shared generator in
+`src/chatgpt/desktop-unblock/pac.ts` puts the cloud hostname's DIRECT rule before
+the embedded system rules, retaining those rules for other hosts. DIRECT here uses
+the helper's loopback mapping; the cloud relay still uses the configured outbound
+proxy. The existing size/unreadable-PAC fallback uses the captured system proxy chain,
+then DIRECT. Cloud-only launch needs neither a local CA nor the send-unblock listener.
 
 `helper.ts` owns the mapping while one authorized Unix-socket connection remains.
 `helper-client.ts` sends only fixed protocol actions, never a path, command or secret.
@@ -104,6 +124,11 @@ ports to verify IPv4/IPv6 TLS hostname validation and byte forwarding without OS
 `tests/clients/desktop-cloud-recovery.test.ts` verifies process-loss and journal recovery.
 `tests/clients/desktop-cloud-privileged-relay.test.ts` covers listener ownership, partial
 bind cleanup, asynchronous acquisition disconnect and legacy-helper refusal.
+`tests/clients/desktop-cloud-dns.test.ts` covers proxy-routed lookup, shared requests,
+TTL refresh, failed refresh, cancellation and mapping-free preflight failure.
+`tests/clients/desktop-cloud-launch.test.ts` checks the public command's cloud-only
+and combined launch arguments with controlled app/process fixtures.
+These isolated checks do not establish deployment or authenticated desktop acceptance.
 The native system-extension candidate and old public sandbox command are not in the source tree.
 
 ## App-server shim
@@ -221,7 +246,7 @@ encoding fails before CONNECT is written and closes the proxy socket. SOCKS user
 retain the shared empty-password compatibility behavior.
 
 `src/chatgpt/desktop-unblock/launch-watcher.ts` owns resolver/system-proxy and PAC launch
-arguments and the optional launchd script. The watcher has no shim mode. Its launchd agent wakes on the app's `SingletonLock` and on the
+arguments and the optional launchd script. Its launchd agent wakes on the app's `SingletonLock` and on the
 `chatgpt-unblock.ready` marker that `startChatgptUnblock` rewrites once the listener is up, so an
 app that opened before opencodex is still routed. Plist freshness compares both watched paths against
 the installed generation; a legacy lock-only plist is stale. Each run checks listener identity, leaves native
@@ -231,7 +256,17 @@ restarts only an app no more than five minutes old (`ps -o etime=`); a missing o
 counts as fresh, and explicit launch is not age-limited. A failed `open` exits non-zero rather
 than printing success.
 Explicit CLI launch can supply the existing shim's launcher environment along
-with intercept arguments. A loaded watcher must be uninstalled before CLI
+with intercept arguments. Watcher installation captures `appServerShim` and
+`cloudNetwork`; corrective launches preserve the configured shim's CODEX_CLI_PATH
+only while its prepared launcher remains executable. The watcher does not create a
+shim launcher or preserve arbitrary inherited overrides. Cloud-enabled resolver
+launches bypass the system proxy for both chatgpt.com and the cloud hostname;
+with a system PAC they retain the resolver switch and add the generated PAC's DIRECT
+exceptions. An old single-host proxy bypass is not considered a correct cloud launch.
+`refreshChatgptUnblockPac` regenerates the PAC from current configuration before
+explicit intercept launch or watcher installation, so enabling cloud networking on
+a running proxy does not require restarting it to replace a stale or absent PAC.
+A loaded watcher must be uninstalled before CLI
 restore; this guard queries launchd directly without reading installed watcher files or rendering a
 script. The CLI preserves shim-only launch without a running proxy and reports
 intercept port, trust, listener identity, watcher freshness and app switches.
@@ -254,4 +289,11 @@ inline or the older `file://` form.
 Intercept regression files use the existing `tests/clients/` domain alongside
 the shim tests; shared handshake coverage is `tests/lib/socks5-handshake.test.ts`.
 Both explicit layout maps register every added test basename. No duplicate app-server shim is part
-of this integration; the PAC generator and entry proxy run only with `pacFallback`.
+of this integration. The CONNECT entry runs only with `pacFallback`; cloud-enabled
+intercept startup also generates a PAC without that entry when fallback is off.
+That PAC sends both fixed hostnames DIRECT so the resolver rule and cloud hosts mapping
+apply, while retaining the captured route for all other hosts. Combined PAC fallback
+keeps chatgpt.com on the intercept entry and only the cloud hostname DIRECT.
+`tests/clients/desktop-unblock-pac.test.ts`, `tests/clients/desktop-unblock-pac-runtime.test.ts`
+and `tests/clients/desktop-unblock-launch-script.test.ts` cover this composition and
+prepared-shim preservation with controlled local resources.

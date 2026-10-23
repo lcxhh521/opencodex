@@ -179,6 +179,9 @@ function run(mode: "watch" | "launch" | "native", options: {
   inheritedCliPath?: string;
   /** PAC-fallback mode: the PAC file is written and the script launches through it. */
   pac?: boolean;
+  cloudNetwork?: boolean;
+  /** The running app already has the cloud exception alongside the fixed system proxy. */
+  cloudRouted?: boolean;
   /** PAC mode: what the CONNECT entry probe sees. */
   entry?: "up" | "up56" | "down";
   entryPort?: number;
@@ -188,18 +191,19 @@ function run(mode: "watch" | "launch" | "native", options: {
   removePacOnQuit?: boolean;
 }) {
   const pacFile = join(options.configDir ?? dir, "chatgpt-unblock.pac");
-  if (options.pac === true && options.pacFile !== "missing") {
+  if ((options.pac === true || options.cloudNetwork === true) && options.pacFile !== "missing") {
     if (options.pacFile === "directory") mkdirSync(pacFile);
     else {
       writeFileSync(pacFile, options.pacFile === "empty" ? "" : PAC_TEXT);
       if (options.pacFile === "unreadable") chmodSync(pacFile, 0o000);
     }
   }
+  const resolverArgs = `${RESOLVER} ${options.cloudRouted ? "--proxy-server=http://127.0.0.1:7892,direct:// --proxy-bypass-list=chatgpt.com;codex-cloud-backend.chatgpt.com" : "--proxy-bypass-list=chatgpt.com"}`;
   const processes = [
     options.app === "plain" ? `400|ChatGPT|${APP_BINARY}` : null,
-    options.app === "flagged" ? `400|ChatGPT|${APP_BINARY} ${RESOLVER} --proxy-bypass-list=chatgpt.com` : null,
+    options.app === "flagged" ? `400|ChatGPT|${APP_BINARY} ${resolverArgs}` : null,
     options.app === "pac" ? `400|ChatGPT|${APP_BINARY} ${PAC_SWITCH}` : null,
-    options.app === "flagged-shim" ? `400|ChatGPT|${APP_BINARY} ${RESOLVER} --proxy-bypass-list=chatgpt.com CODEX_CLI_PATH=${SHIM_PATH()}` : null,
+    options.app === "flagged-shim" ? `400|ChatGPT|${APP_BINARY} ${resolverArgs} CODEX_CLI_PATH=${SHIM_PATH()}` : null,
     options.app === "shim-only" ? `400|ChatGPT|${APP_BINARY} CODEX_CLI_PATH=${SHIM_PATH()}` : null,
     // Helpers share the bundle but not the process name; they must never count as the app.
     options.app !== "none" ? `401|ChatGPT Helper|/Applications/ChatGPT.app/Contents/Frameworks/ChatGPT Helper.app/Contents/MacOS/ChatGPT Helper --type=utility ${RESOLVER}` : null,
@@ -216,6 +220,7 @@ function run(mode: "watch" | "launch" | "native", options: {
     options.configDir ?? dir,
     options.shim === true,
     options.pac === true ? { entryPort: options.entryPort ?? 10301 } : undefined,
+    options.cloudNetwork === true,
   ));
   const result = spawnSync("/bin/bash", [script, mode], {
     encoding: "utf8",
@@ -383,6 +388,40 @@ describe.skipIf(process.platform === "win32")("chatgpt launch watcher", () => {
     expect(r.status).toBe(0);
     expect(r.calls).toEqual([]);
     expect(r.stdout).toContain("already running with the launch switches");
+  });
+});
+
+describe.skipIf(process.platform === "win32")("cloud routes compose with the launch watcher", () => {
+  test("an old single-host bypass is corrected while preserving the configured shim", () => {
+    const r = run("watch", { app: "flagged-shim", shim: true, cloudNetwork: true, scutil: SCUTIL_SYSTEM_PROXY });
+    expect(r.status).toBe(0);
+    expect(r.calls).toEqual(["quit", "open"]);
+    expect(r.openArgs).toEqual([RESOLVER, "--proxy-server=http://127.0.0.1:7892,direct://", "--proxy-bypass-list=chatgpt.com;codex-cloud-backend.chatgpt.com"]);
+    expect(r.openEnv).toEqual([`CODEX_CLI_PATH=${SHIM_PATH()}`]);
+  });
+
+  test("the correct cloud route and shim survive a watcher wake without another restart", () => {
+    const r = run("watch", { app: "flagged-shim", shim: true, cloudNetwork: true, cloudRouted: true, scutil: SCUTIL_SYSTEM_PROXY });
+    expect(r.status).toBe(0);
+    expect(r.calls).toEqual([]);
+  });
+
+  test("cloud resolver mode wraps a system PAC while retaining the resolver rule", () => {
+    const r = run("launch", { app: "none", cloudNetwork: true, scutil: SCUTIL_PAC });
+    expect(r.status).toBe(0);
+    expect(r.openArgs).toEqual([RESOLVER, PAC_SWITCH]);
+  });
+
+  test("a missing cloud PAC is rejected before a running app is quit", () => {
+    const r = run("launch", { app: "plain", cloudNetwork: true, scutil: SCUTIL_PAC, pacFile: "missing" });
+    expect(r.status).toBe(1);
+    expect(r.calls).toEqual([]);
+  });
+
+  test("cloud routing does not hand the app a missing shim launcher", () => {
+    const r = run("launch", { app: "none", shim: true, launcher: false, cloudNetwork: true, scutil: SCUTIL_SYSTEM_PROXY });
+    expect(r.status).toBe(0);
+    expect(r.openEnv).toEqual([]);
   });
 });
 

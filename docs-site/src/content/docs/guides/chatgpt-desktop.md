@@ -57,8 +57,16 @@ For configuration-file users:
 
 Use your existing proxy setting; there is no separate cloud proxy-port configuration.
 The same proxy/environment precedence as other OpenCodex transports applies, including
-HTTP(S) CONNECT and SOCKS5. A missing proxy, a matching NO_PROXY bypass or a local-443
+HTTP(S) CONNECT and SOCKS5. A missing proxy, a matching NO_PROXY bypass or a local-443/10443
 proxy loop refuses activation. There is no direct fallback through the mapped hostname.
+
+OpenCodex resolves this fixed cloud hostname through the DNS-over-HTTPS
+endpoint at `https://1.1.1.1/dns-query` over the same outbound proxy. It caches IPv4
+answers for their returned TTL and refreshes them when expired. The proxy tunnel
+connects to the resulting IP address on port 443; the desktop keeps its original
+TLS hostname and certificate verification. A failed lookup does not reuse an
+expired answer or fall back to the system's DNS. Your proxy must reach both this
+DNS endpoint and the cloud service.
 
 The ordinary-user runtime binds loopback 10443 and verifies CONNECT acceptance first.
 The privileged helper then binds IPv4 and IPv6 loopback 443 before applying the mapping;
@@ -67,8 +75,43 @@ mapping off. The helper cannot select a different destination or read TLS payloa
 This requires helper protocol v2: after updating from v1, reinstall the helper before enabling.
 Status distinguishes intent, active runtime and failures; `applicationHandshake`
 remains `unverified`. Active forwarding is not proof of a logged-in cloud session.
-`ocx chatgpt status` includes cloud status, and a cloud-only `ocx chatgpt launch`
-requires that runtime to be active.
+`ocx chatgpt status` includes cloud status. Every `ocx chatgpt launch` with
+`cloudNetwork` enabled requires that runtime to be active.
+
+### Launch through the local cloud route
+
+After activation, save ongoing desktop work and run:
+
+```bash
+ocx chatgpt launch
+```
+
+This restarts the app with the network arguments needed to reach the helper:
+
+- With an explicit system HTTP/SOCKS proxy, the cloud hostname bypasses that proxy
+  in the desktop and reaches the local hosts mapping. Other hosts retain the
+  system proxy with its direct fallback.
+- With a system PAC, OpenCodex wraps its rules with a DIRECT exception for the
+  cloud hostname and retains the original rules for other hosts. If the system PAC
+  cannot be read or is too large, those other hosts use the captured system proxy
+  chain, then direct access.
+- With direct networking or a VPN in TUN mode, the hosts mapping supplies the local
+  route without an additional desktop proxy switch.
+
+The desktop's DIRECT route ends at the local helper; OpenCodex still forwards the
+cloud connection through its configured outbound proxy. These launch arguments
+also work with cloud networking alone, without the shim or local-CA intercept.
+When the shim is enabled, the same launch also applies its prepared
+`CODEX_CLI_PATH` override.
+
+When used with the intercept, `ocx chatgpt launch` refreshes the PAC from the current
+flags before restarting the app. You can enable cloud networking on a running
+OpenCodex instance and launch the app without restarting the proxy.
+
+If you use the optional intercept watcher, reinstall it with
+`ocx chatgpt install-watcher` after changing `cloudNetwork`, `appServerShim` or
+`pacFallback`. The watcher captures these settings when installed and preserves
+the configured shim when its prepared launcher exists.
 
 ### Disable, recover and remove
 
@@ -109,8 +152,11 @@ helper entry. launchd never runs code from a user-writable checkout or package t
 
 The cloud-network tests exercise the same runtime and recovery helper with temporary
 hosts files, Unix sockets and ephemeral listener ports. They cover TLS forwarding,
-process loss and journal recovery without installing a service or changing system routing.
+DNS caching and failure, launch/PAC composition, process loss and journal recovery
+without installing a service or changing system routing.
 There is no separate sandbox command or native system-extension implementation to maintain.
+Passing these checks does not verify an installed helper or a logged-in desktop
+session or establish deployment acceptance.
 
 ## App-server shim (experimental)
 
@@ -287,9 +333,11 @@ Launch restarts ChatGPT with
 `--host-resolver-rules=MAP chatgpt.com 127.0.0.1:<port>`. Explicit system HTTP/SOCKS
 proxies get an apex-host bypass while other hosts retain the proxy with a direct
 fallback; TUN/direct networking needs only the resolver rule. An existing system
-PAC cannot be combined with that bypass, so it may prevent the intercept from
-seeing traffic. With `pacFallback` (below) the app is launched through a generated
-PAC instead of the resolver rule.
+PAC cannot be combined with that bypass. When cloud networking is also enabled,
+OpenCodex instead wraps the PAC with DIRECT exceptions for chatgpt.com and the
+cloud hostname while retaining the resolver rule. Without cloud networking or
+PAC fallback, a system PAC may prevent the intercept from seeing traffic.
+With `pacFallback` (below), the app uses the generated PAC instead of the resolver rule.
 
 If both flags are true, `ocx chatgpt launch` applies the existing app-server shim
 and the intercept together. The shim alone still works without a running proxy.
@@ -316,7 +364,9 @@ TLS listener. OpenCodex rewrites `chatgpt-unblock.pac` in its home
 directory at every start, before the `chatgpt-unblock.ready` marker. Before restarting an
 app, the launcher prepares the PAC argument; if the file cannot be read and encoded,
 is empty, or is not a regular file, it leaves the running app untouched. The PAC sends
-`chatgpt.com` to that entry first, and every other host the way the system routes it:
+`chatgpt.com` to that entry first. With `cloudNetwork` enabled, its fixed cloud
+hostname uses DIRECT to reach the helper's hosts mapping. The remaining hosts
+follow the system route:
 
 | Setup | Other hosts, and `chatgpt.com` while OpenCodex is stopped |
 |---|---|
@@ -325,12 +375,12 @@ is empty, or is not a regular file, it leaves the running app untouched. The PAC
 | PAC file | The system PAC, embedded in the generated file. |
 
 When OpenCodex stops, the app keeps working on that route without a restart; only
-the send unblock pauses until OpenCodex is back. The route is captured when
-OpenCodex starts: after changing the VPN mode, restart OpenCodex and run
-`ocx chatgpt launch`. If a system PAC is set but cannot be read at that moment, or
+the send unblock pauses until OpenCodex is back. The route is captured at startup
+and refreshed by explicit launch or watcher installation: after changing the VPN
+mode, run `ocx chatgpt launch`. If a system PAC is set but cannot be read, or
 is too large to pass to the app (the PAC travels inside one launch argument,
 limited to 512 KiB once encoded), other hosts follow the system proxy, if there is
-one, then go direct, and OpenCodex prints a warning. After turning `pacFallback` on
+one, then go direct; startup reports this fallback with a warning. After turning `pacFallback` on
 or off, restart OpenCodex, run `ocx chatgpt launch`, and run
 `ocx chatgpt install-watcher` again if you use the watcher. `restore` undoes a PAC
 launch the same way as a resolver-rule one.
@@ -361,7 +411,10 @@ mode, it restarts an app launched without intercept switches only while the list
 OpenCodex and the app is no more than five minutes old; a missing or unparseable process age
 counts as fresh, and explicit `ocx chatgpt launch` is not age-limited. This can interrupt
 startup work; it does nothing while the listener is unavailable. It manages
-**intercept launches only**; use explicit launch for the app-server shim. A loaded
+**intercept launches** and preserves the cloud routing and shim settings captured
+at installation. Run an explicit `ocx chatgpt launch` first to prepare the shim;
+the watcher carries its `CODEX_CLI_PATH` only while that launcher exists and is
+executable. It does not install a shim or act as a cloud-only launch watcher. A loaded
 watcher must be uninstalled before `restore`, so it cannot put the switches back.
 In PAC-fallback mode the watcher also waits for the CONNECT entry and launches
 with the PAC switch instead of the resolver rule.

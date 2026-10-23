@@ -115,9 +115,9 @@ describe.skipIf(process.platform === "win32")("formal mapping helper in isolated
     const f = cloudFixture();
     const helper = await f.startHelper(), proxy = await cloudTestProxy();
     try {
-      const runtime = await startCloudNetwork({ helperSocket: f.socketPath, listenPort: 0, env: { HTTPS_PROXY: `http://127.0.0.1:${proxy.port}` } });
+      const runtime = await startCloudNetwork({ resolveAddress: async () => "203.0.113.10", helperSocket: f.socketPath, listenPort: 0, env: { HTTPS_PROXY: `http://127.0.0.1:${proxy.port}` } });
       expect(runtime.endpoints.map(e => e.host)).toEqual(["127.0.0.1", "::1"]);
-      expect(proxy.requests).toEqual([`CONNECT ${CLOUD_HOST}:443 HTTP/1.1`]);
+      expect(proxy.requests).toEqual(["CONNECT 203.0.113.10:443 HTTP/1.1"]);
       expect(f.read()).toContain(SYSTEM_CLOUD_MAPPING);
       await runtime.stop();
       expect(await runtime.lost).toBe(false);
@@ -130,11 +130,11 @@ describe.skipIf(process.platform === "win32")("formal mapping helper in isolated
     const f = cloudFixture();
     const helper = await f.startHelper(), proxy = await cloudTestProxy({ refuse: true });
     try {
-      await expect(startCloudNetwork({ helperSocket: f.socketPath, listenPort: 0, env: { HTTPS_PROXY: `http://127.0.0.1:${proxy.port}` } })).rejects.toThrow("cloud_listener_or_upstream_failed");
+      await expect(startCloudNetwork({ resolveAddress: async () => "203.0.113.10", helperSocket: f.socketPath, listenPort: 0, env: { HTTPS_PROXY: `http://127.0.0.1:${proxy.port}` } })).rejects.toThrow("cloud_listener_or_upstream_failed");
       expect(f.read()).not.toContain(CLOUD_HOST);
       const success = await cloudTestProxy();
       try {
-        const runtime = await startCloudNetwork({ helperSocket: f.socketPath, listenPort: 0, env: { HTTPS_PROXY: `http://127.0.0.1:${success.port}` } });
+        const runtime = await startCloudNetwork({ resolveAddress: async () => "203.0.113.10", helperSocket: f.socketPath, listenPort: 0, env: { HTTPS_PROXY: `http://127.0.0.1:${success.port}` } });
         await helper.stop();
         expect(await runtime.lost).toBe(true);
         expect(f.read()).not.toContain(CLOUD_HOST);

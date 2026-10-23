@@ -310,7 +310,7 @@ describe("restore validates the discovered app before any quit or open", () => {
   test("a launch refused with no dropped block keeps the ordinary opt-in message", () => {
     const result = run({ sub: "launch", flag: false, configRaw: "{}" });
     expect(result.code).toBe(1);
-    expect(result.stderr).toContain("Enable chatgptDesktop.appServerShim or chatgptDesktop.unblockSend before launching");
+    expect(result.stderr).toContain("Enable chatgptDesktop.appServerShim, unblockSend or cloudNetwork before launching");
     expect(result.stderr).not.toContain("whole chatgptDesktop block is ignored");
   });
   test("launch still requires opt-in and an app-server binary", () => {

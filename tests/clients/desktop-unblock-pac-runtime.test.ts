@@ -125,6 +125,13 @@ describe("chatgpt unblock PAC choice", () => {
     expect(chooseChatgptUnblockPac(10301, chain, null).route).toBe("system-pac-unreadable");
     expect(chooseChatgptUnblockPac(10301, { ...chain, autoConfig: false, autoConfigUrl: null }, null).route).toBe("system-proxy");
   });
+
+  test("cloud direct routing survives a system PAC that exceeds the launch limit", () => {
+    const pac = chooseChatgptUnblockPac(null, chain, `${systemPac}\n//${"x".repeat(3000)}`, 2000, ["codex-cloud-backend.chatgpt.com"]);
+    expect(pac.route).toBe("system-pac-too-large");
+    expect(pac.text).toContain('if (host == "codex-cloud-backend.chatgpt.com") return "DIRECT";');
+    expect(pac.text).not.toContain('if (host == "chatgpt.com")');
+  });
 });
 
 describe.skipIf(process.platform !== "darwin")("chatgpt unblock PAC-mode startup", () => {

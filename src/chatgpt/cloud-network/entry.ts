@@ -1,8 +1,6 @@
 import { createServer, type AddressInfo, type Server, type Socket } from "node:net";
 import { dialTunnel, type OpaqueProxyRoute } from "../../lib/opaque-proxy-tunnel";
-import { CLOUD_HOST } from "./contract";
-
-const TARGET = { host: CLOUD_HOST, port: 443 };
+import { createCloudAddressResolver } from "./dns";
 
 /** Proxy string to opaque route; validation errors surface as a failed dial, not a fallback. */
 function proxyRoute(proxy: string): OpaqueProxyRoute {
@@ -21,14 +19,17 @@ function proxyRoute(proxy: string): OpaqueProxyRoute {
 }
 
 /** The ordinary-user runtime binds a high port; the system helper owns loopback 443. */
-export async function startCloudEntry({ proxy, port }: { proxy: string; port: number }) {
+export async function startCloudEntry({ proxy, port, resolveAddress }: {
+  proxy: string; port: number; resolveAddress?: () => Promise<string>;
+}) {
   const servers: Server[] = [];
   const sockets = new Set<Socket>();
   const establishment = new AbortController();
+  const address = resolveAddress ?? createCloudAddressResolver(proxy, { signal: establishment.signal });
   let stopped = false;
   const dial = async (signal = establishment.signal) => {
     try {
-      return await dialTunnel(`${TARGET.host}:${TARGET.port}`, proxyRoute(proxy), { signal });
+      return await dialTunnel(`${await address()}:443`, proxyRoute(proxy), { signal });
     } catch {
       return null;
     }

@@ -99,6 +99,8 @@ mock.module("../../src/chatgpt/desktop-unblock/launch-watcher", () => ({
   uninstallChatgptUnblockWatcher: () => undefined,
 }));
 mock.module("../../src/server/proxy-liveness", () => ({ findLiveProxy: async () => null }));
+// Cloud status/recovery is outside this fixture; never inspect the machine's helper.
+mock.module("../../src/cli/chatgpt-network-command", () => ({ handleChatgptNetworkCommand: async () => 0 }));
 mock.module("../../src/chatgpt/desktop-unblock/ca-trust", () => ({
   inspectChatgptCaTrust: async () => "missing",
   chatgptCaTrustCommand: () => "",

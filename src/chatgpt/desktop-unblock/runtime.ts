@@ -14,6 +14,7 @@ import type { EntryProxyHandle } from "./entry-proxy";
 import { CHATGPT_UNBLOCK_PAC_FILENAME, buildChatgptUnblockPac, loadSystemPac, systemProxyChain } from "./pac";
 import type { SystemProxyChain } from "./pac";
 import type { WsRelaySocketData } from "./ws-relay";
+import { CLOUD_HOST } from "../cloud-network/contract";
 
 /**
  * Lifecycle for the ChatGPT desktop send-unblock listener.
@@ -156,17 +157,28 @@ export const CHATGPT_UNBLOCK_PAC_SWITCH_MAX_BYTES = 512 * 1024;
  * resulting switch fits {@link CHATGPT_UNBLOCK_PAC_SWITCH_MAX_BYTES}.
  */
 export function chooseChatgptUnblockPac(
-  entryPort: number,
+  entryPort: number | null,
   chain: SystemProxyChain,
   systemPac: string | null,
   maxSwitchBytes: number = CHATGPT_UNBLOCK_PAC_SWITCH_MAX_BYTES,
+  directHosts: readonly string[] = [],
 ): { text: string; route: ChatgptUnblockPacRoute } {
   if (systemPac) {
-    const text = buildChatgptUnblockPac(entryPort, chain, systemPac);
+    const text = buildChatgptUnblockPac(entryPort, chain, systemPac, directHosts);
     if (chatgptUnblockPacArgFor(text).length <= maxSwitchBytes) return { text, route: "system-pac" };
-    return { text: buildChatgptUnblockPac(entryPort, chain, null), route: "system-pac-too-large" };
+    return { text: buildChatgptUnblockPac(entryPort, chain, null, directHosts), route: "system-pac-too-large" };
   }
-  return { text: buildChatgptUnblockPac(entryPort, chain, null), route: chain.autoConfig ? "system-pac-unreadable" : "system-proxy" };
+  return { text: buildChatgptUnblockPac(entryPort, chain, null, directHosts), route: chain.autoConfig ? "system-pac-unreadable" : "system-proxy" };
+}
+
+/** Refresh at launch as well as startup: cloud routing can be enabled without restarting the proxy. */
+export async function refreshChatgptUnblockPac(entryPort: number | null, cloudNetwork: boolean, configDir = getConfigDir()) {
+  const chain = systemProxyChain();
+  const systemPac = chain.autoConfigUrl ? await loadSystemPac(chain.autoConfigUrl) : null;
+  const directHosts = cloudNetwork ? [CLOUD_HOST, ...(entryPort === null ? [CHATGPT_INTERCEPT_HOST] : [])] : [];
+  const pac = chooseChatgptUnblockPac(entryPort, chain, systemPac, undefined, directHosts);
+  writeFileSync(chatgptUnblockPacPath(configDir), pac.text, { mode: 0o644 });
+  return pac;
 }
 
 export interface StartChatgptUnblockOptions {
@@ -190,19 +202,18 @@ export async function startChatgptUnblock<T = undefined>(options: StartChatgptUn
   const listener = startChatgptUnblockListener({ leaf, port });
   let entryProxy: EntryProxyHandle | undefined;
   let pacRoute: ChatgptUnblockPacRoute | undefined;
-  if (chatgptPacFallbackEnabled(options.config)) {
+  const pacFallback = chatgptPacFallbackEnabled(options.config);
+  const cloudNetwork = options.config.chatgptDesktop?.cloudNetwork === true;
+  if (pacFallback || cloudNetwork) {
     try {
       // The PAC names this port; it must be the derived entry port, not ephemeral, and it
       // must be bound before the app ever reads the file.
-      entryProxy = await startChatgptUnblockEntryProxy({ originPort: listener.port ?? port, port: chatgptUnblockEntryPort(options.config, options.publicPort) });
+      if (pacFallback) entryProxy = await startChatgptUnblockEntryProxy({ originPort: listener.port ?? port, port: chatgptUnblockEntryPort(options.config, options.publicPort) });
       // Regenerated at every start: the entry port and the captured system route (the
       // user's VPN state) are what the file encodes. A stale file after a config or
       // network change would point the app at a dead chain.
-      const chain = systemProxyChain();
-      const systemPac = chain.autoConfigUrl ? await loadSystemPac(chain.autoConfigUrl) : null;
-      const pac = chooseChatgptUnblockPac(entryProxy.port, chain, systemPac);
+      const pac = await refreshChatgptUnblockPac(entryProxy?.port ?? null, cloudNetwork, configDir);
       pacRoute = pac.route;
-      writeFileSync(chatgptUnblockPacPath(configDir), pac.text, { mode: 0o644 });
     } catch (error) {
       await entryProxy?.stop();
       await listener.stop(true);

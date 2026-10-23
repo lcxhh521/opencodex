@@ -55,7 +55,7 @@ test.skipIf(process.platform === "win32")("real startServer + formal CLI persist
       claudeCode: { enabled: false, intercept: { enabled: false } }, proxy: `http://127.0.0.1:${proxy.port}`,
       chatgptDesktop: { cloudNetwork: false, appServerShim: false, unblockSend: false } });
     const deps = { managementApi: { platform: "darwin" as const }, cloudNetwork: { platform: "darwin" as const,
-      start: async () => { starts++; return startCloudNetwork({ helperSocket: f.socketPath, listenPort: 0 }); },
+      start: async () => { starts++; return startCloudNetwork({ resolveAddress: async () => "203.0.113.10", helperSocket: f.socketPath, listenPort: 0 }); },
       recover: async () => { const reply = await cloudHelperRequest("recover", f.socketPath); if (!reply.ok) throw new Error(reply.error); } } };
     server = startServer(0, deps);
     const baseUrl = `http://127.0.0.1:${server.port}`;

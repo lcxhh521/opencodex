@@ -7,7 +7,8 @@ import { findLiveProxy } from "../server/proxy-liveness";
 import { getConfigDir } from "../config/paths";
 import { claudeInterceptCaCertPath } from "../claude/intercept/local-ca";
 import { chatgptCaTrustCommand, inspectChatgptCaTrust } from "../chatgpt/desktop-unblock/ca-trust";
-import { chatgptPacFallbackEnabled, chatgptUnblockEntryPort, chatgptUnblockPacArg, chatgptUnblockPort, chatgptUnblockResolverArg } from "../chatgpt/desktop-unblock/runtime";
+import { chatgptPacFallbackEnabled, chatgptUnblockEntryPort, chatgptUnblockPacArg, chatgptUnblockPacArgFor, chatgptUnblockPort, chatgptUnblockResolverArg, chooseChatgptUnblockPac, refreshChatgptUnblockPac } from "../chatgpt/desktop-unblock/runtime";
+import { loadSystemPac, systemProxyChain } from "../chatgpt/desktop-unblock/pac";
 import {
   chatgptAppCommandLine, chatgptCommandLineHasPac, chatgptCommandLineHasRule, chatgptUnblockWatcherLoaded, chatgptUnblockWatcherStatus,
   installChatgptUnblockWatcher, launchChatgptWithRule, probeChatgptUnblockListener,
@@ -23,7 +24,7 @@ import {
 } from "../chatgpt/app-server-shim/launcher";
 import { untrustedChatgptBundleReason } from "../chatgpt/app-server-shim/bundle-trust";
 import { darwinDefaultExec, darwinDesktopAppAdapter } from "../codex/desktop-app/darwin";
-import { CLOUD_HELPER_SOCKET, CLOUD_HELPER_PLIST } from "../chatgpt/cloud-network/contract";
+import { CLOUD_HELPER_SOCKET, CLOUD_HELPER_PLIST, CLOUD_HOST } from "../chatgpt/cloud-network/contract";
 import type { DesktopAppInstall } from "../codex/desktop-app/types";
 
 const USAGE = `Usage (experimental, macOS only):
@@ -47,8 +48,22 @@ function resolveChatgptPacEntry(config: OcxConfig, livePort: number | undefined)
 
 const WATCHER_CONSENT = `The experimental watcher quits and reopens ChatGPT after a Dock/Spotlight launch
 without intercept switches while opencodex's listener is running. This can interrupt
-startup work. It manages the TLS intercept only; use 'ocx chatgpt launch' for the shim.
+startup work. It preserves the configured cloud route and an already prepared app-server shim.
 Remove it with 'ocx chatgpt uninstall-watcher'.`;
+
+/** Cloud-only launches need the same local-host exception as the intercept launcher. */
+async function cloudProxyArgs(): Promise<string[]> {
+  const chain = systemProxyChain();
+  if (chain.autoConfig) {
+    const systemPac = chain.autoConfigUrl ? await loadSystemPac(chain.autoConfigUrl) : null;
+    const pac = chooseChatgptUnblockPac(null, chain, systemPac, undefined, [CLOUD_HOST]);
+    return [chatgptUnblockPacArgFor(pac.text)];
+  }
+  const proxy = chain.entries[0];
+  if (!proxy) return [];
+  const [kind, address] = proxy.split(" ");
+  return [`--proxy-server=${kind === "SOCKS5" ? "socks5" : "http"}://${address},direct://`, `--proxy-bypass-list=${CLOUD_HOST}`];
+}
 
 function run(command: string, args: string[]) {
   const result = spawnSync(command, args, { encoding: "utf8", timeout: 5000 });
@@ -190,7 +205,8 @@ CODEX_CLI_PATH launcher: ${app.shim === null ? "unknown" : app.shim ? "yes" : "n
         console.error("Watcher not installed; re-run with --yes to confirm.");
         return 1;
       }
-      installChatgptUnblockWatcher({ port: port!, ...(pac ? { entryPort: pac.entryPort } : {}) });
+      if (pac || cloud) await refreshChatgptUnblockPac(pac?.entryPort ?? null, cloud);
+      installChatgptUnblockWatcher({ port: port!, shimMode: shim, cloudNetwork: cloud, ...(pac ? { entryPort: pac.entryPort } : {}) });
       console.log(`Experimental intercept launch watcher installed for port ${port}${pac ? ` (PAC fallback, entry port ${pac.entryPort})` : ""}.`);
       return 0;
     }
@@ -257,10 +273,12 @@ CODEX_CLI_PATH launcher: ${app.shim === null ? "unknown" : app.shim ? "yes" : "n
     if (binary) writeChatgptShimLauncher(undefined, binary);
     if (sub === "launch" && intercept) {
       // The intercept script owns the restart under its lock so the watcher cannot race it.
-      const result = launchChatgptWithRule(port!, undefined, shim, pac);
+      if (pac || cloud) await refreshChatgptUnblockPac(pac?.entryPort ?? null, cloud);
+      const result = launchChatgptWithRule(port!, undefined, shim, pac, cloud);
       if (result.output) (result.ok ? console.log : console.error)(result.output);
       return result.ok ? 0 : 1;
     }
+    const networkArgs = sub === "launch" && cloud ? await cloudProxyArgs() : [];
     if (!(await quitApp(install, launcher))) {
       console.error("ChatGPT exit could not be confirmed; no new app was opened. Check the running app and retry.");
       return 1;
@@ -269,7 +287,10 @@ CODEX_CLI_PATH launcher: ${app.shim === null ? "unknown" : app.shim ? "yes" : "n
     const env = { ...process.env };
     delete env.CODEX_CLI_PATH;
     // Open the verified bundle by path, so the relaunch is the same app that was quit.
-    const result = spawnSync("/usr/bin/open", ["-a", install!.root, ...(sub === "launch" && shim ? ["--env", `CODEX_CLI_PATH=${launcher}`] : [])], {
+    const result = spawnSync("/usr/bin/open", ["-a", install!.root,
+      ...(sub === "launch" && shim ? ["--env", `CODEX_CLI_PATH=${launcher}`] : []),
+      ...(networkArgs.length ? ["--args", ...networkArgs] : []),
+    ], {
       encoding: "utf8", env, timeout: 10000,
     });
     if (result.status !== 0) throw new Error(result.error?.message ?? (result.stderr?.trim() || "open failed"));
@@ -286,7 +307,7 @@ async function printInterceptStatus(config: OcxConfig, port: number, livePort?: 
   const configDir = getConfigDir();
   const pac = resolveChatgptPacEntry(config, livePort);
   const listener = await probeChatgptUnblockListener(port);
-  const watcher = chatgptUnblockWatcherStatus(port, undefined, false, pac);
+  const watcher = chatgptUnblockWatcherStatus(port, undefined, config.chatgptDesktop?.appServerShim === true, pac, config.chatgptDesktop?.cloudNetwork === true);
   const app = chatgptAppCommandLine();
   const flagged = app !== null && (pac ? chatgptCommandLineHasPac(app, configDir) : chatgptCommandLineHasRule(app, port));
   const caPath = claudeInterceptCaCertPath(configDir);

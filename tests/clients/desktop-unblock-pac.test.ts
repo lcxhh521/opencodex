@@ -136,6 +136,23 @@ describe("chatgpt unblock PAC with an embedded system PAC", () => {
   });
 });
 
+test("cloud PAC exceptions stay local while other hosts retain their system routing", () => {
+  const cloud = "codex-cloud-backend.chatgpt.com";
+  const chain = { entries: ["PROXY 127.0.0.1:7892"], autoConfig: false, autoConfigUrl: null };
+  for (const systemPac of [null, 'function FindProxyForURL(url, host) { return "PROXY 127.0.0.1:7892; DIRECT"; }']) {
+    const fallback = buildChatgptUnblockPac(10301, chain, systemPac, [cloud]);
+    expect(evaluatePac(fallback, cloud)).toBe("DIRECT");
+    expect(evaluatePac(fallback, "chatgpt.com")).toBe("PROXY 127.0.0.1:10301; PROXY 127.0.0.1:7892; DIRECT");
+    expect(evaluatePac(fallback, `other.${cloud}`)).toBe("PROXY 127.0.0.1:7892; DIRECT");
+    const cloudOnly = buildChatgptUnblockPac(null, chain, systemPac, [cloud]);
+    expect(evaluatePac(cloudOnly, cloud)).toBe("DIRECT");
+    expect(evaluatePac(cloudOnly, "chatgpt.com")).toBe("PROXY 127.0.0.1:7892; DIRECT");
+    const resolver = buildChatgptUnblockPac(null, chain, systemPac, [cloud, "chatgpt.com"]);
+    expect(evaluatePac(resolver, "chatgpt.com")).toBe("DIRECT");
+    expect(evaluatePac(resolver, "auth.openai.com")).toBe("PROXY 127.0.0.1:7892; DIRECT");
+  }
+});
+
 describe("chatgpt unblock system PAC loading", () => {
   const PAC = 'function FindProxyForURL(url, host) { return "PROXY 10.0.0.1:3128; DIRECT"; }';
   let dir: string;

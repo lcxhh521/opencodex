@@ -5,6 +5,7 @@
   "desktop-cloud-management.test.ts": "clients",
   "desktop-cloud-recovery.test.ts": "clients",
   "desktop-cloud-entry.test.ts": "clients",
+  "desktop-cloud-dns.test.ts": "clients",
   "desktop-cloud-privileged-relay.test.ts": "clients",
   "desktop-cloud-launch.test.ts": "clients",
   "messages-native-empty-inline.test.ts": "claude-integration",

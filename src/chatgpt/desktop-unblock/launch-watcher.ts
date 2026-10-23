@@ -9,6 +9,7 @@ import { CHATGPT_INTERCEPT_HOST, CHATGPT_UNBLOCK_IDENTITY_PATH, CHATGPT_UNBLOCK_
 import type { PreservedSendBlock } from "./rewrite";
 import { CHATGPT_UNBLOCK_PAC_ARG_PREFIX, chatgptUnblockPacArg, chatgptUnblockPacPath, chatgptUnblockReadyPath, chatgptUnblockResolverArg } from "./runtime";
 import { chatgptShimLauncherPath } from "../app-server-shim/launcher";
+import { CLOUD_HOST } from "../cloud-network/contract";
 
 /**
  * Launch integration for the ChatGPT desktop send-unblock intercept.
@@ -36,10 +37,12 @@ import { chatgptShimLauncherPath } from "../app-server-shim/launcher";
  *     proxied hosts to the proxy unresolved, which would skip the resolver rule, so the apex host
  *     must bypass the proxy. The bypass list only takes effect beside an explicit proxy server,
  *     and a bare hostname there matches that host exactly (subdomains stay on the proxy). The
+ *     opt-in cloud network adds its exact backend host to that bypass so HTTP uses local hosts;
  *     `direct://` fallback keeps the app working if the VPN is switched off after launch;
  *   - with no proxy, or TUN mode (loopback never enters the tunnel), the resolver rule alone;
- *   - with a PAC file, the resolver rule alone: PAC cannot be combined with a bypass, so
- *     chatgpt.com may stay on the proxy and the composer may lock, but nothing else breaks.
+ *   - with a system PAC and cloud routing, the resolver rule plus an inline PAC sends the apex
+ *     and cloud backend DIRECT, retaining the system PAC for all other hosts. Without cloud
+ *     routing the resolver rule alone leaves the system PAC in charge.
  *
  *   PAC-fallback mode (`chatgptDesktop.pacFallback`): only `--proxy-pac-url=data:...` carrying the
  *   PAC inline (a `file://` PAC is ignored by the app). The
@@ -113,6 +116,7 @@ export function buildChatgptUnblockWatcherScript(
   configDir?: string,
   shimMode = false,
   pac?: { entryPort: number },
+  cloudNetwork = false,
 ): string {
   const pacFile = chatgptUnblockPacPath(configDir ?? getConfigDir());
   return `#!/bin/bash
@@ -135,7 +139,8 @@ PAC_MODE=${pac ? "1" : "0"}
 ENTRY_URL=${shellQuote(`http://127.0.0.1:${pac?.entryPort ?? 0}/`)}
 SHIM_MODE=${shimMode ? "1" : "0"}
 SHIM_SCRIPT=${shellQuote(chatgptShimLauncherPath(configDir ?? getConfigDir()))}
-BYPASS_HOST=${shellQuote(CHATGPT_INTERCEPT_HOST)}
+CLOUD_NETWORK=${cloudNetwork ? "1" : "0"}
+BYPASS_HOST=${shellQuote([CHATGPT_INTERCEPT_HOST, ...(cloudNetwork ? [CLOUD_HOST] : [])].join(";"))}
 APP_PATTERN='ChatGPT.app/Contents/MacOS/ChatGPT'
 IDENTITY_URL=${shellQuote(`https://127.0.0.1:${port}${CHATGPT_UNBLOCK_IDENTITY_PATH}`)}
 SERVICE_ID=${shellQuote(`"service":"${CHATGPT_UNBLOCK_SERVICE_ID}"`)}
@@ -189,7 +194,7 @@ pac_arg() {
 # Flagged by whichever switch the configured mode uses, so a mode change corrects an app launched
 # under the other mode.
 app_flagged() {
-  local pid cmdline pac
+  local pid cmdline pac proxy arg
   pid=$(app_pid) || return 1
   cmdline=$(ps -o command= -p "$pid" 2>/dev/null)
   if [ "$PAC_MODE" = 1 ]; then
@@ -197,8 +202,15 @@ app_flagged() {
     case "$cmdline" in *" $pac"*) return 0 ;; esac
     return 1
   fi
-  case "$cmdline" in *" $RESOLVER_ARG"*) return 0 ;; esac
-  return 1
+  case "$cmdline" in *" $RESOLVER_ARG"*) ;; *) return 1 ;; esac
+  if [ "$CLOUD_NETWORK" = 1 ]; then
+    proxy=$(proxy_args) || return 1
+    while IFS= read -r arg; do
+      [ -z "$arg" ] && continue
+      case "$cmdline" in *" $arg"*) ;; *) return 1 ;; esac
+    done <<< "$proxy"
+  fi
+  return 0
 }
 
 # The shim is wanted only while its launcher exists: opencodex writes it after the bundle passes
@@ -260,7 +272,10 @@ proxy_args() {
   local out
   out=$(scutil --proxy 2>/dev/null) || return 0
   val() { printf '%s\\n' "$out" | awk -v k="$1" '$1 == k { print $3; exit }'; }
-  [ "$(val ProxyAutoConfigEnable)" = 1 ] && return 0
+  if [ "$(val ProxyAutoConfigEnable)" = 1 ]; then
+    if [ "$CLOUD_NETWORK" = 1 ]; then pac_arg; else return 0; fi
+    return $?
+  fi
   local scheme host port
   if [ "$(val HTTPSEnable)" = 1 ]; then scheme=http; host=$(val HTTPSProxy); port=$(val HTTPSPort)
   elif [ "$(val HTTPEnable)" = 1 ]; then scheme=http; host=$(val HTTPProxy); port=$(val HTTPPort)
@@ -329,11 +344,12 @@ if [ "$PAC_MODE" = 1 ]; then
 else
   ARGS+=("$RESOLVER_ARG")
 fi
+PROXY_ARGS=$(proxy_args) || { say "cannot prepare cloud proxy arguments; start opencodex again"; exit 1; }
 while IFS= read -r arg; do
   [ -n "$arg" ] && ARGS+=("$arg")
-done < <(proxy_args)
+done <<< "$PROXY_ARGS"
 OPEN_ENV=()
-if [ "$SHIM_MODE" = 1 ]; then OPEN_ENV=(--env "CODEX_CLI_PATH=$SHIM_SCRIPT"); fi
+if shim_wanted; then OPEN_ENV=(--env "CODEX_CLI_PATH=$SHIM_SCRIPT"); fi
 if [ "$RESTART_APP" = 1 ]; then
   say "ChatGPT is running without the launch switches; restarting it"
   quit_app || { say "ChatGPT did not quit; leaving it running without the switches"; exit 1; }
@@ -414,6 +430,8 @@ export interface InstallChatgptUnblockWatcherOptions {
   entryPort?: number;
   /** Start the app through the app-server shim (`CODEX_CLI_PATH`). */
   shimMode?: boolean;
+  /** Keep cloud HTTP requests on the helper's local hosts route. */
+  cloudNetwork?: boolean;
   configDir?: string;
   /** Test seam: skip the macOS / app-presence guards. */
   assumeSupported?: boolean;
@@ -451,6 +469,7 @@ export function installChatgptUnblockWatcher(options: InstallChatgptUnblockWatch
       options.configDir,
       options.shimMode === true,
       options.entryPort !== undefined ? { entryPort: options.entryPort } : undefined,
+      options.cloudNetwork === true,
     ),
     { mode: 0o700 },
   );
@@ -510,13 +529,14 @@ export function chatgptUnblockWatcherStatus(
   configDir?: string,
   shimMode = false,
   pac?: { entryPort: number },
+  cloudNetwork = false,
 ): ChatgptUnblockWatcherStatus {
   const paths = chatgptUnblockWatcherPaths(configDir);
   const scriptInstalled = existsSync(paths.scriptPath);
   const plistInstalled = existsSync(paths.plistPath);
   const agentLoaded = chatgptUnblockWatcherLoaded();
   const scriptUpToDate = scriptInstalled
-    && readFileSync(paths.scriptPath, "utf8") === buildChatgptUnblockWatcherScript(port, configDir, shimMode, pac);
+    && readFileSync(paths.scriptPath, "utf8") === buildChatgptUnblockWatcherScript(port, configDir, shimMode, pac, cloudNetwork);
   const plistUpToDate = plistInstalled
     && readFileSync(paths.plistPath, "utf8") === buildChatgptUnblockWatcherPlist(paths.scriptPath, [paths.lockPath, paths.readyPath], paths.errPath);
   return { scriptInstalled, plistInstalled, agentLoaded, scriptUpToDate, plistUpToDate };
@@ -641,6 +661,7 @@ function runLaunchScript(
   configDir?: string,
   shimMode = false,
   pac?: { entryPort: number },
+  cloudNetwork = false,
 ): { ok: boolean; output: string } {
   if (process.platform !== "darwin") {
     throw new Error("launching the ChatGPT desktop app is only supported on macOS");
@@ -652,7 +673,7 @@ function runLaunchScript(
   delete env.CODEX_CLI_PATH;
   const result = spawnSync("/bin/bash", ["-s", mode], {
     env,
-    input: buildChatgptUnblockWatcherScript(port, configDir, shimMode, pac),
+    input: buildChatgptUnblockWatcherScript(port, configDir, shimMode, pac, cloudNetwork),
     encoding: "utf8",
   });
   return { ok: result.status === 0, output: `${result.stdout ?? ""}${result.stderr ?? ""}`.trim() };
@@ -664,8 +685,9 @@ export function launchChatgptWithRule(
   configDir?: string,
   shimMode = false,
   pac?: { entryPort: number },
+  cloudNetwork = false,
 ): { ok: boolean; output: string } {
-  return runLaunchScript("launch", port, configDir, shimMode, pac);
+  return runLaunchScript("launch", port, configDir, shimMode, pac, cloudNetwork);
 }
 
 /** Restart an app that carries the launch switches without them, returning it to native networking. */

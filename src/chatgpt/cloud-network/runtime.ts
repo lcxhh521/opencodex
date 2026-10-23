@@ -24,6 +24,7 @@ export async function startCloudNetwork(options: {
   /** Injection only: public config/CLI cannot redirect privileged paths or port 443. */
   helperSocket?: string;
   listenPort?: number;
+  resolveAddress?: () => Promise<string>;
 } = {}) {
   const proxy = cloudNetworkProxy(options.env);
   const helperSocket = options.helperSocket ?? CLOUD_HELPER_SOCKET;
@@ -31,7 +32,7 @@ export async function startCloudNetwork(options: {
   if (!helper.ok) throw CloudNetworkError.fromReply(helper, "recovery_required");
   if (helper.state === "active") throw new CloudNetworkError("mapping_busy");
   let entry: Awaited<ReturnType<typeof startCloudEntry>>;
-  try { entry = await startCloudEntry({ proxy, port: options.listenPort ?? CLOUD_ENTRY_PORT }); }
+  try { entry = await startCloudEntry({ proxy, port: options.listenPort ?? CLOUD_ENTRY_PORT, resolveAddress: options.resolveAddress }); }
   catch { throw new CloudNetworkError("cloud_listener_or_upstream_failed"); }
   let mapping: Awaited<ReturnType<typeof acquireCloudMapping>>;
   try { mapping = await acquireCloudMapping(helperSocket); }

@@ -10,7 +10,7 @@ import { CloudNetworkError } from "../../src/chatgpt/cloud-network/contract";
 
 export function createCloudFixtureLifecycle(socketPath: string) {
   return createChatgptCloudNetworkLifecycle({ platform: "darwin",
-    start: () => startCloudNetwork({ helperSocket: socketPath, listenPort: 0 }),
+    start: () => startCloudNetwork({ resolveAddress: async () => "203.0.113.10", helperSocket: socketPath, listenPort: 0 }),
     recover: async () => {
       const reply = await cloudHelperRequest("recover", socketPath);
       if (!reply.ok) throw CloudNetworkError.fromReply(reply, "recovery_required");

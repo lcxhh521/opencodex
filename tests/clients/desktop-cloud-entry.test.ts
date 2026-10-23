@@ -15,7 +15,7 @@ test("stopping the entry cancels pending proxy establishment", async () => {
   let entry: Awaited<ReturnType<typeof startCloudEntry>> | undefined;
   let client: Socket | undefined;
   try {
-    entry = await startCloudEntry({ proxy: `http://127.0.0.1:${proxy.port}`, port: 0 });
+    entry = await startCloudEntry({ resolveAddress: async () => "203.0.113.10", proxy: `http://127.0.0.1:${proxy.port}`, port: 0 });
     options.stall = true;
     client = connectTcp(entry.endpoints[0]!);
     client.on("error", () => {});
@@ -35,7 +35,7 @@ for (const close of ["destroy", "resetAndDestroy"] as const) test(`client ${clos
   let entry: Awaited<ReturnType<typeof startCloudEntry>> | undefined;
   const clients: Socket[] = [];
   try {
-    entry = await startCloudEntry({ proxy: `http://127.0.0.1:${proxy.port}`, port: 0 });
+    entry = await startCloudEntry({ resolveAddress: async () => "203.0.113.10", proxy: `http://127.0.0.1:${proxy.port}`, port: 0 });
     options.stall = true;
     const client = connectTcp(entry.endpoints[0]!);
     clients.push(client); client.on("error", () => {});
@@ -70,7 +70,7 @@ test.skipIf(process.platform === "win32")("helper forwarding and runtime preserv
   await new Promise<void>(resolve => origin.listen(0, "127.0.0.1", resolve));
   const proxy = await cloudTestProxy({ targetPort: (origin.address() as AddressInfo).port });
   const f = cloudFixture(), helper = await f.startHelper();
-  const entry = await startCloudNetwork({ helperSocket: f.socketPath, listenPort: 0, env: { HTTPS_PROXY: `http://127.0.0.1:${proxy.port}` } });
+  const entry = await startCloudNetwork({ resolveAddress: async () => "203.0.113.10", helperSocket: f.socketPath, listenPort: 0, env: { HTTPS_PROXY: `http://127.0.0.1:${proxy.port}` } });
   const bridge = await startPrivilegedCloudRelay(0, entry.endpoints[0]!.port);
   try {
     const payload = Buffer.alloc(512 * 1024);
@@ -97,7 +97,7 @@ test.skipIf(process.platform === "win32")("helper forwarding and runtime preserv
       client.once("secureConnect", () => { client.destroy(); reject(new Error("wrong certificate accepted")); });
     });
     expect(proxy.requests).toHaveLength(4); // readiness probe plus three client connections
-    expect(proxy.requests.every(line => line === `CONNECT ${CLOUD_HOST}:443 HTTP/1.1`)).toBe(true);
+    expect(proxy.requests.every(line => line === "CONNECT 203.0.113.10:443 HTTP/1.1")).toBe(true);
   } finally {
     await bridge.stop(); await entry.stop(); await helper.stop(); f.cleanup(); await proxy.stop();
     for (const socket of sockets) socket.destroy();
