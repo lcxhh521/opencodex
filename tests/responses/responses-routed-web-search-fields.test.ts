@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createResponsesPassthroughAdapter as createResponsesPassthroughAdapterProduction, stripOpenAiOnlyWebSearchFields } from "../../src/adapters/openai-responses";
 import { stripNonOpenAiIncludeFields } from "../../src/adapters/openai-responses/request-strips";
+import { stripCanonicalOnlyInputItems } from "../../src/adapters/openai-responses/request-strips";
 import { enrichProviderFromRegistry, providerConfigSeed } from "../../src/providers/derive";
 import { getProviderRegistryEntry } from "../../src/providers/registry";
 import { resolveProviderTransport } from "../../src/providers/xai-transport";
@@ -319,5 +320,89 @@ describe("Responses buildRequest include stripping", () => {
     }, { headers: new Headers() });
     const body = JSON.parse(request.body) as Record<string, unknown>;
     expect(body.include).toEqual(["output.encrypted_content", "reasoning.encrypted_content"]);
+  });
+});
+
+// Codex 0.164 writes a positional reasoning-effort control ({type: "configuration_update",
+// reasoning: {effort}}) into saved history when the model catalog row supports
+// supports_reasoning_effort_updates, and keeps it there after a model switch. A third-party
+// Responses gateway validates its item schema and rejects the whole request before inference -
+// live xAI answered 422 "unknown item type \"configuration_update\"" on every routed Grok turn
+// that replayed history containing one. OpenAI-operated destinations keep it verbatim: the
+// effort is recorded for the canonical backend, and mapping it onto another provider is out of
+// scope (openai/codex#6895).
+describe("stripCanonicalOnlyInputItems", () => {
+  test("removes configuration_update items and keeps the surrounding conversation in order", () => {
+    const body = {
+      model: "grok-4.6",
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "one" }] },
+        { type: "configuration_update", reasoning: { effort: "high" } },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "two" }] },
+      ],
+    };
+    const out = stripCanonicalOnlyInputItems(body) as { input: Array<Record<string, unknown>> };
+    expect(out.input).toEqual([
+      { type: "message", role: "user", content: [{ type: "input_text", text: "one" }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "two" }] },
+    ]);
+  });
+
+  test("a body without the item returns the same reference", () => {
+    const clean = { model: "grok-4.6", input: [{ type: "message", role: "user", content: "hi" }] };
+    expect(stripCanonicalOnlyInputItems(clean)).toBe(clean);
+    const noInput = { model: "grok-4.6" };
+    expect(stripCanonicalOnlyInputItems(noInput)).toBe(noInput);
+  });
+});
+
+describe("Responses buildRequest configuration_update stripping", () => {
+  test("registry xAI traffic drops configuration_update and keeps the conversation", () => {
+    const entry = getProviderRegistryEntry("xai");
+    if (!entry) throw new Error("xAI registry entry missing");
+    const provider = { ...providerConfigSeed(entry), adapter: "openai-responses" };
+    enrichProviderFromRegistry("xai", provider);
+
+    const request = createResponsesPassthroughAdapter(provider).buildRequest({
+      modelId: "test-model",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: {
+        model: "test-model",
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "one" }] },
+          { type: "configuration_update", reasoning: { effort: "high" } },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "two" }] },
+        ],
+      },
+    }, { headers: new Headers() });
+    const body = JSON.parse(request.body) as { input: Array<Record<string, unknown>> };
+    expect(body.input.some(item => item.type === "configuration_update")).toBe(false);
+    expect(body.input.filter(item => item.type === "message").map(item =>
+      (item.content as Array<{ text: string }>)[0]!.text)).toEqual(["one", "two"]);
+  });
+
+  test("official OpenAI API-key traffic retains configuration_update verbatim", () => {
+    const request = createResponsesPassthroughAdapter({
+      adapter: "openai-responses",
+      baseUrl: "https://api.openai.com/v1",
+      authMode: "key",
+      apiKey: "test-openai-key",
+    }).buildRequest({
+      modelId: "test-model",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: {
+        model: "test-model",
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "one" }] },
+          { type: "configuration_update", reasoning: { effort: "high" } },
+        ],
+      },
+    }, { headers: new Headers() });
+    const body = JSON.parse(request.body) as { input: Array<Record<string, unknown>> };
+    expect(body.input.some(item => item.type === "configuration_update")).toBe(true);
   });
 });

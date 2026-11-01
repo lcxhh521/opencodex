@@ -268,6 +268,13 @@ export function parseRequest(
         continue;
       }
 
+      if (effectiveType === "configuration_update") {
+        // Codex 0.164 positional reasoning-effort control. It is not a turn, so a translated route
+        // drops it without touching pending reasoning; the native passthrough keeps it verbatim in
+        // _rawBody. Mapping its effort onto the routed request is deliberately not done (#6895).
+        continue;
+      }
+
       if (effectiveType === "additional_tools") {
         // Codex Desktop responses_lite WS path: tools ride INSIDE input as an
         // `additional_tools` item ({type, role, tools:[...]}) instead of body.tools.

@@ -195,6 +195,30 @@ export function stripNonOpenAiIncludeFields(body: unknown): unknown {
   return next;
 }
 
+const CANONICAL_ONLY_INPUT_ITEM_TYPES: ReadonlySet<string> = new Set([
+  // Codex 0.164 `ResponseItem::ConfigurationUpdate` ({type, reasoning: {effort}}): a durable
+  // reasoning-effort change recorded at its position in history. codex-rs sends it only for a
+  // catalog row with `supports_reasoning_effort_updates`, and keeps it in saved history after a
+  // model switch. Mapping the effort onto another provider is out of scope (#6895).
+  "configuration_update",
+]);
+
+/**
+ * Remove OpenAI-private input items. The caller decides the boundary, exactly as for
+ * {@link stripCanonicalOnlyTopLevelFields}; the canonical and OpenAI-operated destinations keep
+ * the items verbatim and in order. Returns the input unchanged when none is present.
+ */
+export function isCanonicalOnlyInputItem(item: unknown): boolean {
+  return isPlainObject(item)
+    && typeof item.type === "string" && CANONICAL_ONLY_INPUT_ITEM_TYPES.has(item.type);
+}
+
+export function stripCanonicalOnlyInputItems(body: unknown): unknown {
+  if (!isPlainObject(body) || !Array.isArray(body.input)) return body;
+  if (!body.input.some(isCanonicalOnlyInputItem)) return body;
+  return { ...body, input: body.input.filter(item => !isCanonicalOnlyInputItem(item)) };
+}
+
 /**
  * Sampling fields a model on the provider's `noStopModels` / `noPenaltyModels` list rejects on
  * every wire. Claude inbound translates `stop_sequences` into a Responses `stop`
