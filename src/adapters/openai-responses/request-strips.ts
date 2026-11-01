@@ -167,6 +167,35 @@ export function stripCanonicalOnlyTopLevelFields(body: unknown): unknown {
 }
 
 /**
+ * OpenAI-private entries in the top-level include array, the sibling of
+ * CANONICAL_ONLY_TOP_LEVEL_FIELDS one level down.
+ *
+ * Codex desktop targets the canonical ChatGPT backend, whose Responses dialect accepts
+ * output.encrypted_content in the include array, and keeps it on the request no matter where
+ * this proxy routes the turn. A third-party Responses gateway validates its schema and rejects
+ * the whole request before inference - xAI answers "Argument not supported:
+ * output.encrypted_content in the include field" - so the entry is removed at the noncanonical
+ * destination boundary. reasoning.encrypted_content is kept: the Claude inbound translator
+ * emits it for routed providers (src/claude/inbound.ts) and gateways accept it, so it must not
+ * be collateral damage here.
+ *
+ * Only the exact observed entry is dropped, like the top-level table: this is not an
+ * unknown-include sanitizer. When the array empties, the whole key is removed so no gateway sees
+ * a meaningless empty include array. Returns the input unchanged when nothing is removed, so the
+ * common path allocates nothing and the caller-owned raw body is never mutated.
+ */
+export function stripNonOpenAiIncludeFields(body: unknown): unknown {
+  if (!isPlainObject(body) || !Array.isArray(body.include)) return body;
+  const kept = body.include.filter(entry => entry !== "output.encrypted_content");
+  if (kept.length === body.include.length) return body;
+
+  const next = { ...body };
+  if (kept.length > 0) next.include = kept;
+  else delete next.include;
+  return next;
+}
+
+/**
  * Sampling fields a model on the provider's `noStopModels` / `noPenaltyModels` list rejects on
  * every wire. Claude inbound translates `stop_sequences` into a Responses `stop`
  * (`src/claude/inbound.ts`), and a direct Responses caller can send penalties. Some listed models

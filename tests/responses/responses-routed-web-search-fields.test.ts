@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createResponsesPassthroughAdapter as createResponsesPassthroughAdapterProduction, stripOpenAiOnlyWebSearchFields } from "../../src/adapters/openai-responses";
+import { stripNonOpenAiIncludeFields } from "../../src/adapters/openai-responses/request-strips";
 import { enrichProviderFromRegistry, providerConfigSeed } from "../../src/providers/derive";
 import { getProviderRegistryEntry } from "../../src/providers/registry";
 import { resolveProviderTransport } from "../../src/providers/xai-transport";
@@ -248,5 +249,75 @@ describe("routedProviderConfig web_search capability backfill", () => {
       supportsOpenAiWebSearchToolFields: true,
     });
     expect(routed.supportsOpenAiWebSearchToolFields).toBe(true);
+  });
+});
+
+// Codex desktop addresses the canonical ChatGPT backend, whose Responses dialect accepts
+// output.encrypted_content in the include array, so the client keeps it on every request no
+// matter where the proxy routes the turn. A third-party Responses gateway validates its schema
+// and rejects the whole request before inference - live xAI answered
+// 400 Argument not supported: "output.encrypted_content" in "include" field on every routed
+// Grok turn. reasoning.encrypted_content must survive: the Claude inbound translator emits it
+// for routed providers and gateways accept it.
+describe("stripNonOpenAiIncludeFields", () => {
+  test("removes only output.encrypted_content, keeps reasoning.encrypted_content", () => {
+    const body = { model: "grok-4.6", include: ["output.encrypted_content", "reasoning.encrypted_content"] };
+    expect(stripNonOpenAiIncludeFields(body)).toEqual({ model: "grok-4.6", include: ["reasoning.encrypted_content"] });
+  });
+
+  test("an include that empties entirely drops the key", () => {
+    const body = { model: "grok-4.6", include: ["output.encrypted_content"] };
+    expect(stripNonOpenAiIncludeFields(body)).toEqual({ model: "grok-4.6" });
+  });
+
+  test("a clean body returns the same reference", () => {
+    const clean = { model: "grok-4.6", include: ["reasoning.encrypted_content"] };
+    expect(stripNonOpenAiIncludeFields(clean)).toBe(clean);
+    const noInclude = { model: "grok-4.6" };
+    expect(stripNonOpenAiIncludeFields(noInclude)).toBe(noInclude);
+  });
+});
+
+describe("Responses buildRequest include stripping", () => {
+  test("registry xAI traffic drops output.encrypted_content but keeps reasoning.encrypted_content", () => {
+    const entry = getProviderRegistryEntry("xai");
+    if (!entry) throw new Error("xAI registry entry missing");
+    const provider = { ...providerConfigSeed(entry), adapter: "openai-responses" };
+    enrichProviderFromRegistry("xai", provider);
+
+    const request = createResponsesPassthroughAdapter(provider).buildRequest({
+      modelId: "test-model",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: {
+        model: "test-model",
+        input: "ping",
+        include: ["output.encrypted_content", "reasoning.encrypted_content"],
+      },
+    }, { headers: new Headers() });
+    const body = JSON.parse(request.body) as Record<string, unknown>;
+    expect(body.include).toEqual(["reasoning.encrypted_content"]);
+  });
+
+  test("official OpenAI API-key traffic retains output.encrypted_content", () => {
+    const request = createResponsesPassthroughAdapter({
+      adapter: "openai-responses",
+      baseUrl: "https://api.openai.com/v1",
+      authMode: "key",
+      apiKey: "test-openai-key",
+    }).buildRequest({
+      modelId: "test-model",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: {
+        model: "test-model",
+        input: "ping",
+        include: ["output.encrypted_content", "reasoning.encrypted_content"],
+      },
+    }, { headers: new Headers() });
+    const body = JSON.parse(request.body) as Record<string, unknown>;
+    expect(body.include).toEqual(["output.encrypted_content", "reasoning.encrypted_content"]);
   });
 });
