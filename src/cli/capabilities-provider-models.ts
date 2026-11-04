@@ -49,10 +49,11 @@ export const PROVIDER_MODEL_CAPABILITIES: readonly Capability[] = [
     details: ["At least one edit is required; only supplied fields are patched. update is an existing alias. Use provider show only for local state, not as proof of the live write.","Management errors use safe fixed provider diagnostics; catalog failures retain the saved receipt and a nonzero exit."],
   },
   {
-    command: ["provider", "test"], summary: "Probe a provider's live model discovery connectivity.",
-    usage: "ocx provider test <name> [--json]", routes: [{ method: "POST", path: "/api/providers/test" }], mutates: true, json: "payload",
-    flags: [{ name: "--json", value: "boolean", summary: "Emit the probe result." }],
-    details: ["May contact the upstream provider; requires operator intent to probe. Static catalogs can return applicable:false; failed connectivity exits nonzero."],
+    command: ["provider", "test"], summary: "Probe discovery connectivity or explicitly test one model completion.",
+    usage: "ocx provider test <name> [--model <id> [--yes]] [--json]",
+    routes: [{ method: "POST", path: "/api/providers/test" }, { method: "POST", path: "/api/providers/test-completion" }], mutates: true, json: "payload",
+    flags: [{ name: "--model", value: "string", summary: "Run one bounded completion for this model instead of discovery." }, { name: "--yes", value: "boolean", summary: "Confirm completion quota/cost; requires --model. Mandatory with --json or non-interactive input." }, { name: "--json", value: "boolean", summary: "Emit the probe result; completion warnings go to stderr." }],
+    details: ["Without --model, discovery behavior is unchanged; static catalogs can return applicable:false. Completion tests print a quota/cost warning and require a default-No terminal confirmation or --yes; cancellation exits 1 without a request.", "Completion output includes TTFT, total latency, upstream/wire model metadata and comparison. Metadata is not proof of model identity; mismatch still exits 0. Failed tests exit 1; non-applicable results exit 0."],
   },
   {
     command: ["provider", "quota"], summary: "Read provider quota reports, optionally refreshing them.",
@@ -77,6 +78,13 @@ export const PROVIDER_MODEL_CAPABILITIES: readonly Capability[] = [
     routes: [{ method: "GET", path: "/api/selected-models" }, { method: "PUT", path: "/api/selected-models" }], mutates: true, json: "envelope",
     flags: [{ name: "--set", value: "string", summary: "Replace with comma-separated upstream IDs." }, { name: "--clear", value: "boolean", summary: "Clear the allowlist to show all; exclusive with --set." }, { name: "--json", value: "boolean", summary: "Emit the selected view or receipt." }],
     details: ["Without a mutation flag this reads only. --clear sends models:[], not a model named -.", "Read JSON is the CLI projection {provider, selected: string[], available: string[]}, not the API's provider-keyed maps; missing entries become empty arrays. --set/--clear JSON returns the server's write receipt unchanged."],
+  },
+  {
+    command: ["provider", "import-cc-switch"], summary: "Preview, apply, or restore keyless CC-Switch provider entries locally.",
+    usage: "ocx provider import-cc-switch [--source <cc-switch.db|config.json>] [--provider <id>]... [--apply | --restore] [--allow-private-network] [--json]",
+    routes: [], mutates: true, json: "payload",
+    flags: [{ name: "--source", value: "string", summary: "CC-Switch SQLite database or legacy JSON file; required for preview and apply." }, { name: "--provider", value: "string", summary: "Repeatable source ID or target provider name filter." }, { name: "--apply", value: "boolean", summary: "Write eligible keyless provider entries and record a rollback journal; requires a stopped proxy." }, { name: "--restore", value: "boolean", summary: "Remove unedited keyless providers recorded by the active import journal; requires a stopped proxy." }, { name: "--allow-private-network", value: "boolean", summary: "Permit loopback or private-network provider base URLs." }, { name: "--json", value: "boolean", summary: "Emit the preview, apply, or restore report as JSON." }],
+    details: ["Projects values only from an explicit allowlist of non-secret metadata fields (provider IDs, app types, base URLs, wire dialects, and default models); source and embedded-config bytes are read transiently while secret fields, free-text names, and TOML comments are skipped at the byte level and never decoded into strings, written, or logged, and transient byte buffers are zeroed in finally.", "Only import from a trusted local CC-Switch source: apply prints every imported ID, model, and destination URL before writing, refuses SQLite hard links (nlink > 1) and non-empty -wal/-journal sidecars until CC-Switch is closed, and opens sources read-only with O_NOFOLLOW|O_NONBLOCK descriptor checks; restore inspects auth.json read-only at the byte level and retains any provider that was edited, selected as defaultProvider, or referenced by routing, combos, fallback policy, OAuth accounts, or API keys."],
   },
   {
     command: ["models", "list"], summary: "List static configured models locally.",
@@ -206,6 +214,17 @@ export const PROVIDER_MODEL_CAPABILITIES: readonly Capability[] = [
     usage: "ocx models shadow set [model|-] [--enabled <on|off>] [--json]", routes: [{ method: "PUT", path: "/api/shadow-call-settings" }], mutates: true, json: "payload",
     flags: [{ name: "--enabled", value: "string", summary: "on or off; takes a value." }, { name: "--json", value: "boolean", summary: "Emit the settings receipt." }],
     details: ["At least a model or --enabled is required; - clears the model with an empty string. Enabling shadow calls can cause subsequent inference calls."],
+  },
+  {
+    command: ["models", "auto-review", "status"], summary: "Read the global auto-review model and enabled state.",
+    usage: "ocx models auto-review status [--json]", routes: [{ method: "GET", path: "/api/auto-review-settings" }], mutates: false, json: "payload",
+    flags: [{ name: "--json", value: "boolean", summary: "Emit auto-review settings." }],
+  },
+  {
+    command: ["models", "auto-review", "set"], summary: "Set the global auto-review model or enabled state.",
+    usage: "ocx models auto-review set [model|-] [--enabled <on|off>] [--json]", routes: [{ method: "PUT", path: "/api/auto-review-settings" }], mutates: true, json: "payload",
+    flags: [{ name: "--enabled", value: "string", summary: "on or off; takes a value." }, { name: "--json", value: "boolean", summary: "Emit the settings receipt." }],
+    details: ["At least a model or --enabled is required; - clears the model with an empty string. Human output points to ocx sync when a catalog refresh can be retried and asks operators to resolve a failed refresh before syncing."],
   },
   {
     command: ["alias", "list"], summary: "Read provider and model aliases.",

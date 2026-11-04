@@ -166,21 +166,21 @@ unknown は設定がまだ opencodex のプロキシを指すか判断できな�
 
 ### Picker モード: 1P の Code タブで opencodex モデルを表示する
 
-Picker モードは 1P モードの一部です。macOS で 1P を選ぶとデフォルトで有効になりますが、
+Picker モードは 1P モードの一部です。macOS と Windows で 1P を選ぶとデフォルトで有効になりますが、
 `claudeCode.intercept.picker: false` を設定した場合は無効です。1P の Desktop の Code タブにある
 モデルピッカーを書き換え、利用できる opencodex モデルを名前付きで表示します。初回の有効化時は、
-macOS がログインキーチェーン内のローカル証明書認証局を信頼するよう求めることがあります。この認証局の
+macOS がログインキーチェーン内、Windows が現在のユーザーのルートストアでローカル証明書認証局を信頼するよう求めることがあります。この認証局の
 制約は `claude.ai` とそのサブドメインに限られます。エクスポート可能な署名用 ID は OS の資格情報ストアで
 保護され、通常の再起動でも同じ証明書と鍵を再利用します。OpenCodex の設定ディレクトリには Picker の
-署名鍵を平文で保存しません。制約付き CA の完全な検証と OS の信頼確認は引き続き必要です。
-承認済みの同じ ID と利用可能な資格情報ストアがあれば、再起動で証明書の信頼設定を追加・削除しません。
-起動時の復元は信頼をインストールしません。信頼が未設定、取り消し済み、不明の場合は保留となり、
-`ocx claude desktop picker on` または `ocx claude desktop picker trust` を明示的に実行して信頼を付与します。
+署名鍵を平文で保存しません。制約付き CA の完全な検証と OS の信頼確認は引き続き必要です(Windows では正確なフィンガープリントと検証済みリーフで確認します)。
+承認済みの同じ ID と利用可能な資格情報ストアがあれば、再起動で macOS の証明書の信頼設定を追加・削除しません。
+起動時の復元や状態確認は信頼をインストールしません。信頼が未設定、取り消し済み、不明の場合は保留となり、
+`ocx claude desktop picker on` または `ocx claude desktop picker trust` を明示的に実行して信頼を付与します(Windows では確認が表示されることがあります)。
 
 旧 ID からの一度限りの移行では、以前の信頼を削除するために同意が必要になる場合があります。
 削除が完了するまでは Picker は利用できず、適用済みプロファイルは復号しない中継を使います。
 キーチェーンのロック解除やアプリの資格情報へのアクセス許可は macOS 独自の動作で、再起動や更新時にも
-表示される場合があります。Windows と Linux は Picker 非対応で、Picker の CA、資格情報ストア、
+表示される場合があります。Windows では `on` や `trust` の明示的な実行時にルート追加の確認が表示されることがあります。Linux は Picker 非対応で、Picker の CA、資格情報ストア、
 プロキシの処理を開始しません。通常の Claude インターセプトは利用でき、ローカル CA ファイルには
 所有者、シンボリックリンク、ファイル権限、Windows ACL の検査が適用されます。
 
@@ -191,6 +191,8 @@ Picker モードが有効な間、Claude Desktop のネットワークは OpenCo
 Picker プロファイルを選択した後は、Claude Desktop を完全に終了して開き直してください。
 
 Picker モードは 1P の一部なので、[1P のアカウントリスク](#1pオプトイン)も同じように適用されます。
+
+上流サーバーの最初の応答前に、60 秒間転送が進まない Picker アップロードは終了します。タイムアウトしたアップロードに成功応答は返しません。HTTP/2 では対象のストリームだけをリセットします。上流のバックプレッシャーで転送が一時停止している間は、このタイマーも停止します。アップロード完了時または上流の最初の応答時にタイマーを解除します。このアイドル監視はアップロード全体の所要時間に追加の上限を設けません。既存のランタイムやプロトコルの制限は引き続き適用されます。応答ストリームはこのタイマーの対象外です。
 
 ### Code タブで opencodex モデルを使う（1P バインディング）
 
@@ -535,7 +537,7 @@ Messages → Responses に変換されるリクエストでは、Claude Code の
 | Assistant `tool_use` | `function_call`(`input` → JSON 文字列に変換した `arguments`) |
 | ユーザー `tool_result` | `function_call_output`(`is_error` → `[tool error]` 接頭辞) |
 | `thinking` / `redacted_thinking` 再生 | シグネチャと秘匿ペイロードを境界付き `ocxr1` エンベロープに保持した `reasoning` 項目 |
-| Function ツール | `{type: "function"}`(`web_search*` → `{type: "web_search"}`) |
+| Function ツール | `{type: "function"}`(`web_search*` → `{type: "web_search"}`). `api.anthropic.com` への翻訳ルートでは、型付き `web_search_*` と `web_fetch_*` 宣言も Anthropic に送信され、サーバー側で実行されます。ただし Web 検索サイドカーが `web_search` を提供する場合はそちらが優先されます。検索と取得の結果は `server_tool_use` と対応する `web_search_tool_result` / `web_fetch_tool_result` としてクライアントに返されます `allowed_domains`、`blocked_domains`、`user_location` を指定したホスト検索は翻訳された Responses/Chat ルートから除外され、強制すると 400 を返します。有効な `defer_loading` 関数定義は通常の関数として呼び出せます。[翻訳の制限](/guides/claude-code/#search-restrictions-and-deferred-tools-on-translated-routes)を参照してください。 |
 | `tool_choice` | `auto`→`auto`、`none`→`none`、`any`→`required`、名前指定関数→`{type:"function",name}`、ホスト型 WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
 | `stop_sequences` | `stop` |
@@ -566,7 +568,7 @@ role、`tool_use_id` のない `tool_result`、id/name のない `tool_use`、na
 **エラー分類:** 400 `invalid_request_error`、401 `authentication_error`、
 402 `billing_error`、403 `permission_error`、404 `not_found_error`、409 `conflict_error`、
 413 `request_too_large`、429 `rate_limit_error`、504 `timeout_error`、529 `overloaded_error`、
-それ以外の 5xx は `api_error` です。`Retry-After` はそのまま維持します。
+それ以外の 5xx は `api_error` です。`Retry-After` は整数の秒数で送信し（HTTP 日付は残り秒数に変換）、上限は 8 日です。
 
 ## プロンプトキャッシュとトークン使用量
 

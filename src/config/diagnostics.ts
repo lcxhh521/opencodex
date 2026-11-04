@@ -1,13 +1,18 @@
 import { readExistingSpendSalt, spendPoolAliasesError, validatePoolAliasOwners } from "../lib/spend-pool-alias-validation";
 import { isSubagentModelEntry, rawSubagentModelForce } from "./subagent-models";
+import { validRemainingQuotaAccountIds } from "../codex/account-use-remaining";
 import { protocolConfigSchema } from "./schema/config-schema";
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import * as z from "zod/v4";
 import { compactionRecoveryConfigError } from "./schema/compaction-recovery";
+import { nativeReasoningRetentionConfigError } from "./schema/native-reasoning-retention";
+import { WORKFLOW_BUDGET_SHAPE_HINT, workflowBudgetConfigError } from "./schema/workflow-budget";
 import { desktopCompatibilityConfigError } from "./schema/desktop-compatibility";
 import { blockedModelRedirectsError } from "./schema/blocked-model-redirects";
+import { mainAccountHardLockFallbackError } from "./schema/main-account-hard-lock-fallback";
+import { fallbackPolicyError } from "./schema/fallback-policy";
 import type { OcxConfig } from "../types";
 import { anthropicAccountPoolConfigError, anthropicOAuthInstanceConfigError, anthropicSidecarConfigError } from "./schema/anthropic-account-pool";
 import { configReasoningPinsConfigError } from "./provider-validation";
@@ -18,6 +23,8 @@ import { isMissingPathError } from "./atomic-write";
 import { getConfigDir, getConfigPath } from "./paths";
 import { getDefaultConfig } from "./proxy-env";
 import { salvageConfigCandidate } from "./salvage";
+import { projectRemovedOpenCodeFreeSnapshot } from "./removed-opencode-free-backup";
+import { sanitizeOpenCodeOverridesForLoad } from "./opencode-wire-upgrade";
 import {
   sanitizeReasoningPinsForLoad,
   sanitizeRetryOn429ForLoad,
@@ -25,6 +32,7 @@ import {
   sanitizeModelCostsForLoad,
   sanitizeAutoReviewForLoad,
   degradedListenerWarnings,
+  degradedReasoningRetentionWarning,
   degradedCodexAccountPriorityWarnings,
   degradedCodexQuotaAutoRefreshWarning,
   normalizeApiKeyIds,
@@ -71,6 +79,7 @@ import {
   chatgptDesktopSchema,
   chatgptDesktopConfigIssue,
   compactionRoutingSchema,
+  reasoningRetentionSchema,
   skillsConfigSchema,
   memoryModelsSchema,
 } from "./schema/leaf-validators";
@@ -145,6 +154,10 @@ function validFileConfigDiagnostics(config: OcxConfig, rawParsed: unknown): Conf
   warnings.push(...degradedCodexAccountPriorityWarnings(rawParsed, normalized));
   warnings.push(...degradedListenerWarnings(rawParsed, normalized));
   if (blockedModelRedirectsError(rawParsed)) warnings.push("blockedModelRedirects ignored: expected a map of nonempty model keys to nonempty string targets");
+  if (nativeReasoningRetentionConfigError(rawParsed)) warnings.push("nativeReasoningRetention ignored: expected only optional boolean modelSwitch and accountSwitch fields; both remain off");
+  if (workflowBudgetConfigError(rawParsed)) warnings.push("workflowBudget ignored: " + WORKFLOW_BUDGET_SHAPE_HINT + "; the built-in ceilings remain");
+  if (mainAccountHardLockFallbackError(rawParsed)) warnings.push("codexMainAccountHardLockFallback ignored: expected a nonblank model selector and an optional declared reasoningEffort");
+  if (fallbackPolicyError(rawParsed)) warnings.push("fallback partly ignored: expected boolean model/provider switches, providers/routes/devices maps of them, and devices.<id>.localFallback; ignored leaves keep today's fallback behavior");
   const quotaAutoRefreshWarning = degradedCodexQuotaAutoRefreshWarning(rawParsed, normalized);
   if (quotaAutoRefreshWarning) warnings.push(quotaAutoRefreshWarning);
   if (rawEffort !== undefined && !isClaudeSubagentEffort(rawEffort)) {
@@ -173,6 +186,8 @@ function validFileConfigDiagnostics(config: OcxConfig, rawParsed: unknown): Conf
   if (codexPoolWarning) warnings.push(codexPoolWarning);
   const spendWarning = malformedSpendWarning(rawParsed);
   if (spendWarning) warnings.push(spendWarning);
+  const retentionWarning = degradedReasoningRetentionWarning(rawParsed, normalized);
+  if (retentionWarning) warnings.push(retentionWarning);
   if (rawPoolAliasesError(rawParsed)) {
     warnings.push("spendPoolAliases invalid: configured pool admission is refused until the mapping is corrected");
   }
@@ -196,7 +211,7 @@ export function subagentDefaultSyncEffective(
 }
 
 export function mergeConfigDefaults(parsed: unknown): unknown {
-  if (!parsed || typeof parsed !== "object") return parsed;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
   const defaults = getDefaultConfig();
   const raw = parsed as Record<string, unknown>;
   // Same absence-is-meaningful pin as the repair merge above.
@@ -264,6 +279,16 @@ function upstreamHostCircuitThresholdError(value: unknown): string | null {
     && threshold >= 0
     && threshold <= UPSTREAM_HOST_CIRCUIT_MAX_THRESHOLD) return null;
   return `schema_invalid: upstreamHostCircuitThreshold: must be an integer from 0 to ${UPSTREAM_HOST_CIRCUIT_MAX_THRESHOLD}`;
+}
+
+// The schema degrades an unknown codec to identity so a hand edit cannot break startup; a live write
+// or import must instead be refused, or it would report success and then drop the value (#7247).
+function upstreamRequestCompressionError(value: unknown): string | null {
+  const raw = rawConfigRecord(value);
+  if (!raw || !Object.hasOwn(raw, "upstreamRequestCompression")) return null;
+  const mode = raw.upstreamRequestCompression;
+  if (mode === undefined || mode === "off" || mode === "gzip" || mode === "zstd") return null;
+  return "schema_invalid: upstreamRequestCompression: must be \"off\", \"gzip\" or \"zstd\"";
 }
 
 function plaintextV2AgentMessagesError(value: unknown): string | null {
@@ -413,12 +438,15 @@ function codexAccountPrioritiesError(value: unknown): string | null {
   return null;
 }
 
-function codexAccountPriorityFailbackError(value: unknown): string | null {
+function codexAccountSelectionPreferencesError(value: unknown): string | null {
   const raw = rawConfigRecord(value);
-  if (!raw || !Object.hasOwn(raw, "codexAccountPriorityFailback")) return null;
-  const enabled = raw.codexAccountPriorityFailback;
-  if (enabled === undefined || typeof enabled === "boolean") return null;
-  return "schema_invalid: codexAccountPriorityFailback: must be a boolean or omitted";
+  if (!raw) return null;
+  for (const key of ["codexAccountPriorityFailback", "codexPreserveSignedInAccount"]) {
+    if (raw[key] !== undefined && typeof raw[key] !== "boolean") {
+      return `schema_invalid: ${key}: must be a boolean or omitted`;
+    }
+  }
+  return null;
 }
 
 /**
@@ -512,6 +540,12 @@ function creditCodexAccountIdsError(value: unknown): string | null {
   if (ids === undefined) return null;
   if (Array.isArray(ids) && ids.every(id => typeof id === "string" && /^[a-zA-Z0-9._-]{1,64}$/.test(id))) return null;
   return "schema_invalid: creditCodexAccountIds: must be an array of account ids or omitted";
+}
+
+function remainingQuotaAccountIdsError(value: unknown): string | null {
+  const ids = rawConfigRecord(value)?.codexUseRemainingQuotaAccountIds;
+  return ids === undefined || validRemainingQuotaAccountIds(ids) ? null
+    : "schema_invalid: codexUseRemainingQuotaAccountIds: must be an array of Codex account ids or omitted";
 }
 
 function oauthOpenBrowserError(value: unknown): string | null {
@@ -695,6 +729,10 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
     }
   }
   const compactionRouting = rawConfigRecord(value)?.compactionRouting;
+  const reasoningRetention = rawConfigRecord(value)?.reasoningRetention;
+  if (reasoningRetention !== undefined && !reasoningRetentionSchema.safeParse(reasoningRetention).success) {
+    return { ok: false, error: "schema_invalid: reasoningRetention: requires optional boolean enabled, maxContextPercent greater than 0 and at most 100 and/or positive integer maxTokens, with no other fields" };
+  }
   if (compactionRouting !== undefined && !compactionRoutingSchema.safeParse(compactionRouting).success) {
     return { ok: false, error: "schema_invalid: compactionRouting: requires a nonblank model, an optional valid reasoningEffort, and optional non-repeating triggers drawn from \"manual\" and \"auto\"" };
   }
@@ -709,12 +747,19 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
   const anthropicError = anthropicOAuthInstanceConfigError(value) ?? anthropicAccountPoolConfigError(value) ?? anthropicSidecarConfigError(value);
   if (anthropicError) return { ok: false, error: anthropicError };
   const boundaryError = blockedModelRedirectsError(value)
+    // OCX-11: the read schema degrades a malformed fallback leaf to absent, which would silently
+    // drop a refusal on the next whole-config save; the write boundary rejects it instead.
+    ?? fallbackPolicyError(value)
+    ?? nativeReasoningRetentionConfigError(value)
+    ?? workflowBudgetConfigError(value)
+    ?? mainAccountHardLockFallbackError(value)
     ?? compactionRecoveryConfigError(value) ?? desktopCompatibilityConfigError(value) ?? configReasoningPinsConfigError(value)
     ?? blankHostnameError(value)
     ?? (rawSubagentModelForce(value) !== undefined && !isSubagentModelEntry(rawSubagentModelForce(value)) ? "schema_invalid: claudeCode.subagentModelForce: expected a safe roster-style model id" : null)
     ?? claudeSubagentEffortError(value)
     ?? appOwnedMemoryBudgetError(value)
     ?? upstreamHostCircuitThresholdError(value)
+    ?? upstreamRequestCompressionError(value)
     ?? plaintextV2AgentMessagesError(value)
     ?? agentTaskRecoveryError(value)
     ?? quotaResetNotifyError(value)
@@ -724,7 +769,7 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
     ?? codexPoolError(value)
     ?? googleAntigravityStaticCatalogVersionError(value)
     ?? codexAccountPrioritiesError(value)
-    ?? codexAccountPriorityFailbackError(value)
+    ?? codexAccountSelectionPreferencesError(value)
     ?? poolCredentialGroupsError(value)
     ?? codexQuotaAutoRefreshError(value)
     ?? codexAccountPickerEnabledError(value)
@@ -733,6 +778,7 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
     ?? oauthOpenBrowserError(value)
     ?? showCodexCreditsError(value)
     ?? creditCodexAccountIdsError(value)
+    ?? remainingQuotaAccountIdsError(value)
     ?? runtimeRoleError(value)
     ?? remoteGuiConfigError(value)
     ?? clientConnectionConfigError(value)
@@ -752,8 +798,14 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
 }
 
 export function configDiagnosticsFromRaw(raw: string): ConfigDiagnostics {
+  return configDiagnosticsFromText(raw);
+}
+
+function configDiagnosticsFromText(raw: string, file?: { path: string; bytes: Uint8Array }): ConfigDiagnostics {
   try {
     const parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
+    projectRemovedOpenCodeFreeSnapshot(parsed, file);
+    sanitizeOpenCodeOverridesForLoad(parsed);
     sanitizeReasoningPinsForLoad(parsed);
     // Same degradation as loadConfig: a hand-edited invalid retryOn429 must not trip the
     // schema and send the caller a default-config fallback (the config command could then
@@ -804,10 +856,12 @@ export function configDiagnosticsFromRaw(raw: string): ConfigDiagnostics {
   }
 }
 
-export function readConfigFileSnapshot(): ConfigFileSnapshot {
+export function readConfigFileSnapshot(options: { passive?: boolean } = {}): ConfigFileSnapshot {
   try {
-    const raw = readFileSync(getConfigPath(), "utf-8");
-    return { diagnostics: configDiagnosticsFromRaw(raw), raw };
+    const path = getConfigPath();
+    const bytes = readFileSync(path);
+    const raw = bytes.toString("utf-8");
+    return { diagnostics: configDiagnosticsFromText(raw, options.passive ? undefined : { path, bytes }), raw };
   } catch (error) {
     if (isMissingPathError(error)) {
       return {
@@ -820,8 +874,9 @@ export function readConfigFileSnapshot(): ConfigFileSnapshot {
   }
 }
 
-export function readConfigDiagnostics(): ConfigDiagnostics {
-  return readConfigFileSnapshot().diagnostics;
+/** Passive observations project retired providers without publishing recovery backups. */
+export function readConfigDiagnostics(options: { passive?: boolean } = {}): ConfigDiagnostics {
+  return readConfigFileSnapshot(options).diagnostics;
 }
 
 /** Read-only init preflight. Occupied unsafe entries are never treated as absence. */
@@ -859,12 +914,13 @@ export type ConfigAdmissionSnapshot =
   | Readonly<{ kind: "unreadable"; diagnostics: ConfigDiagnostics; contentSha256: null }>;
 
 export function readConfigAdmissionSnapshot(): ConfigAdmissionSnapshot {
+  const path = getConfigPath();
   let bytes: Buffer;
   try {
     // ONE read. Hashing the file and then reading it again to parse would leave
     // a window for the two to disagree, which is the exact hazard this exists
     // to detect — the check would become a second chance to be wrong.
-    bytes = readFileSync(getConfigPath());
+    bytes = readFileSync(path);
   } catch (error) {
     return {
       kind: "unreadable",
@@ -877,7 +933,7 @@ export function readConfigAdmissionSnapshot(): ConfigAdmissionSnapshot {
   return {
     kind: "read",
     // Decoded from the same buffer that was hashed, not re-read from disk.
-    diagnostics: configDiagnosticsFromRaw(bytes.toString("utf-8")),
+    diagnostics: configDiagnosticsFromText(bytes.toString("utf-8"), { path, bytes }),
     contentSha256: createHash("sha256").update(bytes).digest("hex"),
   };
 }

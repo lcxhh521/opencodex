@@ -51,6 +51,22 @@ function fakeChild(frames: string[], options: { parked?: boolean; exitCode?: num
 }
 
 describe("qoder adapter", () => {
+  test("joins escaped surrogate halves from separate JSONL frames", async () => {
+    const frames = [
+      { type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "a <\uD83D" } } },
+      { type: "stream_event", event: { type: "content_block_delta", delta: { type: "thinking_delta", thinking: "Reasoning." } } },
+      { type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "\uDE00" } } },
+      { type: "result", subtype: "success", is_error: false, result: "" },
+    ].map(frame => JSON.stringify(frame) + "\n");
+    const events: AdapterEvent[] = [];
+    await createQoderAdapter(provider(), { which: () => "/bin/qoder", spawn: () => fakeChild(frames) })
+      .runTurn!(parsed(), { headers: new Headers(), translatorBudget: createTestTranslatorBudget() }, event => events.push(event));
+    const text = events.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta");
+    expect(text.map(event => event.text).join("")).toBe("a <😀");
+    for (const event of text) expect(event.text.isWellFormed()).toBe(true);
+    expect(events.at(-1)?.type).toBe("done");
+  });
+
   test.each([false, true])("unfinished repeated-ID blocks are bounded before a terminal frame (already emitted=%s)", async alreadyEmitted => {
     const id = "same_call";
     const name = "mcp__opencodex__probe_echo";
@@ -458,8 +474,12 @@ describe("qoder adapter", () => {
 
   test("uses only the Global PAT and disables tools, MCP, settings hooks, and persistence", () => {
     const env = buildQoderChildEnv(QODER_GLOBAL_PROFILE, "qoder-pat");
+    expect(env.QODER_EXPOSE_TOKEN_USAGE).toBe("true");
     expect(env.QODER_PERSONAL_ACCESS_TOKEN).toBe("qoder-pat");
-    expect(Object.keys(env).filter(key => key.startsWith("QODER"))).toEqual(["QODER_PERSONAL_ACCESS_TOKEN"]);
+    expect(Object.keys(env).filter(key => key.startsWith("QODER"))).toEqual([
+      "QODER_EXPOSE_TOKEN_USAGE",
+      "QODER_PERSONAL_ACCESS_TOKEN",
+    ]);
     const args = buildQoderArgs(parsed({ options: { reasoning: "high" } }), provider());
     expect(args[args.indexOf("--tools") + 1]).toBe("");
     expect(args[args.indexOf("--setting-sources") + 1]).toBe("");
@@ -496,6 +516,7 @@ describe("qoder adapter", () => {
     expect(args.join(" ")).not.toContain(secretDeveloper);
     expect(args).not.toContain("--append-system-prompt-file");
     expect(childEnv.QODER_APPEND_SYSTEM_PROMPT).toBe(`${secretSystem}\n\n${secretDeveloper}`);
+    expect(childEnv.QODER_EXPOSE_TOKEN_USAGE).toBe("true");
   });
 
   test("never inherits an ambient Qoder prompt for either region", () => {
@@ -525,8 +546,17 @@ describe("qoder adapter", () => {
 
     const globalEnv = buildQoderChildEnv(QODER_GLOBAL_PROFILE, "global-pat");
     const cnEnv = buildQoderChildEnv(QODER_CN_PROFILE, "cn-pat");
+    expect(globalEnv.QODER_EXPOSE_TOKEN_USAGE).toBe("true");
+    expect(globalEnv.QODERCN_EXPOSE_TOKEN_USAGE).toBeUndefined();
     expect(globalEnv.QODER_PERSONAL_ACCESS_TOKEN).toBe("global-pat");
     expect(globalEnv.QODERCN_PERSONAL_ACCESS_TOKEN).toBeUndefined();
+    // The CN build derives every variable from a QODERCN_ prefix and has no QODER_ fallback for this switch.
+    expect(cnEnv.QODERCN_EXPOSE_TOKEN_USAGE).toBe("true");
+    expect(cnEnv.QODER_EXPOSE_TOKEN_USAGE).toBeUndefined();
+    expect(Object.keys(cnEnv).filter(key => key.startsWith("QODER"))).toEqual([
+      "QODERCN_EXPOSE_TOKEN_USAGE",
+      "QODERCN_PERSONAL_ACCESS_TOKEN",
+    ]);
     expect(cnEnv.QODERCN_PERSONAL_ACCESS_TOKEN).toBe("cn-pat");
     expect(cnEnv.QODER_PERSONAL_ACCESS_TOKEN).toBeUndefined();
 
@@ -548,8 +578,11 @@ describe("qoder adapter", () => {
     expect(spawned).toHaveLength(2);
     const global = spawned.find(item => item.executable.endsWith("/qoder"))!;
     const cn = spawned.find(item => item.executable.endsWith("/qodercn"))!;
+    expect(global.env.QODER_EXPOSE_TOKEN_USAGE).toBe("true");
     expect(global.env.QODER_PERSONAL_ACCESS_TOKEN).toBe("global-pat");
     expect(global.env.QODERCN_PERSONAL_ACCESS_TOKEN).toBeUndefined();
+    expect(cn.env.QODERCN_EXPOSE_TOKEN_USAGE).toBe("true");
+    expect(cn.env.QODER_EXPOSE_TOKEN_USAGE).toBeUndefined();
     expect(cn.env.QODERCN_PERSONAL_ACCESS_TOKEN).toBe("cn-pat");
     expect(cn.env.QODER_PERSONAL_ACCESS_TOKEN).toBeUndefined();
   });
@@ -570,27 +603,6 @@ describe("qoder adapter", () => {
     expect(global.modelInputModalities).toBeUndefined();
     expect(isModelVisionSidecarConsumer(global, "Qwen3.8-Max")).toBe(false);
     expect(isModelVisionSidecarConsumer(global, "unknown-live-id")).toBe(false);
-  });
-
-  test("keeps residual Qoder CN image input rejected before spawn", async () => {
-    let spawned = 0;
-    const adapter = createQoderAdapter(provider({ baseUrl: "https://qoder.cn" }), {
-      which: () => "/bin/qodercn",
-      spawn: () => {
-        spawned++;
-        return fakeChild([]);
-      },
-    });
-    const request = parsed({ context: { messages: [{ role: "user", content: [{ type: "image", imageUrl: "data:image/png;base64,AA==" }], timestamp: 0 }] } });
-    const events: AdapterEvent[] = [];
-    await adapter.runTurn!(request, { headers: new Headers(), translatorBudget: createTestTranslatorBudget() }, event => events.push(event));
-    expect(spawned).toBe(0);
-    expect(events[0]).toMatchObject({
-      type: "error",
-      status: 400,
-      code: "unsupported_input_modality",
-      retryable: false,
-    });
   });
 
   test("forwards Qoder Global raw image input through the shared coding-agent projection", async () => {
@@ -1229,7 +1241,7 @@ describe("qoder authoritative tool-turn completion", () => {
     expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "tool_use", endTurn: false });
   });
 
-  test("scaffold refusal suppresses authoritative success terminal", async () => {
+  for (const scaffold of ["tail</system-reminder>", 'Safe.\n[Tool call: probe (call_id: fixture) with args: {"input":"private-fixture"}]']) test("scaffold refusal suppresses authoritative success terminal: " + scaffold.slice(0, 16), async () => {
     const { spawned, clock, parked, adapter } = setupParkedQoder();
     const events: AdapterEvent[] = [];
     const turnPromise = adapter.runTurn!(toolRequest(), { headers: new Headers(), translatorBudget: createTestTranslatorBudget() }, e => events.push(e));
@@ -1238,7 +1250,7 @@ describe("qoder authoritative tool-turn completion", () => {
     parked.pushFrame({ type: "system", subtype: "init", mcp_servers: [{ name: "opencodex", status: "connected" }] });
     parked.pushFrame({
       type: "assistant",
-      message: { content: [{ type: "text", text: "tail</system-reminder>" }] },
+      message: { content: [{ type: "text", text: scaffold }] },
     });
     parked.pushFrame({
       type: "assistant",

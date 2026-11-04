@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { shouldInjectApiAuthHeader } from "../../codex/loopback-target";
+import { isExportModelNames, supportsAliasModelNames } from "../../clients/config-export/model-names";
 
 /**
  * Codex parses a catalog entry's `input_modalities` as a closed enum, and one out-of-enum
@@ -109,6 +110,7 @@ import {
 import { removeCredential } from "../../oauth/store";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
 import { redactSecretString } from "../../lib/redact";
+import { withModelCostRowReplacement } from "../../config/live-reconcile";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
 import { deriveProviderPresets } from "../../providers/derive";
 import { providerCodexAccountMode } from "../../providers/registry";
@@ -149,8 +151,8 @@ import { estimateComboCost, estimateRequestCost, normalizeCostTokens, tokensPerS
 import type { PersistedUsageAttempt } from "../../usage/log";
 import { isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO, corsHeaders } from "../auth-cors";
 import { applySystemEnvToggle } from "../system-env";
+import { ClientPathError } from "../../clients/client-path";
 import {
-  ClientPathError,
   EXPORT_CLIENTS,
   EXPORT_CLIENT_IDS,
   OPENCODE_PROVIDER_ID,
@@ -168,7 +170,7 @@ import type {
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
 import { managementInferencePort, type ManagementContext } from "./context";
-import { effectiveModelReasoningEfforts, inheritedModelReasoningEfforts, listManagementModelRows, loadExportModels } from "./model-rows";
+import { effectiveModelReasoningEfforts, inheritedModelReasoningEfforts, listManagementModelRows, loadExportModels, previewExportSnapshot } from "./model-rows";
 import { initialModelSelectionPending } from "../../providers/initial-model-selection";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 import {
@@ -408,7 +410,7 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     const submitted = { [modelId]: body.cost };
     const validationError = body.cost === null ? null : providerModelCostsConfigError(submitted);
     if (validationError) return jsonResponse({ error: validationError }, 400, req, config);
-    // Copy only validated rate fields; never echo a secret-shaped model key that the
+    // Copy validated rates and policy; never echo a secret-shaped model key that the
     // shared display boundary suppresses. Model IDs remain exact, including slashes.
     const cost = body.cost === null ? null : sanitizeModelCostsForDisplay(submitted)?.[modelId];
     if (cost === undefined) return jsonResponse({ error: "modelId cannot be displayed safely" }, 400, req, config);
@@ -423,10 +425,10 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     const previousModelCosts = provider.modelCosts;
     const nextModelCosts = Object.assign(
       Object.create(null) as Record<string, ProviderCostOverlay>,
-      previousModelCosts ?? {},
+      structuredClone(previousModelCosts ?? {}),
     );
     if (cost === null) delete nextModelCosts[modelId];
-    else nextModelCosts[modelId] = cost;
+    else nextModelCosts[modelId] = structuredClone(cost);
     const mergedError = providerModelCostsConfigError(nextModelCosts);
     if (mergedError) return jsonResponse({ error: mergedError }, 400, req, config);
     // Keep even an empty map until persistence reconciles individual model keys.
@@ -435,10 +437,14 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     try {
       // The persistence owner refreshes usage overlays after its atomic write.
       // Price-only edits do not change routing or require catalog convergence.
-      persistConfig(config);
+      withModelCostRowReplacement(config, name, modelId, cost, () => persistConfig(config));
     } catch (error) {
-      if (hadModelCosts) provider.modelCosts = previousModelCosts;
-      else delete provider.modelCosts;
+      // A published write is durable even if bookkeeping failed: recovery GET
+      // must not serve old prices or let a later save undo the committed policy.
+      if (!(error instanceof ConfigWritePublishedError)) {
+        if (hadModelCosts) provider.modelCosts = previousModelCosts;
+        else delete provider.modelCosts;
+      }
       throw error;
     }
     return jsonResponse({ ok: true, provider: name, modelId, cost }, 200, req, config);
@@ -534,6 +540,16 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
         config,
       );
     }
+    const namingOptions = url.searchParams.getAll("modelNames");
+    const modelNames = namingOptions[0];
+    if (namingOptions.length > 1 || (modelNames !== undefined
+      && (!isExportModelNames(modelNames) || !supportsAliasModelNames(requested)))) {
+      return jsonResponse({ error: "modelNames must be alias or routed and requires Hermes or Command Code", code: "invalid_model_names" }, 400, req, config);
+    }
+    const passive = url.searchParams.get("preview") === "1";
+    if (passive && !supportsAliasModelNames(requested)) {
+      return jsonResponse({ error: "passive export preview requires Hermes or Command Code", code: "invalid_export_preview" }, 400, req, config);
+    }
     const spec = EXPORT_CLIENTS[requested];
     // Resolved before the catalog load on purpose. A refused override is a
     // property of the request, not of the catalog: validating it afterwards
@@ -556,19 +572,23 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       if (!(error instanceof ClientPathError)) throw error;
       return jsonResponse({ error: error.message }, 400, req, config);
     }
-    if ((requested === "raycast" || requested === "droid" || requested === "qoder") && shouldInjectApiAuthHeader(config)) {
+    if ((requested === "t3code" || requested === "raycast" || requested === "droid" || requested === "qoder" || requested === "qoder-cn" || requested === "workbuddy" || requested === "workbuddy-ai") && shouldInjectApiAuthHeader(config)) {
       return jsonResponse({
-        error: `${requested === "droid" ? "Factory Droid" : requested === "qoder" ? "Qoder" : "Raycast"} export requires an unauthenticated loopback destination; this listener requires an admission header the client cannot supply.`,
+        error: `${requested === "t3code" ? "T3 Code" : requested === "droid" ? "Factory Droid" : requested.startsWith("qoder") ? "Qoder" : requested.startsWith("workbuddy") ? "WorkBuddy" : "Raycast"} export requires an unauthenticated loopback destination; this listener requires an admission header the client cannot supply.`,
         reason: "non_loopback",
       }, 400, req, config);
     }
     const baseUrl = opencodeProxyBaseUrl(managementInferencePort(ctx), config.hostname, config);
-    let models: ExportModel[];
+    let models: readonly ExportModel[];
     try {
       // The ONE loader every export surface uses. It carries the visibility
       // filter with it, so this route and the integration routes cannot end up
       // telling a client about different models.
-      models = await loadExportModels(config);
+      if (passive) {
+        const snapshot = previewExportSnapshot(config);
+        if (snapshot === null) return jsonResponse({ error: "no current model roster is cached", code: "integration_preview_unavailable" }, 409, req, config);
+        models = snapshot.models;
+      } else models = await loadExportModels(config);
     } catch (error) {
       // A partial or empty `models` block reads as a valid config while offering nothing,
       // so a catalog failure is surfaced as unavailable rather than serialized. The
@@ -585,6 +605,7 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       baseUrl,
       models,
       config,
+      ...(modelNames === undefined ? {} : { modelNames }),
     });
     const document = built.document;
     return jsonResponse({

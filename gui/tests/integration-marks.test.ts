@@ -30,15 +30,16 @@ test("every Integrations row has a mark that resolves to a committed file", () =
 
 /*
  * A null value is a legitimate answer -- it renders a monogram -- but none of the
- * current rows should be taking it. If one does, either an asset was dropped or a
+ * existing rows should be taking it, except Gentle Shell (no verified square asset). If one does, either an asset was dropped or a
  * client was added without a mark decision, and both look like a rendering bug
  * from the outside.
  */
-test("no Integrations row falls back to a monogram today", () => {
+// The two WorkBuddy editions also take the monogram until a mark is wired for each (#7665).
+test("only Gentle Shell and the WorkBuddy editions deliberately fall back to a monogram", () => {
   const monogram = Object.entries(INTEGRATION_MARKS)
     .filter(([, src]) => src === null)
     .map(([id]) => id);
-  expect(monogram).toEqual([]);
+  expect(monogram).toEqual(["gentle-shell", "workbuddy", "workbuddy-ai"]);
 });
 
 /*

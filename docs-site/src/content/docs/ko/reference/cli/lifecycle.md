@@ -44,7 +44,9 @@ ocx start --socks5-off
 
 ### `ocx stop`
 
-실행 중인 프록시를 PID 기준으로 중지하고, PID 파일을 삭제한 뒤 기본 Codex를 복원합니다. 관리형
+감독 프로세스 없이 실행되는 Link Child는 종료 신호 처리 시 각 쓰기 직전에 연결을 재확인하고 리스너를 닫기 전에 Codex 기본 설정과 관리 Grok 설정을 복원합니다. 서비스·Desktop 감독, sibling, 재시작·재활용 인계, 부모 stop 영수증이 있으면 설정을 보존합니다. 종료 중 재시작 요청은 `409 runtime_stopping`입니다. 강제 종료는 신호 처리를 건너뛸 수 있어 부모 `ocx stop`의 복원도 필요합니다.
+
+실행 중인 프록시를 PID 기준으로 중지하고 PID 파일을 삭제합니다. 독립 실행 소유자라면 기본 Codex를 복원합니다. 관리형
 백그라운드 서비스가 설치되어 있으면 `ocx stop`이 먼저 그 서비스를 중지하므로 프록시가 다시
 올라올 수 없습니다. 웹 대시보드의 **Stop** 버튼도 같은 동작(`POST /api/stop`)을 하지만, Windows 작업 스케줄러는 예외입니다. 작업이 끝나도 래퍼가 프록시를 다시 띄울 수 있어서, 대시보드는 `respawnable_service`로 거절하고 아무것도 바꾸지 않은 채 `ocx stop` 실행을 안내합니다.
 
@@ -53,6 +55,16 @@ ocx start --socks5-off
 검사를 거친 부모 CLI가 복원을 맡습니다. 이미 종료가 확인된 프로세스를 강제 종료하는 경로로는
 넘어가지 않습니다. 영수증에 근거한 지연 복원도 최종 복원과 영수증 정리를 부모가 담당하며,
 부모의 공유 설정 복원이 실패하면 종료 실패로 남기고 미완료 영수증을 보존합니다.
+
+연결된 hub 클라이언트에서는 성공한 API 종료를 포함해 `ocx stop`이 연결 소유의 Codex 라우팅, 모델 카탈로그와 Grok 설정을 보존합니다. `ocx start`는 라우팅을 다시 주입하지 않고 보존한 설정으로 서비스를 재개합니다. Codex를 자체 계정으로 돌리려면 `ocx disconnect`를, 이미 기본 라우팅으로 복원했다면 다시 연결하려고 `ocx sync --restart-codex`를 실행하세요.
+
+Remote Link Child를 명시적으로 중지하면 공유 설정 복원에 성공한 경우 기본 Codex 라우팅, 카탈로그와 백업된 재개 이력 메타데이터를 복원하고 관리형 Grok 설정을 제거합니다. 저장된 Home 연결은 유지하며 `ocx disconnect`로 제거할 수 있습니다. Codex에서 Home을 다시 쓰려면 `ocx start`(서비스가 설치되어 있으면 `ocx service start`) 후 `ocx sync --restart-codex`를 실행하세요. 시작만으로 라우팅을 다시 적용하지 않으며, sync는 Grok 블록을 다시 만들지 않습니다.
+
+서비스 중지 전에 연결 소유권을 확인할 수 없으면 종료 API는 HTTP 409와 `sharedTeardown: "refused"`를 반환하고 프록시와 서비스 관리자를 실행 상태로 둡니다. 진행 중인 연결 또는 연결 해제가 끝난 뒤 다시 시도하세요.
+
+연결된 클라이언트를 중지할 때는 보호된 로컬 런타임 기록과 리스너의 신원 증명을 대조합니다. 클라이언트 리스너와 일반 프록시 모두 이 검증이 필요하며, 일반 프록시는 인증된 조회로 설정 보존 기능도 확인합니다. 오래되었거나 검증할 수 없는 런타임은 서비스나 프로세스를 중지하기 전에 거절합니다. 런타임을 관리하는 앱이나 서비스에서 업데이트·재시작한 뒤 다시 시도하세요.
+
+이미 중지된 클라이언트는 서비스 관리자가 비활성이고 알려진 로컬 주소에 런타임이 없음을 확인한 뒤 정상적인 미실행 결과를 반환합니다.
 
 ### `ocx restart`
 
@@ -106,7 +118,7 @@ dedicated-provider history도 포함됩니다. 상태를 백업하고 이 전체
 
 ### `ocx recover-history --ocx-compaction <thread-id> --yes`
 
-라우팅된 provider를 통해 압축된 작업을 native Codex에서 다시 열기 전에 해당 기록을 복구합니다. 이 명령은 UUID로 정확히 하나의 작업을 선택하고 비공개 바이트 단위 백업을 저장한 뒤, OpenCodeX가 소유한 `ocx1:` 압축 상태만 native Codex가 재생할 수 있는 일반 요약으로 변환합니다. native 암호화 콘텐츠와 다른 작업은 변경하지 않습니다. 실행 전에 선택한 작업을 닫으십시오. 처리 중 rollout이 변경되면 파일을 교체하지 않고 복구를 중단합니다.
+라우팅된 provider를 통해 압축된 작업을 native Codex에서 다시 열기 전에 해당 기록을 복구합니다. 이 명령은 UUID로 정확히 하나의 작업을 선택하고 비공개 바이트 단위 백업을 저장한 뒤, OpenCodeX가 소유한 `ocx1:`/`ocx2:` 압축 상태만 native Codex가 재생할 수 있는 일반 요약으로 변환합니다. native 암호화 콘텐츠와 다른 작업은 변경하지 않습니다. 실행 전에 선택한 작업을 닫으십시오. 처리 중 rollout이 변경되면 파일을 교체하지 않고 복구를 중단합니다.
 
 ### `ocx uninstall` · `ocx remove`
 
@@ -114,6 +126,16 @@ dedicated-provider history도 포함됩니다. 상태를 백업하고 이 전체
 복원 단계가 모두 성공했을 때만 opencodex 로컬 설정을 제거합니다. `remove`는 `uninstall`의
 별칭입니다. 설정 정리에는 새 설치로 만들어진 소유권 메타데이터가 필요하며, 오래된 디렉터리나
 공유 디렉터리는 그대로 남깁니다.
+
+`ocx uninstall`을 root 권한이나 관리자 권한으로 상승된 Windows 프롬프트에서 실행하면, 먼저 다른 계정이
+설정 디렉터리, 그 상위 디렉터리, 그 안의 어떤 디렉터리도 변경할 수 없는지, 그리고 설정 디렉터리 안의 링크가 그 밖을
+가리키지 않는지(Windows에서는 링크가 전혀 없는지) 확인합니다. 어느 하나라도 맞지 않으면 아무것도 바꾸기 전에 중단하고 이유를 알려 줍니다. 설정 디렉터리를
+소유한 계정으로 `sudo`나 관리자 권한 없이 `ocx uninstall`을 실행하거나, 해당 디렉터리를 그 계정만 쓸 수 있도록
+제한하고 그런 링크를 제거한 뒤 다시 실행하십시오. 권한 상승 여부를 확인할 수 없는 Windows ARM64에서도 같은 확인을
+적용하며, 확인을 마칠 수 없으면 opencodex를 중지한 뒤 설정 디렉터리를 직접 제거하십시오.
+
+설정 디렉터리 안에서 상위 디렉터리가 링크(심볼릭 링크 또는 정션)인 기록된 항목은 그대로 두고 남은 경로로 표시하며,
+실행은 부분 제거로 끝납니다. 그 링크를 실제 디렉터리로 바꾸거나 제거한 뒤 `ocx uninstall`을 다시 실행하면 마무리됩니다.
 
 ## 상태 및 헬스
 
@@ -209,7 +231,7 @@ ocx status --json
 
 인증이 필요 없는 `GET /readyz` 엔드포인트로 동기화 후 준비 상태를 확인합니다. 준비되면 `200`,
 `pending` 또는 종단 상태인 `failed`이면 `Retry-After: 1`과 함께 `503`을 반환합니다. HTTP의 정제된
-식별 필드는 `{service, version, uptime, pid, port, status, protocol, minimumClientProtocol, managementUrl}`입니다. `protocol`은 허브의 현재 원격 프로토콜, `minimumClientProtocol`은 호환되는 최소 클라이언트 프로토콜, `managementUrl`은 브라우저에서 보이는 표준 관리 origin입니다. `/readyz`가 없는 이전 프록시는
+식별 필드는 `{service, version, uptime, pid, port, status, protocol, minimumClientProtocol, managementUrl, features}`입니다. `protocol`은 허브의 현재 원격 프로토콜, `minimumClientProtocol`은 호환되는 최소 클라이언트 프로토콜, `managementUrl`은 브라우저에서 보이는 표준 관리 origin입니다. `/readyz`가 없는 이전 프록시는
 `unreachable`로 fail-closed하며, `/healthz`는 준비 상태가 아닌 별도의 liveness 확인입니다. 기본값은 한 번의
 probe이며, `--wait`는 준비 또는 timeout까지 polling하지만 종단 `failed`를 확인하면 즉시 종료합니다.
 기본 timeout은 45초이며, `--timeout <seconds>`는 `--wait`와 함께 써야 하고 양의 정수인 1~300초 범위를 받습니다. CLI JSON은
@@ -236,7 +258,15 @@ single-flight/lock 파일을 만들 수 있는지, 건강하지 않은 OAuth 또
 
 ## 카탈로그 동기화
 
-### `ocx sync [--restart-codex] [--restart-app-server-only]`
+### `ocx sync [--expect-link <linkId> | --expect-hub-key <apiKeyId>] [--local-only] [--json] [--restart-codex] [--restart-app-server-only]` <span id="ocx-sync---restart-codex---restart-app-server-only"></span>
+
+Remote Link Home에서는 최신 카탈로그가 성공적으로 커밋된 뒤 `ocx sync`가 조건을 충족하는 연결된 Child에도 동기화를 전파합니다. `--local-only`는 이 전파를 끕니다. `--json`은 Home 결과와 각 Child의 상태를 담은 단일 `ocx.sync.fanout/1` 문서를 출력하며, 건너뛴 Child의 이유도 표시합니다. Home 자체의 종료 코드가 0이 아니면 그 코드를 그대로 반환합니다. Home이 성공한 경우 Child 실패나 시간 초과 또는 링크 저장소를 읽을 수 없는 경우 종료 코드 6을 반환하며, 그 외에는 Child를 건너뛴 경우를 포함해 0으로 종료합니다. 링크 저장소를 읽을 수 없으면 텍스트 모드에서 경로가 없는 오류를 출력합니다. 코드 7은 업데이트 진행 중을 위해 예약되어 있습니다. JSON 모드에서 Home 동기화가 예외를 던져도 stdout에는 결과 문서 하나만 출력하고 stderr에는 안전하게 변환된 진단을 출력합니다.
+
+전파는 Child의 Codex 앱이나 app-server 재시작을 요청하지 않습니다. 재시작이 필요하면 GOAT를 사용하거나 해당 Child에서 `ocx sync --restart-codex`를 실행하세요. 다만 Child의 고정 대상 동기화는 변경된 Home 설정을 적용한 뒤 자체 OpenCodex 클라이언트 런타임을 재시작할 수 있습니다. Home이 시간 초과로 로컬 SSH 프로세스를 중지하더라도 이미 시작된 원격 동기화는 Child에서 계속될 수 있습니다.
+
+> **Remote Link Child:** `ocx sync`는 Home의 Codex 설정도 적용하며, 클라이언트 런타임이 그 적용보다 먼저 시작되었으면 재시작 플래그 없이도 런타임을 재시작합니다. 재시작이 실패하면 이전 런타임이 계속 서비스하고 명령은 0이 아닌 코드로 끝납니다. `ocx status --json`과 `ocx link status --json`의 관련 필드는 [Remote Link apply parity](/reference/cli/lifecycle/#remote-link-apply-parity)(영문)를 참고하세요.
+
+재시작 플래그를 명시하면 카탈로그와 캐시 바이트가 같아도 `config.toml` 변경이 성공적으로 커밋된 뒤 재시작합니다. 설정만 다루는 작업이 변경 없음, 거부, 사전 검증 또는 롤백으로 끝나면 재시작하지 않습니다. 재시작 플래그가 없으면 sync는 Codex를 자동으로 재시작하지 않습니다.
 
 설정된 모든 공급자에서 라이브 모델 목록을 가져와 병합된 카탈로그를 Codex에 다시 주입합니다.
 공급자를 추가한 뒤나 사용 가능한 모델을 새로 고칠 때 실행합니다.
@@ -259,6 +289,8 @@ app-server / code-mode-host 프로세스에만 `SIGTERM`을 보내고 데스크�
 
 명령을 Codex 앱 안에서 실행하면 재시작은 분리된 helper에 넘기고, 이 세션은 앱과 함께
 종료됩니다.
+
+**대상을 고정한 동기화.** `ocx sync --expect-link <linkId>`(Remote Link Child)와 `ocx sync --expect-hub-key <apiKeyId>`(hub 클라이언트)는 이 머신이 여전히 그 링크나 그 키로 연결되어 있을 때만 동기화합니다. 그렇지 않으면 아무것도 바꾸지 않고 로컬 공급자도 동기화하지 않으며, 종료 코드 5로 끝나고 stderr 마지막 줄에 `{"phase":"child_link_mismatch"|"hub_client_mismatch","reason":...}`를 출력합니다. 형식이 잘못되었거나 반복된 플래그는 종료 코드 2로 끝납니다. 자세한 내용은 [영어 레퍼런스](/reference/cli/lifecycle/#sync-only-from-the-expected-home---expect-link-and---expect-hub-key)를 참고하세요.
 
 ### `ocx sync-cache [--restart-codex] [--restart-app-server-only]`
 
@@ -431,7 +463,7 @@ Windows 상태 트레이 아이콘을 설치하고 제어합니다. Windows 로�
 ### `ocx gui`
 
 프록시가 실행 중이 아니면 자동으로 시작하면서 [웹 대시보드](/guides/web-dashboard/)를
-`http://localhost:<port>`에서 엽니다. 허브에서 관리 리스너를 켜 두면 `http://127.0.0.1:<관리 포트>`에서 엽니다.
+`http://127.0.0.1:<port>`에서 엽니다. 허브에서 관리 리스너를 켜 두면 `http://127.0.0.1:<관리 포트>`에서 엽니다.
 
 ## 업데이트
 

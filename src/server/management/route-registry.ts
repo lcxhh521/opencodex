@@ -53,6 +53,8 @@ export type ExemptionReason =
   | "dead"
   /** Desktop shell internal display-state POST; the CLI has no app updater state to publish. */
   | "desktop-internal"
+  /** Dashboard-only discovery for an interaction the CLI does not expose. */
+  | "gui-only"
   /**
    * A verb is owed but belongs to a later work-phase. BOUNDED: requires `owner` and
    * `ownerDoc`, and the parity test asserts that tracked doc exists and names the route.
@@ -99,10 +101,15 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "POST", path: "/api/chatgpt-network/disable", module: "server/management/chatgpt-network-routes", mutates: true },
   { method: "POST", path: "/api/chatgpt-network/recover", module: "server/management/chatgpt-network-routes", mutates: true },
   // server/management-api
+  { method: "GET", path: "/api/stop", module: "server/management-api", mutates: false },
   { method: "POST", path: "/api/stop", module: "server/management-api", mutates: true },
   // codex/auth-api
+  { method: "GET", path: "/api/codex-auth/preserve-signed-in", module: "codex/auth-api/routes", mutates: false },
+  { method: "PUT", path: "/api/codex-auth/preserve-signed-in", module: "codex/auth-api/routes", mutates: true },
   { method: "DELETE", path: "/api/codex-auth/accounts", module: "codex/auth-api/routes", mutates: true },
   { method: "GET", path: "/api/codex-auth/accounts", module: "codex/auth-api/routes", mutates: false },
+  { method: "GET", path: "/api/codex-auth/accounts/use-remaining", module: "codex/auth-api/routes", mutates: false },
+  { method: "PUT", path: "/api/codex-auth/accounts/use-remaining", module: "codex/auth-api/routes", mutates: true },
   { method: "GET", path: "/api/codex-auth/active", module: "codex/auth-api/routes", mutates: false },
   { method: "GET", path: "/api/codex-auth/login-status", module: "codex/auth-api/routes", mutates: false },
   { method: "GET", path: "/api/codex-auth/quota", module: "codex/auth-api/routes", mutates: false },
@@ -133,6 +140,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "PUT", path: "/api/codex-auth/pool-strategy", module: "codex/auth-api/routes", mutates: true, exempt: { reason: "compatibility-alias", why: "Superseded by PUT /api/pool/settings, which the CLI now drives. Kept working for existing clients and pinned by exact-body goldens in tests/server/account-pool-management-api.test.ts; no CLI verb targets it any more." } },
   // codex/native-profile-api
   { method: "GET", path: "/api/native-main-profiles", module: "codex/native-profile-api", mutates: false },
+  { method: "GET", path: "/api/native-main-profiles/admission", module: "codex/native-profile-api", mutates: false, exempt: { reason: "deferred-verb", why: "Read by `ocx doctor` over its single-use local read capability; ocx doctor is not a registry verb, and no operator verb reports admission on its own yet.", owner: "native-main admission", ownerDoc: "structure/codex-home.md" } },
   { method: "GET", path: "/api/native-main-profiles/doctor", module: "codex/native-profile-api", mutates: false },
   { method: "POST", path: "/api/native-main-profiles/recover", module: "codex/native-profile-api", mutates: true },
   { method: "POST", path: "/api/native-main-profiles/register", module: "codex/native-profile-api", mutates: true },
@@ -170,11 +178,15 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "GET", path: "/api/claude-desktop/picker", module: "server/management/claude-desktop-picker-routes", mutates: false },
   { method: "PUT", path: "/api/claude-desktop/picker", module: "server/management/claude-desktop-picker-routes", mutates: true },
   { method: "GET", path: "/api/codex/desktop-compatibility/certificate", module: "server/management/desktop-compatibility-routes", mutates: false, mechanism: "path-constant", exempt: { reason: "deferred-verb", owner: "codex-desktop-compatibility", ownerDoc: "structure/clients/codex-desktop.md", why: "Certificate status is available over authenticated HTTP while the desktop compatibility runtime/CLI status contract is integrated." } },
-  { method: "POST", path: "/api/codex/desktop-compatibility/certificate", module: "server/management/desktop-compatibility-routes", mutates: true, mechanism: "path-constant", exempt: { reason: "session-only", why: "Certificate setup requires a confirmed local dashboard session; raw admin tokens cannot enroll or remove OS trust." } },
+  { method: "POST", path: "/api/codex/desktop-compatibility/certificate", module: "server/management/desktop-compatibility-routes", mutates: true, mechanism: "path-constant", exempt: { reason: "session-only", why: "Certificate setup requires an operator-paired local dashboard session; raw admin tokens and automatic loopback sessions cannot enroll or remove OS trust." } },
   { method: "GET", path: "/api/codex/desktop-compatibility/runtime", module: "server/management/desktop-compatibility-runtime-routes", mutates: false, mechanism: "path-constant", exempt: { reason: "deferred-verb", owner: "codex-desktop-compatibility", ownerDoc: "structure/clients/codex-desktop.md", why: "Experimental runtime status is authenticated HTTP while the native compatibility UI and CLI contract are integrated." } },
-  { method: "POST", path: "/api/codex/desktop-compatibility/runtime", module: "server/management/desktop-compatibility-runtime-routes", mutates: true, mechanism: "path-constant", exempt: { reason: "session-only", why: "Native app launch and account-wide UI trial require explicit local dashboard confirmation." } },
+  { method: "POST", path: "/api/codex/desktop-compatibility/runtime", module: "server/management/desktop-compatibility-runtime-routes", mutates: true, mechanism: "path-constant", exempt: { reason: "session-only", why: "Native app launch and account-wide UI trial require explicit confirmation from an operator-paired local dashboard session." } },
   { method: "GET", path: "/api/codex/desktop-compatibility/settings", module: "server/management/desktop-compatibility-settings-routes", mutates: false, mechanism: "path-constant", exempt: { reason: "deferred-verb", owner: "codex-desktop-compatibility", ownerDoc: "structure/clients/codex-desktop.md", why: "The persisted startup preference is currently owned by the local desktop compatibility panel." } },
-  { method: "POST", path: "/api/codex/desktop-compatibility/settings", module: "server/management/desktop-compatibility-settings-routes", mutates: true, mechanism: "path-constant", exempt: { reason: "session-only", why: "Saved native observation intent requires an explicit local GUI action and fresh field revision." } },
+  { method: "POST", path: "/api/codex/desktop-compatibility/settings", module: "server/management/desktop-compatibility-settings-routes", mutates: true, mechanism: "path-constant", exempt: { reason: "session-only", why: "Saved native observation intent requires an operator-paired local GUI action and fresh field revision." } },
+  // server/management/codex-cli-update-routes
+  { method: "GET", path: "/api/codex/cli-update/plan", module: "server/management/codex-cli-update-routes", mutates: false, exempt: { reason: "local-transport", why: "The CLI runs the same proof-bound plan builder locally; the authenticated route also supplies the dashboard plan." } },
+  { method: "POST", path: "/api/codex/cli-update/apply", module: "server/management/codex-cli-update-routes", mutates: true, exempt: { reason: "session-only", why: "HTTP apply requires a current paired dashboard session on trusted loopback ingress, matching origin, CSRF and confirmed: true; the local CLI uses --yes independently." } },
+  { method: "GET", path: "/api/codex/cli-update/jobs/{jobId}", module: "server/management/codex-cli-update-routes", mutates: false, mechanism: "regex", exempt: { reason: "local-transport", why: "The CLI status command reads the same protected job record directly and does not use job IDs as authorization." } },
   { method: "PUT", path: "/api/codex-auth/features/default-mode-request-user-input", module: "server/management/agent-settings-routes", mutates: true },
   { method: "PUT", path: "/api/effort-caps", module: "server/management/agent-settings-routes", mutates: true },
   { method: "PUT", path: "/api/grok/selection", module: "server/management/agent-settings-routes", mutates: true },
@@ -221,8 +233,11 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "POST", path: "/api/combos/decision-test", module: "server/management/decision-routes", mutates: true },
   // server/management/config-routes
   { method: "GET", path: "/api/config", module: "server/management/config-routes", mutates: false },
+  { method: "GET", path: "/api/auto-review-settings", module: "server/management/config-routes", mutates: false },
   { method: "GET", path: "/api/diagnostics/project-config", module: "server/management/config-routes", mutates: false },
   { method: "GET", path: "/api/settings", module: "server/management/config-routes", mutates: false },
+  { method: "GET", path: "/api/native-reasoning-retention", module: "server/management/native-reasoning-retention-routes", mutates: false, exempt: { reason: "local-transport", why: "The CLI reads the same nativeReasoningRetention policy through ocx config get; no separate HTTP-specific settings verb is required." } },
+  { method: "PUT", path: "/api/native-reasoning-retention", module: "server/management/native-reasoning-retention-routes", mutates: true, exempt: { reason: "deferred-verb", why: "A dedicated live CLI verb for this policy is deferred to native-reasoning-retention-live-cli; ocx config set/unset currently edits the same block on disk without live convergence.", owner: "native-reasoning-retention-live-cli", ownerDoc: "structure/transports/native-reasoning-retention.md" } },
   { method: "GET", path: "/api/shadow-call-settings", module: "server/management/config-routes", mutates: false },
   { method: "GET", path: "/api/sidecar-settings", module: "server/management/config-routes", mutates: false },
   { method: "GET", path: "/api/startup-health", module: "server/management/config-routes", mutates: false },
@@ -235,6 +250,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "POST", path: "/api/windows-tray", module: "server/management/config-routes", mutates: true },
   { method: "PUT", path: "/api/config", module: "server/management/config-routes", mutates: true, exempt: { reason: "disabled", why: "Returns 405 by design; provider changes go through POST /api/providers." } },
   { method: "PUT", path: "/api/settings", module: "server/management/config-routes", mutates: true },
+  { method: "PUT", path: "/api/auto-review-settings", module: "server/management/config-routes", mutates: true },
   { method: "PUT", path: "/api/shadow-call-settings", module: "server/management/config-routes", mutates: true },
   { method: "PUT", path: "/api/sidecar-settings", module: "server/management/config-routes", mutates: true },
   // server/management/integration-routes
@@ -281,6 +297,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "GET", path: "/api/usage/timeline", module: "server/management/usage-timeline-routes", mutates: false },
   // server/management/advisor-routes
   { method: "GET", path: "/api/advisor/settings", module: "server/management/advisor-routes", mutates: false },
+  { method: "GET", path: "/api/advisor/activity", module: "server/management/advisor-routes", mutates: false },
   { method: "PUT", path: "/api/advisor/settings", module: "server/management/advisor-routes", mutates: true },
   // server/management/companion-routes
   { method: "POST", path: "/api/companion/open-in-browser", module: "server/management/companion-routes", mutates: true, exempt: { reason: "browser-navigation", why: "Opens the companion's current view in the system browser under normal management admission; the CLI reads the underlying settings and usage directly." } },
@@ -359,15 +376,20 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "PUT", path: "/api/oauth/accounts/pool", module: "server/management/oauth-account-routes", mutates: true },
   { method: "PUT", path: "/api/providers/keys/active", module: "server/management/oauth-account-routes", mutates: true },
   { method: "PUT", path: "/api/providers/keys/alias", module: "server/management/oauth-account-routes", mutates: true },
+  { method: "PUT", path: "/api/providers/keys/pause", module: "server/management/oauth-account-routes", mutates: true },
   // server/management/provider-routes
   { method: "DELETE", path: "/api/providers", module: "server/management/provider-routes", mutates: true },
   { method: "GET", path: "/api/provider-context-caps", module: "server/management/provider-routes", mutates: false },
   { method: "GET", path: "/api/provider-presets", module: "server/management/provider-routes", mutates: false },
   { method: "GET", path: "/api/provider-quotas", module: "server/management/provider-routes", mutates: false },
-  { method: "GET", path: "/api/provider-request-pacing", module: "server/management/provider-routes", mutates: false },
+  { method: "GET", path: "/api/quota-pool", module: "server/management/quota-pool-routes", mutates: false, exempt: { reason: "deferred-verb", why: "The ocx.quota-pool/1 read is a machine contract GOAT consumes over management and the link relay; the CLI shows the same caches through ocx provider quota and ocx account.", owner: "ocx-1 quota pool", ownerDoc: "structure/quota-pool.md" } },
+  { method: "GET", path: "/api/fallback", module: "server/management/fallback-routes", mutates: false },
+  { method: "PUT", path: "/api/fallback", module: "server/management/fallback-routes", mutates: true },
+  { method: "GET", path: "/api/provider-request-pacing", module: "server/management/provider-key-pacing-routes", mutates: false },
   { method: "GET", path: "/api/providers", module: "server/management/provider-routes", mutates: false },
   { method: "PATCH", path: "/api/providers", module: "server/management/provider-routes", mutates: true },
   { method: "POST", path: "/api/providers", module: "server/management/provider-routes", mutates: true },
+  { method: "POST", path: "/api/providers/test-completion", module: "server/management/provider-routes", mutates: true },
   { method: "POST", path: "/api/providers/test", module: "server/management/provider-routes", mutates: true },
   { method: "PUT", path: "/api/providers", module: "server/management/provider-routes", mutates: true },
   { method: "PUT", path: "/api/provider-context-caps", module: "server/management/provider-routes", mutates: true },
@@ -379,6 +401,8 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "PATCH", path: "/api/protocols/settings", module: "server/management/protocol-routes", mutates: true },
   { method: "GET", path: "/api/workflow-budget", module: "server/management/workflow-budget-routes", mutates: false, exempt: { reason: "deferred-verb", why: "Reading a root's live budget is owed a CLI verb -- an operator staring at a 429 is usually already in a terminal -- but the ledger is process memory with no local transport to read it through, so the verb has to be an HTTP call the CLI does not yet make.", owner: "260915_workflow_budget_window wfc", ownerDoc: "devlog/_fin/260915_workflow_budget_window/030_wfc_diff_plan.md" } },
   { method: "POST", path: "/api/workflow-budget/clear", module: "server/management/workflow-budget-routes", mutates: true, exempt: { reason: "deferred-verb", why: "Clearing one root is owed the same verb as the read above and for the same reason. It is deliberately not shipped as a verb in this work-phase: the read comes first, because an operator who cannot see which ceiling fired has no basis for deciding to forgive it.", owner: "260915_workflow_budget_window wfc", ownerDoc: "devlog/_fin/260915_workflow_budget_window/030_wfc_diff_plan.md" } },
+  { method: "GET", path: "/api/workflow-budget/settings", module: "server/management/workflow-budget-routes", mutates: false, exempt: { reason: "local-transport", why: "The CLI reads the same workflowBudget block through ocx config get; the route only adds the built-in defaults and bounds the dashboard draws." } },
+  { method: "PUT", path: "/api/workflow-budget/settings", module: "server/management/workflow-budget-routes", mutates: true, exempt: { reason: "deferred-verb", why: "A dedicated live CLI verb for the ceilings is deferred with the other workflow-budget verbs; ocx config set/unset edits the same block on disk and the running proxy picks it up on restart.", owner: "260915_workflow_budget_window wfc", ownerDoc: "devlog/_fin/260915_workflow_budget_window/030_wfc_diff_plan.md" } },
   // server/management/request-history-routes
   { method: "GET", path: "/api/request-history", module: "server/management/request-history-routes", mutates: false },
   // server/management/routing-analytics-routes
@@ -388,6 +412,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "POST", path: "/api/routing-profiles/dry-run", module: "server/management/routing-profile-routes", mutates: true },
   { method: "PUT", path: "/api/routing-profiles", module: "server/management/routing-profile-routes", mutates: true },
   // server/management/session-routes
+  { method: "POST", path: "/api/session/remember", module: "server/management/session-routes", mutates: true, exempt: { reason: "session-only", why: "Explicit admin-token exchange for a revocable HttpOnly device cookie, restricted to a same-origin HTTPS dashboard or loopback. The CLI does not own a browser cookie jar." } },
   { method: "POST", path: "/api/session/logout", module: "server/management/session-routes", mutates: true, exempt: { reason: "session-only", why: "Logs out the CURRENT gui-session and requires its own Origin and CSRF. There is nothing for a CLI verb to log out of: the CLI holds an admin token, and the admin token is refused here precisely so it cannot end a consent session it never established." } },
   // server/management/sidebar-routes
   { method: "GET", path: "/api/github/star", module: "server/management/sidebar-routes", mutates: false },
@@ -434,6 +459,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "GET", path: "/api/system/codex-app-server", module: "server/management/system-routes", mutates: false, mechanism: "path-constant" },
   { method: "POST", path: "/api/system/codex-restart", module: "server/management/system-routes", mutates: true, mechanism: "path-constant" },
   { method: "POST", path: "/api/providers/reload", module: "server/management/provider-routes", mutates: true, mechanism: "path-constant", exempt: { reason: "capability-principal", why: "Gated on the local-provider-reload-capability principal (provider-routes.ts:467), not an operator action." } },
+  { method: "GET", path: "/api/client-integrations/hermes/profiles", module: "server/management/hermes-profile-routes", mutates: false, mechanism: "path-constant", exempt: { reason: "gui-only", why: "The dashboard discovers selectable Hermes profiles; the CLI intentionally has no Hermes profile selector." } },
   { method: "GET", path: "/api/client-integrations/{clientId}", module: "server/management/integration-routes", mutates: false, mechanism: "prefix-decode" },
   { method: "PUT", path: "/api/client-integrations/{clientId}", module: "server/management/integration-routes", mutates: true, mechanism: "prefix-decode" },
   { method: "GET", path: "/api/request-history/{id}", module: "server/management/request-history-routes", mutates: false, mechanism: "slice" },

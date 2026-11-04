@@ -1,3 +1,5 @@
+import { CodexInstallationIdUnavailableError } from "../codex/installation-id";
+import { isolateCodexPoolClientMetadata, mergeCodexSelectedHeaders } from "../codex/forward-transport-headers";
 /**
  * /v1/images/{generations,edits} relay (issue #83).
  *
@@ -27,9 +29,11 @@ import { formatCodexProviderForLog } from "../codex/routing";
 import { signalWithTimeout } from "../lib/abort";
 import { readBoundedResponseBytes, type BoundedBytesResult } from "../lib/bounded-body";
 import { sidecarEnter } from "../lib/sidecar-tracker";
+import { isNonReplayableResponse } from "../lib/upstream-retry";
 import type { OcxConfig } from "../types";
 import { resolveFirstUsableOpenAiSidecar, selectImagesProvider } from "../providers/openai-sidecar";
-import { selectProactiveApiKeyTransport } from "../providers/key-failover";
+import { recordDistributedKeyFailure, selectProactiveApiKeyTransport } from "../providers/key-failover";
+import { requestPacingOverloadResponse } from "./responses/pacing-overload";
 import { getProviderRegistryEntry } from "../providers/registry";
 import { readJsonRequestBody, resolveInboundBodyLimitBytes } from "./request-decompress";
 import { ForwardAdmissionCredentialError, validateForwardAdmissionCredential } from "./auth-cors";
@@ -728,7 +732,9 @@ export async function handleImages(
       });
       if (forward) logCtx.provider = formatCodexProviderForLog(forward.providerName, codexLogAccountId(forward.authContext), config);
     } catch (err) {
-      if (err instanceof CodexAccountCooldownError) {
+      if (err instanceof CodexInstallationIdUnavailableError) {
+        forwardAuthError = formatErrorResponse(503, "server_busy", err.message);
+      } else if (err instanceof CodexAccountCooldownError) {
         forwardAuthError = cooldownErrorResponse(err);
       } else if (err instanceof CodexMainProfileDrainingError) {
         forwardAuthError = codexMainProfileDrainingResponse();
@@ -750,12 +756,13 @@ export async function handleImages(
     }
   }
 
-  const headers = new Headers({ "content-type": "application/json" });
+  let headers = new Headers({ "content-type": "application/json" });
   const releaseForwardProbe = (): void => {
     try { forward?.releaseProbeLease?.(); }
     catch { console.error("[images] Failed to release probe lease"); }
   };
   let url: string;
+  let recordKeyFailure = (_status: 401 | 429, _retryAfter: string | null) => {};
   // Each branch is re-checked as it is entered: the forward check is defence in
   // depth for the pre-filter above, and the keyed check runs before a key
   // rotation is committed.
@@ -770,8 +777,7 @@ export async function handleImages(
     }
     const { provider } = forward;
     try {
-      for (const [name, value] of Object.entries(provider.headers ?? {})) headers.set(name, value);
-      for (const [name, value] of forward.headers) headers.set(name, value);
+      headers = mergeCodexSelectedHeaders({ "content-type": "application/json", ...provider.headers }, forward.headers);
       assertImagesUpstreamAuthorization(headers, config);
     } catch {
       releaseForwardProbe();
@@ -805,8 +811,15 @@ export async function handleImages(
     //
     // Transport variant: this branch reads `provider.baseUrl` and `provider.headers` to build
     // the URL and the request, and it comes back with the credential already resolved.
-    const warmKeyProvider = selectProactiveApiKeyTransport(config, providerName, candidates.keyed.provider);
+    let warmKeyProvider;
+    try { warmKeyProvider = selectProactiveApiKeyTransport(config, providerName, candidates.keyed.provider); }
+    catch (error) {
+      const refusal = requestPacingOverloadResponse(error);
+      if (refusal) return refusal;
+      throw error;
+    }
     const provider = warmKeyProvider ?? candidates.keyed.provider;
+    recordKeyFailure = (status, retryAfter) => { recordDistributedKeyFailure(config, providerName, provider._apiKeyAttempt, status, Date.now(), retryAfter); };
     // No fall back to the earlier snapshot once a pick has happened. The picker COMMITS its
     // choice before returning, so if the chosen reference will not resolve -- revoked keychain
     // entry, unset env var -- sending the previous key would authenticate a non-idempotent
@@ -856,7 +869,9 @@ export async function handleImages(
     upstreamResponse = await fetch(url, {
       method: "POST",
       headers,
-      body: JSON.stringify(body),
+      body: JSON.stringify(isolateCodexPoolClientMetadata(
+        body, forward?.authContext.kind === "pool" ? forward.authContext.chatgptAccountId : undefined,
+      )),
       signal: linkedSignal.signal,
       // Do not follow a cross-origin 3xx while carrying Codex credentials. Bun strips
       // `Authorization` across origins but forwards nonstandard headers, so
@@ -865,6 +880,9 @@ export async function handleImages(
       // compact already set this; the credential-bearing sidecars did not.
       redirect: "manual",
     });
+    if ((upstreamResponse.status === 401 || upstreamResponse.status === 429) && !isNonReplayableResponse(upstreamResponse)) {
+      recordKeyFailure(upstreamResponse.status, upstreamResponse.headers.get("retry-after"));
+    }
     const observed = await readImageResponseBytes(upstreamResponse, {
       maxBytes: IMAGES_RESPONSE_MAX_BYTES,
       signal: linkedSignal.signal,
@@ -897,6 +915,10 @@ export async function handleImages(
       // lease taken by the selected Pool account must be returned explicitly.
       releaseForwardProbe();
       return formatErrorResponse(499, "client_closed_request", `image ${endpoint} request canceled by client`);
+    }
+    if (err instanceof CodexInstallationIdUnavailableError) {
+      releaseForwardProbe();
+      return formatErrorResponse(503, "server_busy", err.message);
     }
     if (linkedSignal.signal.aborted || (err instanceof Error && err.name === "TimeoutError")) {
       forward?.recordOutcome?.("timeout");

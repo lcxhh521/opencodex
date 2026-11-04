@@ -1,4 +1,14 @@
+import { OPENCODE_GO_BASE_URL, OPENCODE_GO_RESPONSES_DEFAULTS } from "../../types/opencode-go";
 import { KIRO_MODELS, KIRO_MODEL_CONTEXT_WINDOWS, KIRO_MODEL_REASONING_EFFORTS } from "../kiro-models";
+import {
+  DSH_ACCOUNT_MODELS,
+  DSH_ACCOUNT_DEFAULT_MODEL,
+  DSH_ACCOUNT_MODEL_CONTEXT_WINDOWS,
+  DSH_ACCOUNT_MODEL_INPUT_MODALITIES,
+  DSH_ACCOUNT_MODEL_MAX_OUTPUT_TOKENS,
+  DSH_ACCOUNT_MODEL_REASONING_EFFORTS,
+  DSH_ACCOUNT_MODEL_DISPLAY_NAMES,
+} from "../dsh-account-models";
 import { DEVIN_MODEL_CONTEXT_WINDOWS, DEVIN_MODEL_EFFORTS, DEVIN_DEFAULT_EFFORTS } from "../../adapters/devin/live-models";
 import { ANTIGRAVITY_MODELS, ANTIGRAVITY_MODEL_CONTEXT_WINDOWS, ANTIGRAVITY_MODEL_EFFORTS, ANTIGRAVITY_MODEL_INPUT_MODALITIES } from "../antigravity-models";
 import {
@@ -241,7 +251,8 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     // (it is the current catalog, so its default ordering wins), then the ids
     // only the old devin entry carried. Degraded-mode seed only either way —
     // `liveModels` discovers the account's real roster.
-    models: ["swe-2", "swe-1-7", "gpt-5-6-sol", "gpt-6-astra", "gpt-6-1-sol", "gpt-6-sol", "gpt-6-luna", "claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-sonnet-5", "glm-5-3", "kimi-k3", "gemini-3-8-flash", "grok-4-6", "grok-4-7", "swe-1-7-lightning", "gpt-5-6-luna", "gpt-5-6-terra", "claude-opus-4-8", "glm-5-2", "kimi-k2-7", "grok-4-5"],
+    // 261027 preemptive: GPT-6.1 Terra (same degraded seed policy as GPT-6.1 Sol).
+    models: ["swe-2", "swe-1-7", "gpt-5-6-sol", "gpt-6-astra", "gpt-6-1-sol", "gpt-6-1-terra", "gpt-6-sol", "gpt-6-luna", "claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-sonnet-5", "glm-5-3", "kimi-k3", "gemini-3-8-flash", "grok-4-6", "grok-4-7", "swe-1-7-lightning", "gpt-5-6-luna", "gpt-5-6-terra", "claude-opus-4-8", "glm-5-2", "kimi-k2-7", "grok-4-5"],
     liveModels: true,
     defaultModel: "swe-2",
     modelContextWindows: DEVIN_MODEL_CONTEXT_WINDOWS,
@@ -507,6 +518,36 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     parallelToolCalls: false,
   },
   {
+    id: "workbuddy-ai", label: "WorkBuddy AI", adapter: "workbuddy-ai",
+    baseUrl: "https://www.workbuddy.ai/v2", authKind: "oauth", oauthId: "workbuddy-ai",
+    featured: false, dashboardPreset: true, liveModels: true,
+    defaultModel: "default-model", models: ["default-model"],
+    modelDiscovery: { path: "/v3/config", format: "workbuddy" },
+    dashboardUrl: "https://www.workbuddy.ai",
+    note: "Use your WorkBuddy AI international subscription. Sign in in your browser; models follow your account catalog.",
+  },
+  {
+    id: "dsh-account",
+    label: "DeepSeek Account (DSH)",
+    adapter: "dsh-account",
+    baseUrl: "https://api.deepseek.com/anthropic",
+    authKind: "oauth",
+    oauthId: "dsh-account",
+    featured: false,
+    dashboardPreset: true,
+    note: "Import-first: reuses your installed and signed-in DeepSeek Harness Desktop account. Add account imports the grant from ~/.dsh/.credentials.yaml and verifies it with the DeepSeek platform.",
+    dashboardUrl: "https://platform.deepseek.com",
+    // Static catalog: the account token never authorizes model discovery (src/oauth/model-discovery-auth.ts).
+    liveModels: false,
+    defaultModel: DSH_ACCOUNT_DEFAULT_MODEL,
+    models: [...DSH_ACCOUNT_MODELS],
+    modelContextWindows: DSH_ACCOUNT_MODEL_CONTEXT_WINDOWS,
+    modelInputModalities: DSH_ACCOUNT_MODEL_INPUT_MODALITIES,
+    modelMaxOutputTokens: DSH_ACCOUNT_MODEL_MAX_OUTPUT_TOKENS,
+    modelReasoningEfforts: DSH_ACCOUNT_MODEL_REASONING_EFFORTS,
+    modelDisplayNames: DSH_ACCOUNT_MODEL_DISPLAY_NAMES,
+  },
+  {
     id: "orcarouter-oauth",
     label: "OrcaRouter - Auth",
     adapter: "openai-chat",
@@ -717,6 +758,8 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
       ...OPENAI_DAYBREAK_REASONING_EFFORTS,
       "gpt-6-astra": ["low", "medium", "high", "xhigh", "max"],
       ...Object.fromEntries(OPENAI_GPT6_MODELS.map(id => [id, ["low", "medium", "high", "xhigh", "max"]])),
+      // OpenAI API model page (2026-10-27): Terra also accepts none; Sol does not.
+      "gpt-6.1-terra": ["none", "low", "medium", "high", "xhigh", "max"],
     },
     virtualModels: OPENAI_API_GPT56_VIRTUAL_MODELS,
   },
@@ -824,7 +867,8 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     escapeBuiltinToolNames: true,
   },
   {
-    id: "opencode-go", label: "opencode go", adapter: "openai-chat", baseUrl: "https://opencode.ai/zen/go/v1",
+    id: "opencode-go", label: "opencode go", adapter: "openai-chat", baseUrl: OPENCODE_GO_BASE_URL,
+    destinationAliases: [{ adapter: "openai-chat", baseUrl: "https://opencode.ai/inference/go/v1" }],
     authKind: "key", featured: true, dashboardUrl: "https://opencode.ai/auth", defaultModel: "kimi-k2.7-code",
     jawcodeBundle: "opencode-go", note: "GLM, DeepSeek, Kimi, Qwen, MiMo…",
     // Zen Go can close a Chat stream after a fully assembled function call without sending
@@ -846,13 +890,7 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     - 다른 대안 대신 이 방식을 선택한 이유: OpenCode Go documents sibling models on Chat or Anthropic endpoints, and an exact registry default preserves both those routes and explicit opt-out precedence.
     - 장점, 단점 및 영향: Each listed model reaches `/responses` from every inbound surface without changing siblings; a future upstream endpoint change requires an evidence-backed registry update.
     */
-    modelWireDefaults: {
-      "gpt-5.6-luna": "openai-responses",
-      "grok-4.6": "openai-responses",
-      "grok-4.7": "openai-responses",
-      "muse-spark-1.3-contributor": "openai-responses",
-      "muse-spark-1.2-contributor": "openai-responses",
-    },
+    modelWireDefaults: OPENCODE_GO_RESPONSES_DEFAULTS,
     modelContextWindows: {
       "kimi-k3": KIMI_K3_STANDARD_CONTEXT_WINDOW,
       // Zen Go discovers only the gateway id, so carry DeepSeek's official 1M V4.1
@@ -909,6 +947,9 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     },
     modelReasoningEfforts: {
       "gpt-5.6-luna": OPENAI_API_GPT56_REASONING_EFFORTS,
+      // Gemini's native thinkingLevel ladder; higher Codex efforts clamp to high.
+      // https://ai.google.dev/gemini-api/docs/models/gemini-4-argon
+      "gemini-4-argon-contributor": ["low", "medium", "high"],
       "grok-4.6": ["low", "medium", "high", "xhigh"],
       "grok-4.7": ["low", "medium", "high", "xhigh"],
       "glm-5.3": ZAI_GLM_53_REASONING_EFFORTS,
@@ -1060,6 +1101,7 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
       "openai/gpt-6-luna": true,
       // Listed 2026-09-29 as an OpenAI-backed route like GPT-6 Sol.
       "openai/gpt-6.1-sol": true,
+      "openai/gpt-6.1-terra": true,
     },
     // Deliberately no OpenRouter route pin: it bills the endpoint actually used and reports the
     // actual service_tier. B0 confirmation therefore owns downgrade safety. Forcing `only` plus
@@ -1200,7 +1242,7 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
   { id: "azure-openai", label: "Azure OpenAI", adapter: "azure-openai", baseUrl: "https://{resource}.openai.azure.com/openai", authKind: "key", featured: true, dashboardUrl: "https://portal.azure.com" },
   { id: "ollama", label: "Ollama (local)", adapter: "openai-chat", baseUrl: "http://localhost:11434/v1", authKind: "local", allowPrivateNetworkByDefault: true, allowBaseUrlOverride: true, featured: true, note: "Local — key usually blank" },
   { id: "vllm", label: "vLLM (local)", adapter: "openai-chat", baseUrl: "http://localhost:8000/v1", authKind: "local", allowPrivateNetworkByDefault: true, allowBaseUrlOverride: true, featured: true, note: "Local — key usually blank" },
-  { id: "lm-studio", label: "LM Studio (local)", adapter: "openai-chat", baseUrl: "http://localhost:1234/v1", authKind: "local", allowPrivateNetworkByDefault: true, allowBaseUrlOverride: true, featured: true, note: "Local — no key needed" },
+  { id: "lm-studio", singleLeadingSystemMessage: true, label: "LM Studio (local)", adapter: "openai-chat", baseUrl: "http://localhost:1234/v1", authKind: "local", allowPrivateNetworkByDefault: true, allowBaseUrlOverride: true, featured: true, note: "Local — no key needed" },
   {
     id: "deepseek",
     label: "DeepSeek",
@@ -1218,17 +1260,18 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     // the list only as compatibility aliases so existing saved configs and requests
     // keep validating and routing (they previously mapped to v4-flash; devlog
     // _fin/260710_provider_hardening/002_research_cn.md). The current offerings are
-    // V4.1-Flash — defaultModel and the model-specific wiring below use its live id.
+    // V4.1-Flash and V4 Pro; Flash remains the default.
     // Keep the legacy vision-preview alias; see DEEPSEEK_VISION_PREVIEW_MODEL.
     models: ["deepseek-chat", "deepseek-reasoner", ...DEEPSEEK_NATIVE_THINKING_MODELS, DEEPSEEK_VISION_PREVIEW_MODEL],
-    // V4.1-Flash is the current first-party offering; `deepseek-v4-flash` now routes there
+    // V4.1-Flash is the first-party default; `deepseek-v4-flash` now routes there
     // as a compatibility alias, so a new install should ask for the live id by name.
     defaultModel: "deepseek-flash",
     // Official DeepSeek Codex setup (codex-deepseek-setup.sh) advertises 1,048,576
     // for both V4 models; the older 1,000,000 figure was a rounded approximation.
-    modelContextWindows: { "deepseek-flash": 1_048_576, "deepseek-v4-flash": 1_048_576, [DEEPSEEK_VISION_PREVIEW_MODEL]: 1_048_576 },
+    modelContextWindows: { "deepseek-flash": 1_048_576, "deepseek-v4-flash": 1_048_576, "deepseek-v4-pro": 1_048_576, [DEEPSEEK_VISION_PREVIEW_MODEL]: 1_048_576 },
     modelInputModalities: {
       "deepseek-flash": ["text", "image"],
+      "deepseek-v4-pro": ["text"],
       [DEEPSEEK_VISION_PREVIEW_MODEL]: ["text", "image"],
     },
     // DeepSeek documents both V4 models as native Responses API models adapted for Codex
@@ -1243,6 +1286,7 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
       // translating them into Responses would add a hop onto our newest upstream path
       // for no gain.
       "deepseek-v4-flash": { wire: "openai-responses", inbound: ["responses"] },
+      "deepseek-v4-pro": { wire: "openai-responses", inbound: ["responses"] },
       // Same Responses contract as the V4 ids it succeeds; without this row the new
       // default would fall back to the provider-wide Chat wire.
       "deepseek-flash": { wire: "openai-responses", inbound: ["responses"] },
@@ -1260,7 +1304,7 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     // devlog/_fin/260807_deepseek_responses_streaming/000_plan.md.
     // Current official streams normally carry a real terminal; retain a narrow grace
     // repair for the historical shape that closes after a complete graph without one.
-    modelResponsesTerminalRepair: { "deepseek-flash": { graceMs: 5_000 }, "deepseek-v4-flash": { graceMs: 5_000 } },
+    modelResponsesTerminalRepair: { "deepseek-flash": { graceMs: 5_000 }, "deepseek-v4-flash": { graceMs: 5_000 }, "deepseek-v4-pro": { graceMs: 5_000 } },
     // DeepSeek's Responses route emits bare UUID item ids, which leave Codex
     // clients stuck on an uncommitted turn (#938). Client-facing only — raw
     // continuation snapshots keep the upstream ids.
@@ -1299,16 +1343,12 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     modelReasoningEfforts: Object.fromEntries(DEEPSEEK_NATIVE_THINKING_MODELS.map(id => [id, deepseekThinkingEffortsFor(id)])),
     modelReasoningEffortMap: Object.fromEntries(DEEPSEEK_NATIVE_THINKING_MODELS.map(id => [id, deepseekReasoningMapFor(id)])),
     modelSupportsReasoningSummaries: Object.fromEntries(DEEPSEEK_NATIVE_THINKING_MODELS.map(id => [id, true])),
-    // deepseek-v4-pro is absent from the live sets on purpose (retired upstream, requests
-    // route to V4.1-Flash — see model-seeds.ts), but it stays SELECTABLE in configs that
-    // already carry it, and what serves it is a thinking-mode model. A saved config with
-    // the alias selected would otherwise serialize a bare continuation the upstream 400s
-    // on (#5421). The preserve list governs replay, not advertisement.
-    preserveReasoningContentModels: [...DEEPSEEK_NATIVE_THINKING_MODELS, "deepseek-v4-pro"],
+    // Native thinking models retain assistant reasoning on tool-call continuations (#5421).
+    preserveReasoningContentModels: DEEPSEEK_NATIVE_THINKING_MODELS,
     // #4436: first-party deepseek-flash accepts native images on Chat and Responses.
     // Keep unprobed compatibility aliases on the #88 sidecar path. This must be fixed
     // here: router enrichment unions this list with saved config, so config cannot remove it.
-    noVisionModels: ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash"],
+    noVisionModels: ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash", "deepseek-v4-pro"],
   },
   // llama-3.3-70b was deprecated by Cerebras on 2026-02-16. Evidence: devlog/_plan/260710_provider_hardening/003_research_aggregators.md.
   { id: "cerebras", label: "Cerebras", baseUrl: "https://api.cerebras.ai/v1", adapter: "openai-chat", authKind: "key", dashboardUrl: "https://cloud.cerebras.ai/platform/apikeys", defaultModel: "gpt-oss-120b" },

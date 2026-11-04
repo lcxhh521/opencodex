@@ -27,6 +27,11 @@ If the file cannot be parsed, opencodex backs it up as
 `config.json.invalid-<timestamp>`, warns on the console, and starts with defaults. A missing file also
 uses the fresh-install default: one `openai` forward provider.
 
+Local `ocx config set`, `unset`, `import`, offline `ocx effort`, custom-model add/remove, and
+provider add/remove/set-default refuse an invalid or unreadable existing `config.json` without
+changing its bytes. Run `ocx config validate` and repair the file before retrying. Import also
+requires a readable, valid target when a config already exists.
+
 ## Precedence and defaults
 
 ### Provider and model aliases
@@ -47,6 +52,10 @@ Aliases are optional short request names. They never change the native model id 
 ```
 
 Aliases match case-insensitively. A model alias works as `or/opus` or, when globally unique, bare `opus`; an ambiguous bare alias reports its qualified candidates. Codex model pickers show the qualified alias while preserving the canonical `provider/model` routing id. A provider's `defaultAliases` value overrides `defaultModelAliases`. Built-ins are skipped when multiple models in one provider match the same pattern.
+
+### Native reasoning retention
+
+Native reasoning ciphertext retention on model and account changes has two opt-in settings, both off by default. Configure them on the dashboard overview or see [Native reasoning retention](/reference/configuration/server/#native-reasoning-retention) for the exact scope and experimental account behavior.
 
 ### Cursor effort rows
 

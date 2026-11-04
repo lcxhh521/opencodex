@@ -108,16 +108,17 @@ test("every mark's provenance is recorded in the README", () => {
 });
 
 /*
- * Every export client now has a mark, and that is a property worth pinning
+ * Every export client has a mark or an explicit monogram decision worth pinning
  * rather than a coincidence of the current map. The monogram branch in
  * ClientConfigRow stays -- it is the correct fallback and a future client will
  * arrive without an asset -- but a client SILENTLY losing its mark, because a
  * key was renamed or an entry dropped in a merge, looks identical to a client
  * that never had one. This is the difference.
  */
-test("every export client has a mark", () => {
+// The two WorkBuddy editions also take the monogram until a mark is wired for each (#7665).
+test("only Gentle Shell and the WorkBuddy editions use the deliberate monogram fallback", () => {
   const monogram = CLIENTS.filter(clientId => CLIENT_MARKS[clientId] === undefined);
-  expect(monogram).toEqual([]);
+  expect(monogram).toEqual(["workbuddy", "workbuddy-ai", "gentle-shell"]);
 });
 
 /*

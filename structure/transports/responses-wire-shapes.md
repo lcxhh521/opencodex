@@ -2,12 +2,12 @@
 
 ## Client rate-limit retry advice
 
-With a valid delay, `src/bridge/internal.ts` maps typed HTTP 429 `rate_limit_error` codes
-`resource_exhausted`, `rate_limit_exceeded`, and `slow_down` to `rate_limit_exceeded`.
-`src/lib/retry-delay.ts` formats typed and message-only rate-limit advice with the longest
-lower bound first; competing original hints are retained under an explicit provider-detail label.
-Other explicit verdicts, proxy replay budgets and event ordering are unchanged. This creates
-no reasoning/history item; client retry policy, Grok HTTP status and combo preflight stay intact.
+With a valid delay, `src/bridge/internal.ts` maps typed HTTP 429 `rate_limit_error` codes `resource_exhausted`, `rate_limit_exceeded`, and `slow_down` to `rate_limit_exceeded`. `src/lib/retry-delay.ts` formats typed and message-only rate-limit advice with the longest lower bound first; competing original hints are retained under an explicit provider-detail label. Other explicit verdicts, proxy replay budgets and event ordering are unchanged. Signed Anthropic progress follows the [progress-update contract](../providers/anthropic-progress.md). This creates no reasoning/history item; client retry policy, Grok HTTP status and combo preflight stay intact.
+
+## Adapter incomplete reasons
+
+`src/bridge/sse.ts`, `src/bridge/response-json.ts`, and `src/protocols/encoders/adapter-events.ts` normalize explicit incomplete reasons with `truncationReasonFor(reason) ?? reason`: known output-limit aliases become `max_output_tokens`, and refusal/filter aliases become `content_filter`. `src/responses/incomplete-reason.ts` applies the same classifier to native Responses JSON and SSE delivery in `src/server/responses/passthrough-delivery.ts` and to WebSocket frames in `src/server/responses/codex-ws-wire.ts`, including native control chains. It copies only changed `incomplete_details.reason` metadata, leaving output content and all other response fields intact. The compaction parser in `src/adapters/openai-responses/passthrough.ts` also normalizes its internal incomplete event. `tests/responses/incomplete-reason-normalization.test.ts` covers native HTTP delivery, WS terminal normalization and both adapter parser formats. `tool_call_end.incomplete` preserves unfinished function/custom items without argument-done frames in SSE, buffered JSON and direct encoders; it does not itself terminate the turn or complete those arguments.
+Unknown reasons remain verbatim, including `adapter_eof`, `max_messages`, and `steered`; message, retryability, usage, and incomplete status are preserved. `tests/adapters/bridge-nonstreaming-terminal.test.ts` covers both Responses projections and real passthrough parsing; the direct Chat and Messages parity suites cover the client-wire outcomes. The Chat writer does not depend on that upstream pass alone: `chatCompletionsIncompleteOutcome` in `src/chat/outbound.ts` classifies through the same `truncationReasonFor` table for the SSE converter (and the collector that folds it), the direct encoder in `src/protocols/encoders/chat.ts` and `responsesJsonToChatCompletion`, so a raw alias such as Volcengine Ark's `length` still ends with `finish_reason: "length"` (or `content_filter`). Reasons outside the table, including `adapter_eof`, `upstream_stall_timeout`, `missing_terminal_event`, `max_messages` and `steered`, remain Chat errors. `tests/responses/chat-incomplete-length-reason.test.ts` covers the converter outcomes and the handler's streamed and buffered wire.
 
 ## Compaction image input
 
@@ -61,10 +61,11 @@ stays unpinned. `tests/providers/alibaba-token-plan-wire-defaults.test.ts` cover
 replay flag.
 
 Trusted custom Responses relays may opt into `preserveResponsesInputItemIds` and `preserveResponsesMessageMetadata` for launcher replay (#6220). Ordinary destinations still strip IDs when `store: false` and private `internal_chat_message_metadata_passthrough`; xAI custom-call ID repair remains active.
+Google metadata follows the [destination-scoped replay projection](../providers/google.md#google-tool-call-thought-signature-replay).
 
 xAI keeps `openai-chat` provider-wide; Grok 4.5/4.6/4.7 subscription Responses default to native `openai-responses`, retaining namespace, hosted-search and reasoning-replay normalization. The reserved `xai` OAuth transport is name-pinned
 to the Grok CLI gateway even if its saved base URL differs; custom provider IDs do not inherit this
-default. API-key requests, translated Chat/Anthropic defaults and other Grok models retain their
+default. Exact xAI Responses destinations, including the US regional API, omit only `output.encrypted_content` from `include`; other entries remain unchanged. Meta at the exact `api.meta.ai` host shares this normalization, as do Azure adapters and resource hosts under .openai.azure.com, including when configured with openai-responses. Kimi Code shares it at its exact HTTPS Responses endpoint (`https://api.kimi.com/coding/v1/responses`, default port; #8075). The same exact-entry projection also applies to all other non-OpenAI-operated Responses destinations, including custom gateways; OpenAI-operated destinations retain their include list ([request compatibility](../providers/xai-grok.md#responses-request-compatibility)). API-key requests, translated Chat/Anthropic defaults and other Grok models retain their
 existing wire and tier policy. The OAuth lane is service-tier classified per model
 (`modelSupportsServiceTier` on the registry entry, live-probed 2026-09-13 and 2026-09-23;
 `devlog/_fin/260923_grok47_parity/010_probe-evidence.md` records 4.7): grok-4.7, grok-4.6, grok-4.5,
@@ -153,16 +154,16 @@ does not set `modelResponsesUpstreamStreaming`: client `stream: true` remains re
 streaming until a current-runtime reproduction justifies a separate bounded-JSON compatibility
 policy.
 
-Go's non-forward Responses request path moves valid `additional_tools` wrappers into top-level
+Explicitly selected Codex Lite ordinary unreferenced hosted-history lowering follows [the hosted-search continuation boundary](../providers-and-adapters.md#hosted-search-continuation-binding); non-Lite/unknown requests, native compact and public API retain structural history; portable compaction keeps its existing trigger and default projection. Go's non-forward Responses request path moves valid `additional_tools` wrappers into top-level
 `tools` through `src/adapters/opencode-go-additional-tools.ts`. Placement runs after existing
 custom/search/namespace lowering and before code-mode, compaction and final hosted-tool pruning.
-It does not recalculate wire identities or response aliases. The matcher reads the constructed
+It reads per-item replay provenance without recalculating wire identities or response aliases. The matcher reads the constructed
 send URL, resolving it with URL semantics, and requires HTTPS `opencode.ai`, the standard port
 and exact `/zen/go/v1/responses`. Normal and endpoint-inclusive bases or split `responsesPath`
 configurations agree; a custom path resolving to Zen or elsewhere does not acquire Go placement.
 Credentials, query, fragment, foreign hosts and other resource paths are excluded. The existing
 URL constructor canonicalizes trailing base slashes before this check. Malformed wrappers remain unchanged and
-the shared mixed-ciphertext agent-message gate remains fail-closed.
+the shared mixed-ciphertext agent-message gate remains fail-closed. Responses passthrough clones and tags historical and current input items before any rewrite, including identity repair; symbol provenance survives message replacement, prompt-cache cleanup, filtering and tool lowering without entering serialized requests. Promotion uses provenance rather than positions in shortened input. Discovery-source filtering follows the [current-turn catalog contract](responses.md#responses-httpsse) before nested tool definitions enter a live catalog.
 
 The canonical `opencode-go` registry entry defaults to `statelessResponses: true` because Go
 rejects reasoning ciphertext combined with `previous_response_id` (#3838). Existing derive
@@ -202,7 +203,7 @@ and Muse against both response formats.
 
 The canonical OpenCode Go transport derives `x-opencode-session` from the existing hashed session
 lane and the final per-model wire protocol. One conversation keeps one opaque affinity value within
-each protocol across ingress surfaces, retries, and key rotation, while Anthropic, Responses, and
+each protocol across ingress surfaces, retries, and key rotation, while Gemini, Anthropic, Responses, and
 Chat turns use separate namespaces and sibling subagents remain distinct. Destination recognition
 uses the original routed provider while the generated hash uses the settled adapter, so selecting an
 Anthropic hard pin cannot make the canonical Go destination disappear from transport recognition.
@@ -210,7 +211,7 @@ An operator-supplied header wins case-insensitively. Renamed providers are cover
 fixed key-auth destination still matches the registry; custom and lookalike URLs receive nothing.
 OpenCode Go's exact `claude-haiku-5-5`, `minimax-m2.5`, `minimax-m2.7`, `minimax-m3`, and `union-alpha`
 model ids are hard-pinned to Anthropic from every inbound; Haiku uses Messages in Go's [endpoint table](https://opencode.ai/docs/go/#endpoints).
-Sibling models retain their Chat or Responses selection. This wire choice and the session namespace
+The exact `gemini-4-argon-contributor` follows the [Go Gemini transport contract](../providers/google.md#opencode-go-gemini-transport). Siblings retain Chat or Responses. This wire choice and the session namespace
 do not assert upstream availability after the Messages endpoint accepts the session header.
 `src/adapters/openai-responses/web-search.ts` also drops the provider-rejected
 `search_content_types` and `indexed_web_access` fields from plain `web_search` tools while
@@ -220,7 +221,7 @@ the destination is the whole predicate, because Meta's refusal is a gateway sche
 Muse model it serves, its default `muse-spark-1.3` is not a Contributor id, and a missing model id
 still strips. Because the predicate is the host, a custom provider pointed at that exact URL gets the
 same strip.
-
+Meta's `api.meta.ai` route uses `src/adapters/openai-responses/muse-tool-catalog.ts` to capture current declarations before history rewrites or deduplication: current wrappers become `tools`, declarations retain their schemas over search discoveries, historical discovery stays replay data, and historical custom calls retain their conversion without live authority. Historical catalogs are not validated as current declarations; once input items carry replay provenance tags, the tags decide membership instead of the numeric prefix, so an earlier rewrite that shortened the input (Zed lifting a replayed wrapper) cannot shift the boundary. The reserved `functions` group and nested function definitions become public function declarations. Catalog validation also covers string/omitted input; unrepresentable namespace children and malformed current catalogs fail locally with HTTP 400 (`tests/responses/responses-muse-tool-choice.test.ts`).
 Direct Meta Muse / Meta Model Responses (`https://api.meta.ai/v1`) also rejects function tool
 names longer than 64 characters or containing characters outside `[a-zA-Z0-9_-]`. After namespace
 flattening, `src/responses/muse-tool-name-alias.ts` rewrites those identities on the `api.meta.ai`
@@ -315,9 +316,9 @@ input deltas are tracked separately from client-executed `tool_use` blocks.
 
 Ingress `clientDeclaredEmptyToolCatalog` (`src/server/chat-completions.ts`, `src/server/claude-messages.ts`)
 survives omission during translation. Preparation snapshots declarations after direct decoding, before hosted-tool rewrites.
-Direct Chat with `tools: []` and legacy functions reads their names from the bridge projection;
-empty and omitted catalogs need no extra projection. Explicit `tools: []` or empty `additional_tools`
-activates the restriction; replayed declarations neither activate it nor grant names. Delivery
+Direct decoders expose current function names, including legacy Chat functions, without translating
+the conversation again or duplicating retained reasoning-budget charges. Explicit `tools: []` or empty
+`additional_tools` activates the restriction; replayed declarations neither activate it nor grant names. Delivery
 normalization uses those names; direct custom `exec` helpers use the bridge compiler. Refusals keep `undeclared_tool_call` in buffered envelopes and endpoint
 projections; Messages sees `api_error`, never `overloaded_error`. Caller-forward routes retain their
 exemption; `default.` normalization remains separate.
@@ -396,13 +397,13 @@ Native passthrough SSE has TWO shapes, selected per request in
   The shared `createSseInspector` factory in `relay.ts` retains the complete inspection side effects,
   including the #44 late-terminal semantics.
 
-Both client readers retain a bounded, redacted message and the first structured refusal code from a bare upstream `error`. EOF synthesis also retains narrowly recognized rate-limit codes (`rate_limit_exceeded`, `rate_limit_error`) and overload codes (`server_is_overloaded`, `overloaded_error`); recognized types apply only without an explicit code.
+Both client readers retain a bounded, redacted message and the first structured refusal code from a bare upstream `error`. EOF synthesis also retains narrowly recognized rate-limit codes (`rate_limit_exceeded`, `rate_limit_error`) overload codes (`server_is_overloaded`, `overloaded_error`), and the client-refusal classes `invalid_request_error`, `authentication_error`, `permission_error`, `not_found_error` (400/401/403/404, the code repeating the class); recognized types apply only without an explicit code.
 At EOF without a real terminal they synthesize `response.failed` rather than `adapter_eof`; a code without a message still
 produces a terminal. Codex retries codes outside its fatal set, so code and message follow the same candidate precedence;
 recognized refusal copy is used only when the event has no code. A read failure after refusal reports that refusal (#5176).
 The shared outbound rewrite masks diagnostics on real failed and incomplete terminals before SSE or buffered JSON delivery,
 while preserving status and output; failed turns are not retained as continuation state. Buffered JSON masks selected credentials in synthetic bare-error fields before log inspection or client formatting; request logs keep transport status.
-The delivering reader owns refusal evidence before EOF; asynchronous tee inspection cannot reliably supply it.
+The delivering reader owns refusal evidence before EOF; asynchronous tee inspection cannot reliably supply it. The client ingress in `src/server/index/websocket-handler.ts` preserves the same in-process replay-refusal marker as the HTTP deferred logger before finalization: a synthetic 429 retains `upstream_reset_replay_refused` and `transport-ambiguous` on the row and serving attempt, with `terminalSource: synthetic` on the row. `src/server/responses/core-combo-failure.ts` carries that marker through child failure rebuilds, and the combo loop stamps the failed child attempt before adopting its log. Synthetic refusals stop before combo cooldown/account rotation and supply no quota reset or cooldown metadata. Genuine upstream 429s keep rate-limit attribution and health handling. This is independent of the upstream transport choice; `headers-only` does not prove upstream execution or quota exhaustion. `tests/responses/ws-replay-refusal-attribution.test.ts` checks direct routes; `tests/responses/combo-replay-refusal-attribution.test.ts` checks both combo ingresses, gateway and pool children, health/cooldown state and genuine 429 controls, with one send and no recovery.
 Inspection still applies the bare-error rule at EOF for account health. Real terminals and caller cancellation take precedence. Unknown codes retain `upstream_error` / `upstream_server_error` in the client tail; on the streaming path the log status takes the frame's Codex WebSocket wrapper 5xx when stated (buffered JSON callers keep their own presentation status). Refusal precedence is unchanged and classification adds no replay or retry. Bare-error log status is provisional until a genuine terminal supersedes it through `src/server/request-log-terminal-status.ts`.
 Native recovery preflight keeps the rejected body reader and bounded prefix for normal mid-stream failure, without decrypt retry.
 
@@ -463,12 +464,12 @@ Lite identity still retires the previous socket, and subsequent eligible request
 identity can reuse the new socket. Malformed native metadata retains HTTP fallback eligibility
 without rewriting its body.
 
-Canonical WS quota and response metadata preceding the first Responses event
-are projected into bounded, allowlisted HTTP headers before the response is
-committed. Later quota observations update only the captured serving account;
-they cannot retroactively change HTTP headers already sent to the client.
-Control frames remain bounded, and provider credential/cookie headers are not
-forwarded. Once a WS create may have been sent, a missing prelude, overflow or
+Canonical WS quota and response metadata preceding the first Responses event are projected into bounded, allowlisted HTTP headers before commitment; each name and value follows the [response metadata header contract](../data-planes/error-detail.md#response-metadata-headers).
+`src/server/responses/codex-ws-session.ts` also retains the `x-reasoning-included` upgrade header when Bun exposes its handshake event, promoting the bounded candidate only after `open` validates the connection; the seed keeps the header present but carries only an exact `true`/`false` or an empty value. No other upgrade header is retained: request ids, model, turn state, quota and credits are response-scoped.
+`src/server/responses/codex-ws-metadata.ts` rejects malformed or oversized raw headers and connection-nominated inclusion headers without changing transport failure or replay policy. Each canonical exchange starts from that connection signal; its own prelude metadata wins, including an explicit `false` value, and no prior exchange's metadata carries over. No signal is inferred from a model, configuration or encrypted input, and usage numbers are unchanged.
+Later metadata remains in the SSE body, while quota observations update only the captured serving account; neither changes committed HTTP headers. The pre-output hold freezes the same snapshot at its first Responses event. A client-facing WebSocket upgrade is already complete before upstream dispatch and cannot acquire this HTTP/SSE response header retroactively.
+`tests/responses/codex-ws-handshake.test.ts` and `tests/responses/codex-ws-handshake-validation.test.ts` cover the native loopback, reuse, bounds and failed-upgrade boundaries. Control frames remain bounded, and provider credential/cookie headers are not forwarded.
+Once a WS create may have been sent, a missing prelude, overflow or
 disconnect settles as a non-replayable gateway status before the first Responses
 event, or as an errored SSE body after it, rather than as a retryable fetch
 failure, so HTTP fallback cannot duplicate that inference. The one exception is a
@@ -479,19 +480,19 @@ A standalone no-response
 exchange has a 90-second prelude deadline in addition to the upgrade deadline.
 That prelude deadline is a ceiling, not a floor: the exchange runs under the
 caller's abort signal, so a `connectTimeoutMs` shorter than 90 seconds cancels
-an already-sent create before the prelude timer fires.
+an already-sent create before the prelude timer fires. After the first Responses event an exchange with the metadata channel keeps pinging on the same interval, and sends one ping at the commit unless an earlier one was answered; a peer that has answered a ping on that exchange and then delivers no frame and no pong for two consecutive intervals is treated as a dead socket, so the committed stream fails as a body error that the relay ends with its `upstream_reset` `response.failed` tail. This check never cuts a peer that keeps answering, however long the model is silent; that peer, like one that never answered a ping, still meets the client's own idle deadline (`tests/responses/ws-committed-liveness.test.ts`).
 These are transport-fidelity guarantees, not a provider-billing guarantee.
 
 Every exchange also leaves a content-free stage record (`CodexWsStageRecord`, #4191): create-frame bytes (measured on failure only — the committed-success record keeps it null so the happy path never byte-counts a megabyte replay frame), send completion, numeric close code, elapsed, first-frame and first-response-event durations, frame counters, liveness ping/pong counts, pool reuse, the OCX/Bun versions, and (#6740) `terminalEvent` — the normalized `response.completed` / `response.failed` / `response.incomplete` / `error` frame that ended a plain exchange, observed before any synthetic tail — with `terminalErrorStatus`, the wrapper status of a terminal `error` frame. Both are null when no terminal frame arrived, on native-control exchanges (which can end on an acknowledgement), and on rows written before they existed; malformed persisted values read as null without dropping the stage. The exchange pins the record on the resolved Response (`markCodexWsStage`, the same marker seam as `markCodexWsResponse`); `handleResponses` adopts it onto the serving attempt, and usage.jsonl persists it per attempt behind a drop-guard normalizer, so hand-edited rows cannot inject strings into the DTO. Later snapshots update the same response-local record in place, so an attempt holding the committed reference observes final success or failure counters. Each exchange supplies a complete fresh snapshot; separate responses keep distinct records. On eager-relay cancel-drain expiry, upstream cancellation finalizes the transport snapshot before the cancellation hook writes the usage row; an actual terminal observed within the drain still wins over cancellation. The record never carries conversation text, headers, close-reason text, or account identifiers, and it is not a fallback-eligibility signal: nothing it says permits a resend. The one replacement an operator can grant after a socket dies is the resend gate's decision (see [ambiguous-resend gate](responses-failover.md#ambiguous-resend-gate)).
 
-Eligible complete-input creates can retain a canonical upstream socket within
-one selected account, credential, thread and turn. Model/tier and immutable
-handshake headers and the selected outbound proxy must also match. Turn-state and turn-metadata headers are
-projected into their same-name per-frame metadata slots; explicit body values win.
-The pool retains at most 32 sockets, expires idle sockets after 30 seconds, and
-retires a socket after five minutes or 32 successful exchanges (after active work
-finishes). Cancellation, errors, idle unsolicited frames and shutdown dispose it.
-A busy key uses a separate one-shot connection rather than interleaving requests.
+Eligible complete-input creates can retain a canonical upstream socket within one selected account, credential, thread and turn.
+Model/tier, immutable handshake headers and the selected outbound proxy must also match. Turn-state and turn-metadata headers are projected into their same-name per-frame metadata slots; explicit body values win.
+The pool retains at most 32 sockets, expires idle sockets after 30 seconds, and retires a socket after five minutes or 32 successful exchanges (after active work finishes).
+Cancellation, errors, idle unsolicited frames and shutdown dispose it. A busy key uses a separate one-shot connection rather than interleaving requests.
+Private disposal requests graceful close, then schedules optional native `terminate()` after a one-second grace; successful retained release stays reusable.
+That unrefed fallback holds only the socket and cleanup state, removes its close observer on timeout, and cancels both on early close.
+Without native `terminate()`, disposal attempts `close()` without a fallback timer or observer; retained disposal requests close and optional terminate immediately.
+`tests/responses/codex-ws-handshake-validation.test.ts` covers native stalled-peer teardown and optional-method cleanup.
 
 This is connection reuse, not native incremental-input synthesis: complete HTTP
 inputs are never trimmed and no previous response id is invented. Explicit
@@ -526,13 +527,12 @@ request-log accounting without promoting a truncated repair candidate. Terminal 
 
 > Decision record: [ADR-0044](../decisions/ADR-0044-responses-http-sse.md)
 
-
 ## Inbound history and code-mode shell wire repairs
 
-Inbound function-call history with a missing JSON object prefix is repaired for every provider when
-restoring it produces an object; other malformed argument strings replay as `{}` (`src/responses/parser.ts`).
-Function-wrapper restoration supports `default.`-prefixed `exec` and `apply_patch` aliases while
-retaining the existing ambiguity and foreign-grammar boundaries.
+OpenGateway result-array and image-detail projection follows the [OpenGateway transport contract](../providers/opengateway.md).
+Inbound function-call history with a missing JSON object prefix is repaired for every provider when restoring it produces an object. A terminal MiMo `</function></tool_call>` suffix is removed only when the remaining text parses as an object unchanged or after restoring a closing brace or quote and brace. Valid JSON containing these tags stays opaque; unrelated malformed arguments replay as `{}` without logging their content (`src/responses/parser.ts`). Regression coverage lives in `tests/responses/responses-mimo-envelope.test.ts`.
+Function-wrapper restoration supports `default.`-prefixed `exec` and `apply_patch` aliases while retaining the existing ambiguity and foreign-grammar boundaries.
+For routed canonical `apply_patch`, an exact LF or CRLF opening marker unlocks only a monotonic completion-stable preview; a terminal decoration that normalization could remove stays buffered. Every success boundary verifies that authoritative repaired input retains an emitted preview as a prefix; disagreement fails the rewrite before completion or execution.
 
 For a verified code-mode catalog, `src/responses/code-mode-shell-input.ts` recognizes a structured
 `cmd` or `command` object submitted under `exec` and the canonical `input` wrapper. Only known shell
@@ -569,7 +569,7 @@ An injected combo default supplies `summary: "auto"` only when no summary was sp
 summary choices remain intact. Raw display and hidden-envelope replay follow
 [reasoning display parity](../providers/chat-compat.md#reasoning-display-parity-hidethinkingsummary).
 Final-route normalization preserves visible raw reasoning when the parsed request has a validated
-active effort and omits summary; explicit `summary: "none"` still hides it (passthrough strips that internal marker before the upstream send).
+active thinking choice (an explicit `thinkingEnabled` boolean takes precedence over effort) and omits summary; explicit `summary: "none"` still hides it (passthrough strips that internal marker before the upstream send).
 The provider policy `hideRawReasoning` suppresses the raw `reasoning_raw_delta` channel only —
 openai-chat `reasoning_content`, kiro tags, and Gemini thought parts on routes that do not return
 thought summaries (direct and Vertex Gemini; a `cloud-code-assist` Gemini route emits its thought

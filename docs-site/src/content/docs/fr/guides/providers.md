@@ -67,8 +67,9 @@ La relance d'une requête 429 avec la même clé, configurée par
 [`retryOn429`](/fr/reference/configuration/), s'applique uniquement aux fournisseurs à clé API
 (`authMode: "key"`). Les préréglages OAuth, de transfert et locaux sont exclus : leurs identifiants ne doivent
 jamais être réutilisés sur le même jeton, et les environnements locaux ne possèdent aucune clé distante à
-préserver. Cette fonction est facultative : elle est désactivée lorsque l'option est absente ; la présence de
-l'objet l'active, sauf si `enabled: false`.
+préserver. Cette fonction est facultative, sauf pour les valeurs par défaut documentées propres à certaines destinations. Le Chat Mistral canonique utilise une politique de relance patiente (6 relances, intervalle de repli de 10 secondes), dans la limite de l’allocation d’envois existante pour l’ensemble de la requête. Les réglages explicites de `retryOn429`, y compris `enabled: false`, sont prioritaires. Le préréglage Mistral transmet aussi par défaut les clés de cache de prompt fournies ; `promptCacheKey: false` désactive cette transmission. L’affinité de cache augmente les chances de réutilisation, mais ne garantit pas un succès de cache et ne lève pas les limites de débit de jetons.
+
+Mistral utilise un seul fournisseur à clé API pour les clés Studio et Vibe. Les types de clés et les allocations des offres sont décrits dans la [documentation des clés API de Mistral](https://docs.mistral.ai/admin/identity-access/api-keys) ; le proxy ne déduit pas le niveau d’abonnement à partir de la clé. Pour tous les modèles, les échéances `Retry-After` explicites renvoyées en amont sont partagées entre les appels qui utilisent les mêmes identifiants et le même modèle. Un 429 sans délai de relance peut déclencher une attente de récupération prudente de 60 secondes lorsque des compteurs par minute valides indiquent une capacité épuisée, ou lorsque le coût mesuré de la requête refusée dépasse les jetons restants tout en tenant dans l’allocation complète annoncée. Il s’agit d’une politique de récupération locale, pas d’une prédiction exacte de la réinitialisation côté serveur. Le trafic sain ne prédit jamais le cache ni le coût de la requête suivante. Après l’attente, une seule sonde de récupération est envoyée ; si elle réussit, le trafic ordinaire reprend. Des indications absentes, mal formées, sans droit d’usage, mensuelles épuisées ou supérieures à l’allocation complète n’inventent ni réinitialisation ni compactage de l’historique. `requestPacing: { "enabled": false }` ou `retryOn429: { "respectRetryAfter": false }` désactive le cadencement partagé. Pour une relance avec la même clé, si le délai de relance de Mistral dépasse `retryOn429.maxIntervalMs`, le proxy renvoie le 429 et l’indication de relance au lieu de relancer trop tôt. Lorsque la sélection des clés en rotation est activée, les requêtes en attente revérifient le refroidissement des clés et acquièrent la capacité de cadencement d’une clé de remplacement, et un rejet de clé avant toute sortie peut être récupéré avec une clé saine dans la limite d’envois existante de la requête. Les fenêtres de contexte et les préférences de compactage par modèle restent indépendantes.
 
 ## 1. Connexion ChatGPT (transfert direct)
 
@@ -112,6 +113,7 @@ ocx login google-antigravity
 ocx login cursor       # standalone Cursor PKCE login
 ocx login command-code # Command Code browser OAuth (or import ~/.commandcode/auth.json)
 ocx login devin       # Cognition/Devin : import de l'identifiant du Devin CLI, sinon connexion navigateur Auth0
+ocx login dsh-account # DeepSeek Harness Desktop (import de l'autorisation ~/.dsh/.credentials.yaml)
 ocx login github-copilot  # GitHub device flow → Copilot token (Copilot Pro/Business)
 ocx login codex        # pool de comptes Codex (alias : chatgpt, openai ; nécessite un proxy en cours d'exécution)
 ocx logout <provider>
@@ -128,6 +130,7 @@ ocx logout <provider>
 | `google-antigravity` | `google` | `https://daily-cloudcode-pa.googleapis.com` | Google OAuth avec le protocole Cloud Code Assist. La découverte en direct utilise le point de terminaison CCA authentifié `v1internal:fetchAvailableModels` et publie les modèles d'agent accessibles au compte connecté ; le catalogue maintenu reste la solution de repli. |
 | `cursor` | `cursor` | `https://api2.cursor.sh` | Connexion PKCE expérimentale, transport HTTP/2 en direct et découverte de modèles filtrés par compte. |
 | `devin` | `devin` | `https://server.codeium.com` | Passerelle Cognition/Devin non officielle et expérimentale. La connexion importe d'abord l'identifiant que le Devin CLI installé détient déjà (`devin auth login` écrit un `devin-session-token` dans son propre `credentials.toml`) ; à défaut, elle ouvre l'authentification Auth0 dans le navigateur puis échange le jeton collé via `RegisterUser` contre une clé d'API durable. `ocx login devin-cli` reste accepté comme alias déprécié. Les modèles sont découverts par compte avec `GetCascadeModelConfigs` ; le streaming passe uniquement par `runTurn` sur Connect-RPC. Absente du préréglage du tableau de bord par défaut. |
+| `dsh-account` | `dsh-account` | `https://api.deepseek.com/anthropic` | Fournisseur de compte expérimental à importation prioritaire réutilisant un compte DeepSeek Harness (DSH) Desktop installé et connecté. Lit les identifiants en lecture seule stricte depuis `~/.dsh/.credentials.yaml` lors de l'importation explicite. Indépendant de la facturation par clé d'API DeepSeek. |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | Expérimental. Flux d'appareil GitHub et échange `copilot_internal` (client OAuth de VS Code). Nécessite un abonnement Copilot actif ; il ne s'agit pas d'une API tierce officielle. |
 
 Les vérifications de quota Google Antigravity utilisent des points de terminaison Google fixes, y compris le repli vers la liste des modèles. Elles prennent en charge le DNS Fake-IP transparent pour ces destinations en conservant la vérification TLS, le refus des redirections et les contrôles des adresses privées. Une URL de base personnalisée ne modifie que les requêtes de modèles ; `NO_PROXY` conserve la politique de connexion directe.
@@ -177,8 +180,7 @@ Les fournisseurs OAuth dont les identifiants comportent un identifiant de compte
 peuvent conserver plusieurs connexions. La page **Fournisseurs** affiche ces comptes dans une liste déroulante,
 permet d'en ajouter un autre et de changer de compte actif sans déconnecter les autres. Une connexion ordinaire
 avec un identifiant Kimi qui ne contient aucune information d'identité remplace l'emplacement actif, tandis que l'action explicite **Ajouter un
-compte** préserve cet emplacement et en active un nouveau, distinct. Les comptes Kiro sont indexés par ARN de
-profil. `chatgpt` n'utilise toujours qu'un seul emplacement, car les comptes du pool Codex sont gérés dans un
+compte** préserve cet emplacement et en active un nouveau, distinct. Les comptes Kiro utilisent l’ARN du profil avec l’adresse e-mail de l’utilisateur connecté lorsqu’elle est disponible ; plusieurs utilisateurs peuvent conserver des identifiants distincts pour un même profil d’organisation. `chatgpt` n'utilise toujours qu'un seul emplacement, car les comptes du pool Codex sont gérés dans un
 registre distinct. Les jetons restent dans `~/.opencodex/auth.json` ; `/api/oauth/accounts` ne renvoie que des
 métadonnées masquées.
 
@@ -252,6 +254,8 @@ dans le pool de comptes, ce que fait aussi le pool de comptes Codex du tableau d
 
 ### Importation des identifiants Kiro
 
+Dans le tableau de bord, choisissez **AWS IAM Identity Center**, puis indiquez l’URL du portail d’accès AWS et la région SSO de votre organisation. Autorisez le code d’appareil dans votre navigateur et choisissez le profil Kiro à enregistrer si plusieurs sont proposés. Aucun CLI ni accès SSH n’est nécessaire. Les instructions CLI ci-dessous concernent le choix **Kiro CLI**.
+
 La connexion Kiro nécessite la CLI Kiro : sous Unix, installez-la avec `curl -fsSL https://cli.kiro.dev/install | bash` ;
 sous Windows PowerShell, utilisez `irm 'https://cli.kiro.dev/install.ps1' | iex`, puis connectez-vous avec `kiro-cli login`.
 En l'absence de session `kiro-cli`, `ocx login kiro` se rabat sur un jeton d'accès collé ou sur la variable
@@ -293,9 +297,20 @@ reconnue. Réparez ou supprimez la base illisible dans le chemin de données nor
 sélecteurs d'importation, puis réessayez. La connexion depuis une machine dépourvue de session `kiro-cli`
 existante n'est pas concernée.
 
+### DeepSeek Account (DSH)
+
+`dsh-account` est un fournisseur de compte expérimental à importation prioritaire, conçu pour réutiliser les identifiants de compte authentifiés d'une application DeepSeek Harness (DSH) Desktop installée.
+
+- **Indépendant de la clé d'API DeepSeek :** `dsh-account` utilise le quota de session DeepSeek authentifiée de l'utilisateur (portefeuilles standard et bonus, dépenses totales), tandis que le fournisseur `deepseek` facture sur le solde de la clé d'API de la plateforme. Les deux domaines d'identifiants et de routage sont strictement distincts et ne basculent jamais l'un vers l'autre.
+- **Importation explicite uniquement :** OpenCodeX détecte si DeepSeek Harness est installé et connecté (`~/.dsh/.credentials.yaml`), mais ne copiera, n'importera ni n'utilisera jamais automatiquement le jeton sans une action explicite de l'utilisateur (`ocx login dsh-account` ou clic sur Importer dans le tableau de bord web).
+- **Magasin d'identifiants DSH en lecture seule :** OpenCodeX traite `~/.dsh/.credentials.yaml` comme strictement en lecture seule. OpenCodeX n'écrit, ne modifie, ne supprime ni ne change jamais les permissions des fichiers appartenant à DeepSeek Harness.
+- **Copie d'identifiant et déconnexion isolées :** Lors de l'importation, OpenCodeX valide le jeton auprès du point de terminaison d'identité officiel de DeepSeek (`/auth-api/v0/users/current`) et enregistre sa propre copie dans le magasin d'authentification OpenCodeX. Se déconnecter ou supprimer le compte dans OpenCodeX supprime uniquement la copie locale d'OpenCodeX ; cela ne déclenche jamais de déconnexion de session distante et ne vous déconnecte pas de DeepSeek Harness Desktop.
+- **Pas de rotation automatique en arrière-plan et réimportation en cas de 401 :** Les autorisations de session DSH ne disposent pas d'un point de terminaison d'actualisation automatique en arrière-plan. Si le serveur distant renvoie HTTP 401 (`ACCOUNT_TOKEN_INVALID`), OpenCodeX marque le compte comme `needsReauth` et interrompt le routage. Pour rétablir l'accès, l'utilisateur doit réimporter explicitement via `ocx login dsh-account`.
+- **Avertissement relatif aux tiers :** OpenCodeX ne revendique aucune approbation ni autorisation officielle de DeepSeek pour la réutilisation des autorisations de session par des clients tiers.
+
 ## 3. Catalogue des clés API
 
-opencodex fournit 104 préréglages intégrés : 85 à clé, 15 OAuth, trois locaux et un préréglage par défaut de
+opencodex fournit 106 préréglages intégrés : 85 à clé, 17 OAuth, trois locaux et un préréglage par défaut de
 transfert ChatGPT. Dans le tableau de bord, le sélecteur **Ajouter un fournisseur** ouvre le tableau de bord du
 fournisseur à clé, valide la clé et l'enregistre ; la validation dépend du fournisseur. Parmi les entrées notables :
 
@@ -345,13 +360,13 @@ promotionnels de Cline ne sont accessibles que dans l'IDE ou la CLI Cline, pas p
 | Novita AI | `https://api.novita.ai/openai/v1` |
 | Together | `https://api.together.xyz/v1` |
 | Fireworks | `https://api.fireworks.ai/inference/v1` |
-| Moonshot (Kimi API) · Kimi (coding) | `https://api.moonshot.ai/v1` · `https://api.kimi.com/coding/v1` |
+| Moonshot (Kimi API) · Kimi (coding) | `https://api.moonshot.ai/v1` · `https://api.kimi.com/coding/v1`. L’API `moonshot` utilise `kimi-k3.1-pro` par défaut ; les sélections `kimi-k2.5` enregistrées pour les adresses API officielles migrent vers ce modèle. |
 | Hugging Face | `https://router.huggingface.co/v1` |
 | NVIDIA NIM | `https://integrate.api.nvidia.com/v1` |
 | Z.AI (GLM Coding) | `https://api.z.ai/api/coding/paas/v4` |
 | Zhipu AI (BigModel) | `https://open.bigmodel.cn/api/paas/v4` |
 | [BigModel Coding Plan — Responses (liste statique)](/guides/providers/#bigmodel-coding-plan-over-responses) | `https://open.bigmodel.cn/api/v1` |
-| Qwen Cloud | Forfait à jetons (par défaut) : `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` · Facturation à l'usage : `https://dashscope.aliyuncs.com/compatible-mode/v1` · ou personnalisé |
+| Qwen Cloud | Forfait à jetons (par défaut) : `https://token-plan.maas.qwencloudapi.com/compatible-mode/v1` · Facturation à l'usage : `https://dashscope.aliyuncs.com/compatible-mode/v1` · ou personnalisé |
 | Tencent Cloud Coding Plan | `https://api.lkeap.cloud.tencent.com/coding/v3` |
 | SiliconFlow | `https://api.siliconflow.cn/v1` |
 | Volcengine Ark · Coding Plan · Agent Plan | `https://ark.cn-beijing.volces.com/api/v3` · `https://ark.cn-beijing.volces.com/api/coding/v3` · `https://ark.cn-beijing.volces.com/api/plan/v3` |
@@ -371,32 +386,20 @@ par Sionic, `deepseek/deepseek-v4.1-flash-ultrafast` et `z-ai/glm-5.3-flash-ultr
 sont affichés en premier. Créez une clé dans le [tableau de bord OpenGateway](https://opengateway.ai/api-keys),
 puis lancez `ocx provider add opengateway` ou sélectionnez **OpenGateway** dans le tableau de bord.
 Les requêtes chat utilisent la clé Bearer configurée ; la liste publique ne valide pas cette clé.
+Sur le protocole Responses, OpenGateway refuse les appels d’outils personnalisés natifs rejoués ; le préréglage convertit donc les outils personnalisés Codex, comme `exec` en mode code, en outils de fonction avant l’envoi.
+Les tableaux de contenu des résultats d’outils sont envoyés sous forme de texte, et les images sont conservées après le groupe de résultats d’outils associé. Les parties de résultat non prises en charge, y compris les refus et les contenus opaques, sont rejetées explicitement par une erreur d’entrée client avant l’envoi.
+Le niveau de détail d’image `original` est converti en `high`, que la passerelle accepte ; les octets de l’image restent inchangés.
+La route Responses native vérifie aussi les complétions vides en texte seul avant de les présenter comme un succès.
+Un budget de sortie épuisé produit `incomplete` avec `max_output_tokens` ; le proxy n’augmente pas le budget demandé. Une complétion vide qui peut être relancée sans risque et qui dispose encore de budget peut être retentée une seule fois, dans la limite d’envois existante. `emptyCompletionRetry: false` explicite ou `OCX_EMPTY_COMPLETION_RETRY=0` désactive cette nouvelle tentative. Le texte, les refus, l’activité d’outils et les événements de flux inconnus empêchent la relance et conservent le flux d’origine. Cette protection ne modifie ni les autres fournisseurs ni leurs valeurs par défaut de nouvelle tentative.
+La relance exige `store: false` explicite, une entrée complète et uniquement des outils exécutés par le client ; un outil hébergé comme `web_search` empêche la relance automatique même si aucun événement d’outil n’a été observé.
 
-**OpenCode Zen** (`opencode-zen`) et le préréglage sans clé **OpenCode Free** utilisent tous deux
-`https://opencode.ai/zen/v1`. Sur cette passerelle, les modèles gratuits atteignent souvent une limite de
-rafale sur une courte fenêtre, d'environ 15 à 20 requêtes par minute (mesure de la communauté ; OpenCode ne publie
-pas de valeur RPM). Zen peut renvoyer des erreurs génériques 429 de limitation de débit sans en-têtes
-`Retry-After` / `X-RateLimit-*`. Cette limite est distincte du quota sans clé pour application de bureau
-annoncé par OpenCode (environ 200 requêtes Big Pickle ou vers des modèles gratuits toutes les 5 heures sur
-`opencode-free`). Lorsque Zen omet `Retry-After` sur une telle réponse 429, opencodex ajoute à l'erreur client
-des indications propres au fournisseur ainsi qu'un `Retry-After` synthétique ; un `Retry-After` reçu en amont
-reste prioritaire. L'attente et la nouvelle tentative avec la même clé restent facultatives et s'activent avec
-[`retryOn429`](/fr/reference/configuration/).
+**OpenCode Zen** (`opencode-zen`) utilise `https://opencode.ai/zen/v1` avec une clé API obtenue sur [opencode.ai/auth](https://opencode.ai/auth). Les modèles gratuits peuvent subir une limite courte d’environ 15–20 requêtes/minute (mesure communautaire ; OpenCode ne publie pas de RPM). Si une réponse 429 de limitation omet `Retry-After`, opencodex ajoute des indications et un `Retry-After` synthétique ; les en-têtes valides en amont restent prioritaires. Les tentatives avec la même clé restent facultatives via [`retryOn429`](/fr/reference/configuration/).
 
-**Le niveau sans clé `opencode-free` est actuellement fermé aux clients tiers.** Zen refuse toute requête
-qui arrive sans en-tête `x-opencode-session` et répond avec le type d'erreur `MissingSessionID` et le message
-« OpenCode's free tier can only be used in OpenCode ». Le contrôle porte uniquement sur la présence de
-l'en-tête : un proxy pourrait donc le franchir en inventant une valeur, ce que opencodex ne fait pas.
-Fabriquer un identifiant de session et un User-Agent versionné `opencode/<version>` revient à se déclarer
-client OpenCode, alors qu'OpenCode ne publie aucun contrat d'intégration tierce pour ce niveau sans clé ;
-une réponse HTTP 200 obtenue ainsi est un contrôle d'admission contourné, pas une autorisation. opencodex
-signale donc la restriction au lieu de la contourner : une requête vers `opencode-free` renvoie une erreur
-qui explique le blocage en amont.
+Sur les routes officielles `https://opencode.ai/zen/v1` et `https://opencode.ai/inference/v1` du fournisseur canonique `opencode-zen` avec authentification par clé API, Gemini utilise automatiquement l’API native Google en mode `googleMode: ai-studio` (par défaut). Les identifiants Zen sont conservés, y compris Flash sans suffixe `-tiered`. Claude utilise automatiquement Anthropic Messages, quel que soit `googleMode`. Au chargement des configurations enregistrées, seules les anciennes surcharges Chat/Responses admissibles de ces modèles natifs sont ignorées, ainsi que les préférences admissibles de l’outil hébergé `image_generation` propres à Responses. Les fournisseurs personnalisés, les routes sans authentification par clé et les autres préférences restent inchangés.
 
-La voie prise en charge vers les mêmes modèles est le fournisseur **`opencode-zen`** avec une clé d'API
-OpenCode Zen obtenue sur [opencode.ai/auth](https://opencode.ai/auth). Si OpenCode publie plus tard un accès
-tiers pour le niveau sans clé, opencodex pourra le suivre ; d'ici là, le préréglage sert à documenter la
-restriction. Conditions en amont : [opencode.ai/docs/zen](https://opencode.ai/docs/zen/).
+**La prise en charge de `opencode-free` a été supprimée** : tous les modèles renvoient désormais `403 permission_denied` à cause du contrôle du niveau gratuit en amont chez OpenCode ([#7255](https://github.com/lidge-jun/opencodex/issues/7255)). Le chargement d’une configuration existante désactive en mémoire les entrées concernées et leurs références de modèles, avertit une fois par processus et ne modifie pas le fichier lors du chargement. Le prochain enregistrement supprime ces entrées et références de config.json. Avant cet enregistrement, le fichier original est automatiquement conservé dans `config.json.pre-opencode-free-removal.bak`, à côté de config.json, ou sous un nom unique si ce nom est occupé. Une copie indépendante, identique octet par octet, est réutilisée uniquement si sa protection réservée au propriétaire peut être vérifiée ; sinon, une nouvelle copie protégée est créée à côté. Aucun fichier existant n’est écrasé. Des premiers chargements simultanés peuvent laisser plusieurs copies identiques et protégées ; l’avertissement indique ce chemin. Pour restaurer la configuration, recopiez ce fichier sur config.json, par exemple après une rétrogradation. Si la copie échoue, l’avertissement demande de copier config.json immédiatement. Si ce fournisseur était le défaut, la route OpenAI OAuth standard devient le défaut. Utilisez `opencode-go`, `opencode-zen` avec clé ou un autre fournisseur. [Conditions OpenCode Zen](https://opencode.ai/docs/zen/). Les lectures passives appliquent uniquement la désactivation en mémoire, sans copie ni avertissement.
+
+Les affectations et valeurs par défaut valides de Claude Desktop sont conservées. Les règles dont la liste de modèles sources autorisés devient vide sont désactivées, ainsi que la synchronisation native des sous-agents si son modèle d’injection est supprimé. Les sauvegardes suivantes ne rétablissent pas les références supprimées et préservent les modifications simultanées valides.
 
 La plupart utilisent l'adaptateur `openai-chat` avec une clé Bearer ; les préréglages compatibles
 Anthropic, comme **Xiaomi MiMo** (`xiaomi`), utilisent l'adaptateur `anthropic` (`x-api-key`). Xiaomi propose
@@ -622,6 +625,9 @@ maintenir leur visibilité même lorsque les catalogues en direct ne sont pas en
 | Connexion Codex (Pool ou Direct) | `gpt-5.6-*` | 372 000 |
 | OpenAI (clé API) | `openai-apikey/gpt-5.6-*` plus `*-pro` | 1 050 000 (entrée maximale de 922 000) |
 | OpenRouter | `openrouter/openai/gpt-5.6-sol`, `openrouter/openai/gpt-5.6-terra`, `openrouter/openai/gpt-5.6-luna` | 1 050 000 |
+| Codex | `gpt-6.1-terra` | 500,000 / 872,000 |
+| OpenAI API | `openai-apikey/gpt-6.1-terra` | 1,050,000 (128,000 max output) |
+| OpenRouter | `openrouter/openai/gpt-6.1-terra` | 1,050,000 |
 | Cursor | `cursor/gpt-5.6-sol`, `cursor/gpt-5.6-terra`, `cursor/gpt-5.6-luna` | 1 000 000 |
 
 Les entrées natives GPT-5.6 conservent les niveaux de raisonnement fixés en amont — Luna propose par exemple
@@ -642,7 +648,7 @@ reste une passerelle à clé ou jeton d'abonnement sur son point de terminaison 
 **Cloudflare AI Gateway** exige que les identifiants de votre compte et de votre passerelle figurent dans l'URL.
 
 Copilot présente un catalogue qui utilise plusieurs protocoles : ces modèles (`gpt-5.3-codex`, `gpt-5.4`,
-`gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-6-astra`, `grok-4.5`, `grok-4.6`, `mai-code-1.1-flash`, `mai-code-1-flash-picker`) rejettent
+`gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, `grok-4.5`, `grok-4.6`, `mai-code-1.1-flash`, `mai-code-1-flash-picker`) rejettent
 `/chat/completions` pour le trafic d'agent. opencodex route donc ces modèles sur l'API Responses par défaut,
 tandis que tous les autres modèles Copilot restent sur Chat Completions. L'ordre de priorité est le suivant :
 verrouillage explicite du protocole → entrée [`modelAdapters`](/fr/reference/configuration/providers/) définie
@@ -721,4 +727,4 @@ au fournisseur.
 
 Les fournisseurs qui disposent d'une sonde en direct sont OpenAI/Codex, Anthropic, xAI, Cursor, Kimi,
 Google Antigravity, OpenRouter, DeepSeek, ClinePass, Z.AI, MiniMax, Moonshot, Venice, Synthetic, DeepInfra,
-Neuralwatt, Command Code, ainsi que tout fournisseur personnalisé reposant sur a6api.
+Neuralwatt, Command Code, ainsi que tout fournisseur personnalisé reposant sur a6api ou Abliteration.

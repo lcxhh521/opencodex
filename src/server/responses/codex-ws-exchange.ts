@@ -3,12 +3,13 @@ import { mergeSteeringContinuation } from "./native-steering-settings";
 import { markNativeControlResponse } from "./native-response-control";
 import type { NativeResponseControl } from "./native-response-control";
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
-import { isSafeResponseHeader } from "../safe-response-headers";
+import { isSafeResponseHeader, type ResponseMetadataContext } from "../safe-response-headers";
 import { CodexWsMetadata, type CodexWsQuotaObserver } from "./codex-ws-metadata";
 import { CODEX_RESPONSES_HTTP_URL, type PreparedCodexWsRequest } from "./codex-ws-request";
 import { CodexWsCorrelation } from "./codex-ws-correlation";
 import type { CodexWsSession } from "./codex-ws-session";
-import { UPGRADE_DEADLINE_MS, CODEX_WS_LIVENESS_PING_INTERVAL_MS, CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS, MAX_CODEX_WS_FRAME_BYTES,
+import { UPGRADE_DEADLINE_MS, CODEX_WS_LIVENESS_PING_INTERVAL_MS, CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS,
+  CODEX_WS_COMMITTED_SILENT_INTERVALS, MAX_CODEX_WS_FRAME_BYTES,
   MAX_CODEX_WS_QUEUE_BYTES, markCodexWsResponse, markCodexWsPreludeProjection, normalizeResponsesWsRelayEvent, closedBeforeTerminalMessage,
   codexWsCreateFrameExceedsLimit, codexWsFailureDetail, codexWsPreResponseFailure, markCodexWsStage, codexWsOcxVersion,
   markCodexWsSocketDeath, codexWsWrapperStatus, isCodexWsTerminalEvent, type CodexWsFailureStage, type CodexWsStageRecord,
@@ -35,6 +36,8 @@ interface ExchangeOptions {
    * control exchanges and on transports without the metadata channel.
    */
   preOutputRefusalHold?: CodexWsPreOutputRefusalHold;
+  /** Turn-state binding and known models for the metadata this exchange relays. */
+  metadataContext?: ResponseMetadataContext;
 }
 
 const HTTP_HEADER_TOKEN = /^[!#$%&'*+.^_`|~0-9a-z-]+$/i;
@@ -44,7 +47,7 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 
 /** Rebuild only permitted metadata: upstream framing describes a different body. */
-function rejectionHeaders(source: Record<string, unknown>, prelude: Headers): Headers {
+function rejectionHeaders(source: Record<string, unknown>, prelude: Headers, context: ResponseMetadataContext): Headers {
   const connectionHeaders = new Set<string>();
   for (const [name, value] of Object.entries(source)) {
     if (name.toLowerCase() !== "connection" || typeof value !== "string") continue;
@@ -56,7 +59,7 @@ function rejectionHeaders(source: Record<string, unknown>, prelude: Headers): He
   // Reuse the metadata owner's count/value/family budgets and window freshness
   // rules, without publishing quota twice. Pool bookkeeping consumes the HTTP
   // projection; plain-main publication belongs only to the WS observer.
-  const projected = new CodexWsMetadata();
+  const projected = new CodexWsMetadata(undefined, context);
   try {
     for (const values of [Object.fromEntries(prelude), source]) {
       const headers = Object.fromEntries(Object.entries(values).filter(([name, value]) => {
@@ -87,7 +90,7 @@ function rejectionHeaders(source: Record<string, unknown>, prelude: Headers): He
  * The one 5xx exception is the opt-in pre-output refusal below (#6969): a structured upstream
  * refusal with nothing relayed but empty lifecycle frames, which the caller may replay.
  */
-function wrappedRejectionResponse(payload: Record<string, unknown>, prelude: Headers): Response | null {
+function wrappedRejectionResponse(payload: Record<string, unknown>, prelude: Headers, context: ResponseMetadataContext): Response | null {
   if (payload.type !== "error" || payload.stream_id !== undefined) return null;
   // The native typed wrapper has one aliased field, not two competing statuses.
   if (Object.hasOwn(payload, "status_code") && Object.hasOwn(payload, "status")) return null;
@@ -97,7 +100,7 @@ function wrappedRejectionResponse(payload: Record<string, unknown>, prelude: Hea
   if (error != null && (!record(error)
     || [error.code, error.message].some(value => value != null && typeof value !== "string"))) return null;
   if (payload.headers != null && !record(payload.headers)) return null;
-  const headers = rejectionHeaders(record(payload.headers) ? payload.headers : {}, prelude);
+  const headers = rejectionHeaders(record(payload.headers) ? payload.headers : {}, prelude, context);
   return new Response(JSON.stringify({
     error: error ?? { type: "upstream_error", message: "Upstream rejected the request" },
   }), { status, headers });
@@ -117,6 +120,7 @@ function refusalErrorBody(source: unknown): Record<string, string> {
 export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
   const { session, url, init, prepared, sseFallback, onQuota, beforeDispatch, bunVersion, nativeControl, beforeContinuation,
     preOutputRefusalHold } = options;
+  const metadataContext = options.metadataContext ?? {};
   const { frameText, headers } = prepared;
   const signal = init.signal ?? undefined;
   return new Promise<Response>((resolve, reject) => {
@@ -147,7 +151,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
     let terminalErrorStatus: number | null = null;
     let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
     const encoder = new TextEncoder();
-    const metadata = url === CODEX_RESPONSES_HTTP_URL ? new CodexWsMetadata(onQuota) : null;
+    const metadata = url === CODEX_RESPONSES_HTTP_URL ? new CodexWsMetadata(onQuota, metadataContext) : null;
     const correlation = session.retainable ? new CodexWsCorrelation(session.reused, id => session.hasCompleted(id)) : null;
     let detachOwner = () => {};
     let detachSteering = () => {};
@@ -155,8 +159,11 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
     // Liveness while waiting for the first response event (metadata path only): the
     // silence timer is re-armed by every inbound frame or pong; the pinger runs on a fixed
     // interval so a peer that answers pings can never trip the silence bound while alive.
+    // After the commit, each ping tick checks whether any frame or pong arrived since the last.
     let silenceTimer: ReturnType<typeof setTimeout> | undefined;
     let pingTimer: ReturnType<typeof setTimeout> | undefined;
+    let inboundAtLastTick = 0;
+    let silentIntervals = 0;
     // The resolved 200, retained so a later body failure can replace its
     // success-shaped stage record with the failure-shaped one (#4191).
     let committedResponse: Response | null = null;
@@ -260,6 +267,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       markCodexWsStage(response, stageRecord(null));
       committedResponse = response;
       resolve(response);
+      startCommittedLiveness();
     };
 
     /**
@@ -377,17 +385,39 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS,
       );
     };
-    /** Ping on a fixed interval until the response starts; a socket without ping() is never pinged. */
+    const pingable = () => typeof (ws as WebSocket & { ping?: unknown }).ping === "function";
+    /** False when ping() threw. It may also close the socket and settle the exchange. */
+    const sendPing = (): boolean => {
+      if (!pingable()) return false;
+      try { (ws as WebSocket & { ping: (data?: string) => void }).ping(); } catch { return false; }
+      pings += 1;
+      return true;
+    };
+    /** Ping on a fixed interval for the life of the exchange; a socket without ping() is never pinged. */
     const schedulePing = () => {
-      const ping = (ws as WebSocket & { ping?: (data?: string) => void }).ping;
-      if (typeof ping !== "function" || responseCommitted || terminal) return;
+      if (!pingable() || terminal) return;
       pingTimer = setTimeout(() => {
-        if (responseCommitted || terminal) return;
-        try { ping.call(ws); } catch { return; }
-        pings += 1;
-        // ping() may close the socket synchronously and settle the exchange; re-check.
+        if (terminal) return;
+        if (responseCommitted && pongs > 0) {
+          const inbound = upstreamFrames + pongs;
+          silentIntervals = inbound === inboundAtLastTick ? silentIntervals + 1 : 0;
+          inboundAtLastTick = inbound;
+          if (silentIntervals >= CODEX_WS_COMMITTED_SILENT_INTERVALS) {
+            failStream(`codex websocket stopped answering after the response started${codexWsFailureDetail(failureStage())}`);
+            return;
+          }
+        }
+        sendPing();
         if (!terminal) schedulePing();
       }, CODEX_WS_LIVENESS_PING_INTERVAL_MS);
+    };
+    /** Only a peer that has ponged is judged by its silence, so probe again if none has yet. */
+    const startCommittedLiveness = () => {
+      if (!metadata || terminal || !pingable()) return;
+      inboundAtLastTick = upstreamFrames + pongs;
+      silentIntervals = 0;
+      if (pongs === 0) sendPing();
+      if (!terminal) schedulePing();
     };
     const onPong = () => {
       if (terminal) return;
@@ -458,6 +488,9 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         return;
       }
       if (terminal || settledPreOpen || signal?.aborted) return;
+      // New sockets have just validated their upgrade; retained sockets carry the
+      // same connection signal into a fresh exchange, never its predecessor's frames.
+      metadata?.seed(session.upgradeHeaders());
       sent = true;
       try {
         if (nativeControl) {
@@ -556,7 +589,10 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       if (!metadata) commitResponse();
       else if (!responseCommitted && !terminal) {
         armSilence();
-        schedulePing();
+        // Probe now, not one interval in: the path can die seconds after the send, before a
+        // held commit, and the committed check needs a pong from before that.
+        sendPing();
+        if (!terminal) schedulePing();
       }
     };
 
@@ -623,7 +659,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         // in-body delivery, so a held 429 can never become a quota rotation it was not before.
         if (metadata && sent && !responseCommitted && !deferredCommit && type === "error") {
           let rejection: Response | null;
-          try { rejection = wrappedRejectionResponse(normalized.payload, metadata.snapshot()); }
+          try { rejection = wrappedRejectionResponse(normalized.payload, metadata.snapshot(), metadataContext); }
           catch (error) { failStream(error); return; }
           if (rejection) {
             terminal = true;
@@ -644,7 +680,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
             try {
               refusalPrelude = heldHeaders ?? metadata?.snapshot() ?? new Headers();
               const declared = normalized.payload.headers;
-              refusalHeaders = rejectionHeaders(record(declared) ? declared : {}, refusalPrelude);
+              refusalHeaders = rejectionHeaders(record(declared) ? declared : {}, refusalPrelude, metadataContext);
             } catch {
               refusalStatus = undefined;
             }

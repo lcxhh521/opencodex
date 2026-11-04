@@ -1,3 +1,4 @@
+import { proxyErrorPresentation, isProxyError, rememberProxyErrorMessage } from "../../lib/client-error-body";
 import type { ResponsesRequestContext } from "./core-options";
 import type { PreparedResponsesRequest } from "./request-prepare";
 import type { ResponsesTransport } from "./request-transport";
@@ -27,7 +28,8 @@ import { readDisplaySafeErrorText, normalizeUpstreamErrorText } from "./core-err
 import { sanitizeNonReplayableUpstreamError } from "./non-replayable-error";
 import { isNonReplayableResponse } from "../../lib/upstream-retry";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
-import { guardEmptyToolCatalogEvents, guardEmptyToolCatalogStream } from "../../lib/empty-tool-catalog";
+import { currentTurnToolBridgeMaps, guardEmptyToolCatalogEvents, guardEmptyToolCatalogStream } from "../../lib/empty-tool-catalog";
+import { guardCompactionSummary } from "../../responses/compaction-summary";
 
 /** One responsibility of the Responses request pipeline; state owners are explicit. */
 export async function deliverAdapterResponse(
@@ -41,6 +43,8 @@ export async function deliverAdapterResponse(
     | "clientToolCatalogRestriction"
     | "rememberKiroDeliveredFinalAnswer"
     | "responseStateOptions"
+    | "turnMembership"
+    | "completedToolBlocks"
   >,
   transportState: Pick<ResponsesTransport, "activeAdapter" | "bindKeyUsageFromBridge" | "sentOAuthSnapshot">,
   sidecarState: Pick<ResponsesSidecarAuth, "routedCompaction">,
@@ -93,12 +97,14 @@ export async function deliverAdapterResponse(
         if (nonReplayable) response = await sanitizeNonReplayableUpstreamError(response, errorSignal);
         const body = await readDisplaySafeErrorText(response, errorSignal, "Upstream recovery failed");
         const error = normalizeUpstreamErrorText(body, "Upstream recovery failed");
+        if (isProxyError(response)) rememberProxyErrorMessage(logCtx, error.message ?? error.safeText, { status: response.status, type: error.type ?? "upstream_error", code: error.code, presentation: proxyErrorPresentation(response) });
         yield { type: "error", status: response.status, message: error.message ?? error.safeText,
           errorType: error.type ?? "upstream_error", ...(error.code ? { code: error.code } : {}),
           ...(nonReplayable ? { retryable: false } : {}) };
         return;
       }
       try {
+        const bodyInactivityMs = resolveStallTimeoutMs(config.stallTimeoutSec, { localUpstream: adapterExchange.localUpstream });
         const retryEvents = upstreamRequestsStream
           ? readResponseStreamWithInactivity(response, upstream.signal, bodyInactivityMs,
             guarded => transportState.activeAdapter.parseStream(guarded, translatorBudget, logCtx.activeTierMetadata))
@@ -119,11 +125,19 @@ export async function deliverAdapterResponse(
 
   const clientToolCatalog = requestState.clientToolCatalogRestriction && route.provider.authMode !== "forward"
     ? requestState.clientToolCatalogRestriction : undefined;
-  const deliveryToolBridgeMaps = clientToolCatalog
-    ? { ...toolBridgeMaps, ...clientToolCatalog } : toolBridgeMaps;
+  const deliveryToolBridgeMaps = currentTurnToolBridgeMaps(toolBridgeMaps, clientToolCatalog);
 
 
   if (parsed.stream) {
+    const clientEncoder = clientToolCatalog?.bareCustomToolNames.has("exec") ? undefined
+      : clientEncoderForDelivery(options, logCtx, !!routedCompaction, transportState.activeAdapter.name);
+    // Sign only the negotiated canonical Chat delivery. Native/sidecar/opaque item identities
+    // retain their existing owners; structural membership grants no supplier-state authority.
+    const outputItemIds = requestState.completedToolBlocks && transportState.activeAdapter.name === "openai-chat"
+      && options.inboundWire !== "chat" && options.inboundWire !== "anthropic"
+      && !routedCompaction && !parsed._advisorGuard && !clientEncoder && upstreamResponse.headers.get("x-opencodex-tool-completion") === "block-stop-v1"
+      ? requestState.turnMembership?.begin() : undefined;
+
     // The continuation legs classify a stalled body themselves; the initial stream needs the
     // same mapping or the bridge catch reports this upstream timeout as a 500 proxy_error.
     const initialEventStream = (async function* (): AsyncGenerator<AdapterEvent> {
@@ -132,7 +146,7 @@ export async function deliverAdapterResponse(
           upstreamResponse,
           upstream.signal,
           bodyInactivityMs,
-          response => transportState.activeAdapter.parseStream(response, translatorBudget, logCtx.activeTierMetadata),
+          response => transportState.activeAdapter.parseStream(response, translatorBudget, logCtx.activeTierMetadata, { completedToolBlocks: outputItemIds !== undefined }),
         )) {
           options.onCompactionRecoveryAdapterEvent?.(event);
           yield event;
@@ -168,6 +182,7 @@ export async function deliverAdapterResponse(
     const advisorStream = parsed._advisorGuard
       ? parsed._advisorGuard({
           parsed,
+          translatorBudget,
           firstEvents: eventStream,
           continuation: fetchTerminalGuardContinuation,
         })
@@ -182,7 +197,9 @@ export async function deliverAdapterResponse(
           continuation: fetchGuardedEmptyCompletionRetry,
         })
       : advisorStream;
-    const guardedEventStream = guardEmptyToolCatalogStream(completionGuardedEventStream, clientToolCatalog, translatorBudget);
+    const catalogGuardedEventStream = guardEmptyToolCatalogStream(completionGuardedEventStream, clientToolCatalog, translatorBudget);
+    const guardedEventStream = routedCompaction && transportState.activeAdapter.name === "anthropic"
+      ? guardCompactionSummary(catalogGuardedEventStream, translatorBudget) : catalogGuardedEventStream;
     const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, bareCustomToolNames, toolSearchToolNames } = deliveryToolBridgeMaps;
     // One completion owner for both deliveries: the bridge calls it from its terminal, the
     // direct client encoder from the fold of the same events.
@@ -207,8 +224,7 @@ export async function deliverAdapterResponse(
       notifyResponseComplete(response);
     };
     // The Responses bridge owns code-mode helper compilation; the direct encoder only renames.
-    const clientEncoder = clientToolCatalog?.bareCustomToolNames.has("exec") ? undefined
-      : clientEncoderForDelivery(options, logCtx, !!routedCompaction, transportState.activeAdapter.name);
+
     if (clientEncoder) {
       return deliverClientEncodedResponse({
         encoder: clientEncoder,
@@ -220,11 +236,12 @@ export async function deliverAdapterResponse(
         fold: {
           replayCacheScope: parsed._reasoningReplayScope,
           hideThinkingSummary: parsed.options.hideThinkingSummary,
+          chatRawReasoningVisible: options.chatRawReasoningVisible,
           hideRawReasoning: parsed.options.hideRawReasoning,
           toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, bareCustomToolNames, toolSearchToolNames,
         },
         stallTimeoutSec: config.stallTimeoutSec,
-        localUpstream,
+        get localUpstream() { return adapterExchange.localUpstream; },
         turnAdmissionLease: options.turnAdmissionLease,
         ...(options.onFirstOutput ? { onFirstOutput: options.onFirstOutput } : {}),
         stopUpstream: () => { cancelResponseCompletion(); upstream.abort(); },
@@ -237,19 +254,24 @@ export async function deliverAdapterResponse(
       guardedEventStream, parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
       () => { cancelResponseCompletion(); upstream.abort(); }, 2_000,
       {
-        translatorBudget,
+        translatorBudget, proxyErrorContext: logCtx,
         replayCacheScope: parsed._reasoningReplayScope,
+        ...(outputItemIds ? { outputItemIds } : {}),
         ...(options.forceEmptyResponseId ? { responseId: "" } : {}),
         stallTimeoutSec: config.stallTimeoutSec,
-        localUpstream,
+        get localUpstream() { return adapterExchange.localUpstream; },
         hideThinkingSummary: parsed.options.hideThinkingSummary,
+        chatRawReasoningVisible: options.chatRawReasoningVisible,
         hideRawReasoning: parsed.options.hideRawReasoning,
         declaredToolNames,
         bareCustomToolNames,
         enforceDeclaredToolNames: options.inboundWire !== "chat" && options.inboundWire !== "anthropic",
+        terminalRefusalAsFailed: options.inboundWire !== "chat" && options.inboundWire !== "anthropic",
         toolParameterSchemas,
         ...(options.onFirstOutput ? { onFirstOutput: options.onFirstOutput } : {}),
-        ...(routedCompaction ? { compaction: true } : {}),
+        ...(routedCompaction ? { compaction: true, compactionRetention: parsed._compactionRetention } : {}),
+        completeOnMaxOutputTokens: config.completeOnMaxOutputTokens === true && options.inboundWire !== "chat" && options.inboundWire !== "anthropic",
+        textFormat: parsed.options.textFormat,
         // Same grok-surface split as the runTurn branch above.
         ...(logCtx.surface === "grok" ? { heartbeatStyle: "comment" as const } : {}),
         onUsage: usage => {
@@ -312,6 +334,7 @@ export async function deliverAdapterResponse(
         const advisorEvents: AdapterEvent[] = [];
         for await (const event of parsed._advisorGuard({
           parsed,
+          translatorBudget,
           firstEvents: (async function* () { yield* guardedEvents; })(),
           continuation: fetchTerminalGuardContinuation,
         })) advisorEvents.push(event);
@@ -325,6 +348,13 @@ export async function deliverAdapterResponse(
         })) events.push(event);
       } else {
         events = guardedEvents;
+      }
+      if (routedCompaction && transportState.activeAdapter.name === "anthropic") {
+        const summaryEvents: AdapterEvent[] = [];
+        for await (const event of guardCompactionSummary((async function* () { yield* events; })(), translatorBudget)) {
+          summaryEvents.push(event);
+        }
+        events = summaryEvents;
       }
     } catch (error) {
       if (error instanceof ResponseBodyInactivityError) {
@@ -341,6 +371,7 @@ export async function deliverAdapterResponse(
       translatorBudget,
       replayCacheScope: parsed._reasoningReplayScope,
       hideThinkingSummary: parsed.options.hideThinkingSummary,
+      chatRawReasoningVisible: options.chatRawReasoningVisible,
       hideRawReasoning: parsed.options.hideRawReasoning,
       toolNsMap,
       declaredToolNames,
@@ -349,7 +380,9 @@ export async function deliverAdapterResponse(
       toolParameterSchemas,
       freeformToolNames,
       toolSearchToolNames,
-      ...(routedCompaction ? { compaction: true } : {}),
+      ...(routedCompaction ? { compaction: true, compactionRetention: parsed._compactionRetention } : {}),
+      completeOnMaxOutputTokens: config.completeOnMaxOutputTokens === true && options.inboundWire !== "chat" && options.inboundWire !== "anthropic",
+      textFormat: parsed.options.textFormat,
       onProviderState: state => { providerState = state; },
       onUsage: usage => {
         transportState.bindKeyUsageFromBridge(usage);

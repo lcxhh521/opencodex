@@ -197,6 +197,13 @@ choice, 이미지, reasoning effort, 지원되는 response format을 변환한 �
 SSE 객체, choice delta, `finish_reason`이 있는 종료 choice, `data: [DONE]`을 사용합니다. tool-call과 usage
 정보는 원본 이벤트가 그것들을 담고 있을 때 다시 변환됩니다.
 
+이 엔드포인트의 오류 응답과 스트리밍 오류 프레임은 프록시가 작성한 메시지를 사용합니다. 프록시는
+provider 실패를 속도 제한, 할당량 또는 크레딧 소진, 컨텍스트 창 초과, 모델 사용 불가, 지원되지 않는 위치,
+계정 인증 필요 같은 고정된 상태로 분류하고 그 상태의 고정 메시지를 반환합니다. 정책 거부, 재전송 거부,
+프록시 한도에는 각각 고정 메시지가 있습니다. HTTP 상태, `error.type`, `error.code`, `Retry-After`의 의미는
+그대로이므로 `context_length_exceeded`, `insufficient_quota`, `rate_limit_exceeded` 같은 코드로 분기하는
+클라이언트는 이전과 같이 동작합니다.
+
 내부 실행 경로가 Responses 기반이기 때문에 provider adapter는 더 좁은 기능 집합을 강제할 수 있습니다. 예를
 들어 선택된 adapter로 표현할 수 없는 요청 기능은 의미를 바꾸지 않고 오류로 반환됩니다.
 
@@ -294,12 +301,17 @@ call creation 이후 클라이언트는 다음의 지원되는 모든 inbound �
 프록시는 업스트림 join URL을 정규화한 뒤, 양방향 텍스트 및 바이너리 프레임을 투명하게 릴레이합니다. 업스트림
 인증은 프록시가 소유한 상태로 유지되며, 클라이언트 프로토콜 헤더는 보존됩니다.
 
+sideband 연결을 종료할 때 프록시는 업스트림의 정상 종료를 1초 동안 기다린 뒤, 응답하지 않는
+전송 연결을 강제로 닫습니다. 클라이언트 업그레이드가 실패한 경우에도 실제 업스트림 연결이
+닫힌 것을 확인한 후에만 해당 계정의 활성 통화 용량을 반환합니다.
+
 call creation과 sideband join은 같은 OpenAI 계정으로 이루어져야 하며, 그렇지 않으면 업스트림이 join을
 거부합니다(`404`). 두 요청 모두 Codex의 `session-id`와 `thread-id` 헤더를 실어 보냅니다. Pool 모드는
 계정 선택을 그 쌍에 묶어 두므로(프로세스 로컬) 프록시에 도착한 join은 통화를 만든 계정을 그대로 쓰고,
 Direct 모드는 두 요청 모두 호출자의 현재 bearer를 전달합니다. 릴레이되는 클라이언트 헤더는 정확히
 `openai-alpha`, `x-session-id`, `session-id`, `thread-id`, `originator`, `x-oai-attestation`,
-`x-codex-turn-metadata`(`src/server/live.ts`의 `LIVE_CLIENT_PROTOCOL_HEADERS`)이며, 각 헤더는
+`x-codex-turn-metadata`, `voice-session-id`(실시간 `x-session-id`와 별개인 클라이언트 음성 세션 id)
+(`src/server/live.ts`의 `LIVE_CLIENT_PROTOCOL_HEADERS`)이며, 각 헤더는
 호출자가 보낸 경우에만 전달되고 프록시가 만들어 내지 않습니다. `Authorization`과 ChatGPT 계정 id는
 ChatGPT 경로에서 프록시가 소유합니다(Pool은 저장된 계정으로 교체, Direct는 검증된 호출자 bearer를 전달).
 API 키 프로바이더는 자체 bearer를 씁니다. Codex가 join을 프록시로 보내는 것은

@@ -1,3 +1,6 @@
+import { isProxyError, hasProxyErrorMessage } from "../../lib/client-error-body";
+import type { FailureVerdictSink } from "../../chat/failure-verdict";
+import { ownedChatErrorResponse } from "../../chat/outbound";
 /**
  * AdapterEvent -> OpenAI Chat Completions, without the internal Responses SSE (PF-09).
  *
@@ -13,7 +16,7 @@ import type { AdapterEvent } from "../../types";
 import type { TranslatorBudget } from "../../lib/translator-budget";
 import { responsesUsage } from "../../bridge/internal";
 import {
-  chatCompletionsErrorResponse,
+  appendedUtf8Bytes,
   chatCompletionsFailedResponse,
   chatCompletionsIncompleteOutcome,
   chatCompletionsStreamErrorPayload,
@@ -32,15 +35,18 @@ import {
   type ClientWireWriter,
 } from "./adapter-events";
 import type { RelayedEventObservation } from "../../usage/attempt-delivery";
+import { reasoningDetailEntries } from "../../chat/reasoning-details";
 
 type Rec = Record<string, unknown>;
 
 export interface ChatCompletionEncodeOptions extends AdapterEventEncodeOptions {
   /** The model string the client asked for; every chunk carries it. */
   model: string;
+  failureVerdictSink?: FailureVerdictSink;
+  proxyErrorContext?: object;
 }
 
-function createChatCompletionWriter(sink: ClientFrameSink, model: string): ClientWireWriter {
+function createChatCompletionWriter(sink: ClientFrameSink, model: string, failureVerdictSink?: FailureVerdictSink, proxyErrorContext?: object): ClientWireWriter {
   const id = completionId();
   const created = Math.floor(Date.now() / 1000);
   let started = false;
@@ -54,6 +60,41 @@ function createChatCompletionWriter(sink: ClientFrameSink, model: string): Clien
   const emittedToolIndexes = new Set<number>();
   let nextToolIndex = 0;
   let staged: { text: string; observation?: RelayedEventObservation }[] | undefined;
+  // #7429: the shown thinking text of the open reasoning item, which its signature pairs with.
+  const budget = sink.budget;
+  let reasoningItemId: string | undefined;
+  let reasoningText = "";
+  let reasoningTextBytes = 0;
+  let nextReasoningDetailIndex = 0;
+  const releaseReasoningText = () => {
+    budget.releaseRetained(reasoningTextBytes, { kind: "reasoning" });
+    reasoningItemId = undefined;
+    reasoningText = "";
+    reasoningTextBytes = 0;
+  };
+  const retainReasoningText = (itemId: string, delta: string) => {
+    if (reasoningItemId !== itemId) releaseReasoningText();
+    reasoningItemId = itemId;
+    const nextBytes = appendedUtf8Bytes(reasoningText, reasoningTextBytes, delta);
+    const reservation = budget.reserveTransient(nextBytes, { kind: "reasoning" });
+    try {
+      reasoningText += delta;
+      reservation.commitRetained();
+      budget.releaseRetained(reasoningTextBytes, { kind: "reasoning" });
+      reasoningTextBytes = nextBytes;
+    } catch (error) {
+      reservation.release();
+      throw error;
+    }
+  };
+  const emitReasoningDetails = (entries: Rec[]) => {
+    if (entries.length === 0) return;
+    nextReasoningDetailIndex += entries.length;
+    ensureRole();
+    const frame = chunkBase(id, model, created);
+    frame.choices = [{ index: 0, delta: { reasoning_details: entries }, finish_reason: null }];
+    emit(frame);
+  };
 
   const emit = (payload: Rec | "[DONE]", observation?: RelayedEventObservation) => {
     if (failed) return;
@@ -112,10 +153,11 @@ function createChatCompletionWriter(sink: ClientFrameSink, model: string): Clien
     terminated = true;
     failed = true;
     // A real error event, then an abnormal close without [DONE].
-    const { payload, bounded } = chatCompletionsStreamErrorPayload(message, details);
+    const { payload, bounded, verdict } = chatCompletionsStreamErrorPayload(message, details);
     try {
       if (bounded) sink.emitBounded(dataFrame(payload));
       else sink.emit(dataFrame(payload), { terminal: true });
+      if (failureVerdictSink) { failureVerdictSink.verdict = verdict; failureVerdictSink.contract = details?.contract; failureVerdictSink.proxyAuthored = details?.proxyAuthored; }
     } catch {
       /* the converter drops an unadmittable error frame the same way */
     }
@@ -138,15 +180,30 @@ function createChatCompletionWriter(sink: ClientFrameSink, model: string): Clien
       emit(frame, { semanticBytes: Buffer.byteLength(delta) });
     },
     messageDone() { /* the converter reads nothing from a finished message */ },
-    reasoning(delta) {
+    reasoning(delta, itemId, channel) {
       if (!delta) return;
       ensureRole();
       // Many OpenAI-compatible clients accept reasoning_content; harmless if ignored.
       const frame = chunkBase(id, model, created);
       frame.choices = [{ index: 0, delta: { reasoning_content: delta }, finish_reason: null }];
       emit(frame, { semanticBytes: Buffer.byteLength(delta) });
+      // Only summary-channel thinking can carry a signature; raw reasoning never does.
+      if (channel === "summary") retainReasoningText(itemId, delta);
     },
-    reasoningDone() { /* reasoning items carry nothing a Chat client reads */ },
+    reasoningDone({ itemId, signature, redacted, hidden }) {
+      // The bridge converter's output_item.done for a reasoning item (#7429), entry for entry.
+      const entries = reasoningDetailEntries({
+        text: reasoningItemId === itemId ? reasoningText : "",
+        ...(signature ? { signature } : {}),
+        ...(redacted ? { redacted } : {}),
+        ...(hidden ? { hidden } : {}),
+      }, nextReasoningDetailIndex);
+      releaseReasoningText();
+      emitReasoningDetails(entries);
+    },
+    progressThinking(text, signature) {
+      emitReasoningDetails(reasoningDetailEntries({ text, signature }, nextReasoningDetailIndex));
+    },
     toolStart(call) {
       // Custom and tool-search calls have no Chat representation; the converter skips them.
       if (call.kind !== "function") return;
@@ -184,12 +241,13 @@ function createChatCompletionWriter(sink: ClientFrameSink, model: string): Clien
         if ("finishReason" in outcome) {
           finish(outcome.finishReason, terminal.usageOnWire ? responsesUsage(terminal.usage) : null);
         } else {
-          fail(outcome.failMessage);
+          fail(outcome.originalFailMessage, { contract: "stream_incomplete",
+            proxyAuthored: isProxyError(terminal) });
         }
         return;
       }
       const failure = chatCompletionsFailedResponse((terminal.error ?? {}) as unknown as Rec);
-      fail(failure.message, failure.details);
+      fail(failure.message, { ...failure.details, proxyAuthored: hasProxyErrorMessage(proxyErrorContext, failure.message, failure.details) });
     },
     overflow() {
       fail("upstream translation buffer exceeded the safe limit", {
@@ -198,7 +256,7 @@ function createChatCompletionWriter(sink: ClientFrameSink, model: string): Clien
         type: "upstream_error",
       });
     },
-    dispose() { /* nothing retained beyond the driver's frames */ },
+    dispose() { releaseReasoningText(); },
   };
 }
 
@@ -207,7 +265,7 @@ export function encodeChatCompletionSse(
   events: AsyncIterable<AdapterEvent>,
   options: ChatCompletionEncodeOptions,
 ): ReadableStream<Uint8Array> {
-  return encodeAdapterEventStream(events, sink => createChatCompletionWriter(sink, options.model), options);
+  return encodeAdapterEventStream(events, sink => createChatCompletionWriter(sink, options.model, options.failureVerdictSink, options.proxyErrorContext), options);
 }
 
 /**
@@ -219,18 +277,19 @@ export async function collectChatCompletionResponse(
   stream: ReadableStream<Uint8Array>,
   model: string,
   translatorBudget: TranslatorBudget,
+  failureVerdictSink?: FailureVerdictSink,
 ): Promise<Response> {
   try {
-    const completion = await collectChatCompletion(stream, model, translatorBudget);
+    const completion = await collectChatCompletion(stream, model, translatorBudget, failureVerdictSink);
     return new Response(JSON.stringify(completion), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
   } catch (err) {
     if (isChatCompletionsStreamError(err)) {
-      return chatCompletionsErrorResponse(err.status, err.message, err.type, err.code);
+      return ownedChatErrorResponse(err.status, err.message, err.type, err.code, failureVerdictSink?.contract, failureVerdictSink?.proxyAuthored);
     }
-    return chatCompletionsErrorResponse(502, err instanceof Error ? err.message : String(err), "server_error");
+    return ownedChatErrorResponse(502, err instanceof Error ? err.message : String(err), "server_error");
   }
 }
 
@@ -239,5 +298,6 @@ export function foldChatCompletion(
   events: AsyncIterable<AdapterEvent>,
   options: ChatCompletionEncodeOptions,
 ): Promise<Response> {
-  return collectChatCompletionResponse(encodeChatCompletionSse(events, options), options.model, options.translatorBudget);
+  const failureVerdictSink: FailureVerdictSink = {};
+  return collectChatCompletionResponse(encodeChatCompletionSse(events, { ...options, failureVerdictSink }), options.model, options.translatorBudget, failureVerdictSink);
 }

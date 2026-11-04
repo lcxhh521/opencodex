@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { hostname, userInfo } from "node:os";
 import { normalizeKiroModelId } from "../providers/kiro-models";
 import type { OcxParsedRequest } from "../types";
-import { KIRO_COMPLETION_TOOL_NAME } from "./kiro-constants";
+import { KIRO_COMPLETION_TOOL_NAME, KIRO_STRUCTURED_OUTPUT_TOOL_NAME } from "./kiro-constants";
 
 let cachedFp: string | undefined;
 
@@ -62,7 +62,7 @@ export function kiroToolName(wireName: string, used?: Set<string>): string {
   const base = cleaned.slice(0, 55) || "tool";
   for (let salt = 0; ; salt++) {
     const hashInput = salt === 0 ? wireName : `${wireName}#${salt}`;
-    const suffix = createHash("sha256").update(hashInput).digest("hex").slice(0, 8);
+    const suffix = Bun.SHA256.hash(hashInput, "hex").slice(0, 8);
     const candidate = `${base}_${suffix}`;
     if (!(used?.has(candidate))) {
       used?.add(candidate);
@@ -77,15 +77,19 @@ export interface KiroToolNameRegistry {
   readonly nameMap: Map<string, string>;
 }
 
-/** One collision domain for advertised tools, replayed calls, and the private completion tool. */
+/** Proxy-owned terminal tools; neither may be claimed by a client tool or a replayed call. */
+const KIRO_RESERVED_TOOL_NAMES: readonly string[] = [KIRO_COMPLETION_TOOL_NAME, KIRO_STRUCTURED_OUTPUT_TOOL_NAME];
+
+/** One collision domain for advertised tools, replayed calls, and the private terminal tools. */
 export function createKiroToolNameRegistry(): KiroToolNameRegistry {
-  const used = new Set<string>([KIRO_COMPLETION_TOOL_NAME]);
+  const used = new Set<string>(KIRO_RESERVED_TOOL_NAMES);
   const wireToKiro = new Map<string, string>();
   const nameMap = new Map<string, string>();
   return {
+    /** Return the Kiro-safe alias for a wire tool name, registering it on first use; reserved names are refused. */
     alias(wireName: string): string {
-      if (wireName === KIRO_COMPLETION_TOOL_NAME) {
-        throw new Error(`Kiro reserves the tool name ${JSON.stringify(KIRO_COMPLETION_TOOL_NAME)}`);
+      if (KIRO_RESERVED_TOOL_NAMES.includes(wireName)) {
+        throw new Error(`Kiro reserves the tool name ${JSON.stringify(wireName)}`);
       }
       const existing = wireToKiro.get(wireName);
       if (existing) return existing;

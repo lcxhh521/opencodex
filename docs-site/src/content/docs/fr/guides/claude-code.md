@@ -15,8 +15,9 @@ ajouter un compte). Par défaut, chaque requête utilise uniquement le compte **
 Un groupe de comptes Claude **expérimental et facultatif** (`anthropicAccountPool.enabled`) ajoute l'affinité de
 session et la sélection des nouvelles sessions basée sur l'usage entre ces comptes OAuth. Il ne contrôle **pas** le basculement sur 429 : dès que deux comptes utilisables sont enregistrés, une requête limitée bascule vers un autre compte que l'option soit activée ou non, et cela ne peut pas être désactivé. Pour les **nouvelles**
 sessions uniquement, `anthropicAccountPool.strategy` sélectionne un compte éligible : `quota` (par défaut)
-choisit la plus faible utilisation connue dans la fenêtre configurée par `anthropicAccountPool.quotaWindow`
-(`five-hour` par défaut, `weekly` ou `max-utilization`) lorsqu'elle dépasse `autoSwitchThreshold` ; `round-robin`
+conserve le compte actif jusqu'à ce que son utilisation dans la fenêtre définie par
+`anthropicAccountPool.quotaWindow` (`five-hour` par défaut, `weekly` ou `max-utilization`) atteigne
+`autoSwitchThreshold` (80 par défaut), puis passe au compte le moins utilisé, en privilégiant les comptes encore sous leur propre seuil ; `round-robin`
 répartit les sessions uniformément (`stickyLimit`, `1` par défaut) ; `fill-first` utilise le compte actif jusqu'à
 un délai de récupération, une réauthentification ou le seuil, puis passe au suivant. Cette fonction est
 **désactivée par défaut** et reste expérimentale.
@@ -34,8 +35,8 @@ consultez les conditions actuelles d'Anthropic.
 Comportement lorsque cette option est activée :
 
 - Un **429** en amont place le compte en temporisation selon `Retry-After` lorsqu'il est présent, ou selon un délai de repli,
-  efface ses affinités et peut faire basculer la requête vers un autre compte admissible, dans les limites prévues.
-- L'affinité est **locale au processus** et disparaît au redémarrage du proxy.
+  et peut faire basculer la requête vers un autre compte admissible, dans les limites prévues. Seul un refus de quota partagé efface ses affinités ; une limitation temporaire les conserve.
+- L'affinité survit au redémarrage dans le même répertoire de configuration et la même instance fournisseur (24 heures d'inactivité, 2 000 liaisons au maximum). Le fichier privé ne contient que des empreintes de session et d'identité de connexion, jamais de clé de session brute ni de jeton. Les anciens comptes sans identité persistante restent locaux au processus jusqu'à leur prochaine connexion. Le renouvellement du jeton conserve la liaison ; une nouvelle connexion, la suppression, la pause, une réauthentification requise ou une sélection manuelle pendant l'exécution l'invalident. Un détour temporaire dû à une limitation de débit conserve la liaison initiale.
 - Les erreurs de renouvellement du jeton conservent la règle `needsReauth`. Un 403 confirmé lié à un abonnement ou à la facturation du compte peut déclencher un basculement avant la sortie, avec une temporisation selon `Retry-After` ou de dix minutes. Un refus d’autorisation ordinaire reste terminal. Voir la [reprise des comptes](/guides/claude-code/).
 - Si chaque compte éligible est en temporisation, le proxy renvoie **429** (et non 401) avec `Retry-After`
   lorsqu'il est connu.
@@ -169,24 +170,24 @@ unknown signifie qu’opencodex ne peut pas déterminer si les réglages pointen
 
 ### Mode picker : modèles opencodex dans le sélecteur Code first-party
 
-Le mode picker fait partie du mode first-party. Sur macOS, il est activé par défaut lorsque first-party
+Le mode picker fait partie du mode first-party. Sur macOS et Windows, il est activé par défaut lorsque first-party
 est sélectionné, sauf si `claudeCode.intercept.picker: false` est défini. Il modifie le sélecteur de
 modèles de l'onglet Code de Desktop first-party pour y afficher les modèles opencodex disponibles par
 leur nom. Lors de la première activation, macOS peut demander l'autorisation d'une autorité de certification
-locale dans le trousseau de connexion. Cette autorité est limitée à `claude.ai` et à ses sous-domaines.
+locale dans le trousseau de connexion, et Windows dans le magasin racine de l'utilisateur actuel. Cette autorité est limitée à `claude.ai` et à ses sous-domaines.
 Son identité de signature exportable est protégée par le magasin d'identifiants du système et réutilisée
 lors des redémarrages ordinaires. Aucune clé de signature picker en clair n'est enregistrée dans le
 répertoire de configuration OpenCodex. La validation complète de l'autorité contrainte et la vérification
-de la confiance du système restent obligatoires. Avec la même identité approuvée et un magasin accessible,
-un redémarrage n'ajoute ni ne supprime de réglages de confiance des certificats. La restauration au démarrage
-n'installe jamais la confiance : si elle manque, est révoquée ou inconnue, le picker reste en attente.
-Exécutez explicitement `ocx claude desktop picker on` ou `ocx claude desktop picker trust` pour l'accorder.
+de la confiance du système restent obligatoires, avec sur Windows la correspondance exacte de l'empreinte et une feuille vérifiée. Avec la même identité approuvée et un magasin accessible,
+un redémarrage n'ajoute ni ne supprime de réglages de confiance des certificats macOS. La restauration au démarrage
+ou la vérification d'état n'installe jamais la confiance : si elle manque, est révoquée ou inconnue, le picker reste en attente.
+Exécutez explicitement `ocx claude desktop picker on` ou `ocx claude desktop picker trust` pour l'accorder, y compris la confirmation Windows si nécessaire.
 
 Une migration unique depuis une ancienne identité peut demander votre consentement pour supprimer sa
 confiance. Si ce nettoyage échoue, le picker reste indisponible et le profil appliqué utilise un relais
 sans déchiffrement jusqu'à sa réussite. macOS peut aussi demander de déverrouiller le trousseau ou
-d'autoriser l'accès d'une application aux identifiants, y compris après un redémarrage ou une mise à jour.
-Le picker reste non pris en charge sous Windows et Linux : aucun travail de CA, de magasin d'identifiants
+d'autoriser l'accès d'une application aux identifiants, y compris après un redémarrage ou une mise à jour. Sur Windows, `on` ou `trust` explicite peut afficher une confirmation d'ajout de la racine.
+Le picker reste non pris en charge sous Linux : aucun travail de CA, de magasin d'identifiants
 ou de proxy picker n'y démarre. L'interception Claude principale reste disponible ; ses fichiers CA locaux
 sont protégés par des vérifications du propriétaire, des liens symboliques, des permissions et des ACL Windows.
 
@@ -199,6 +200,8 @@ quittez complètement puis rouvrez Claude Desktop.
 
 Le mode picker fait partie de first-party : le [risque pour le compte du mode first-party](#first-party-sur-demande)
 s'applique donc aussi à ce mode.
+
+Avant la première réponse du serveur amont, un téléversement picker sans progression pendant 60 secondes est fermé. Une expiration interrompt le téléversement sans réponse de succès ; en HTTP/2, seul le flux concerné est réinitialisé. Ce délai d’inactivité est suspendu lorsque le serveur amont exerce une contre-pression et supprimé dès la fin du téléversement ou la première réponse amont. Ce mécanisme de surveillance de l’inactivité n’ajoute aucune limite à la durée totale du téléversement ; les limites existantes de l’environnement d’exécution et du protocole restent applicables. Ce délai d’inactivité ne s’applique pas aux flux de réponse.
 
 ### Utiliser les modèles opencodex depuis l'onglet Code de Desktop (associations first-party)
 
@@ -661,7 +664,7 @@ Le proxy traduit chaque requête Anthropic Messages API au format Codex Response
 | Assistant `tool_use` | `function_call` (`input` → JSON-stringifié `arguments`) |
 | Utilisateur `tool_result` | `function_call_output` (`is_error` → préfixe `[tool error]`) |
 | Relecture de `thinking` / `redacted_thinking` | Éléments `reasoning` avec enveloppes `ocxr1` bornées pour les signatures et les contenus masqués |
-| Outils fonctionnels | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) |
+| Outils fonctionnels | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) La recherche hébergée avec `allowed_domains`, `blocked_domains` ou `user_location` est omise sur les routes Responses/Chat traduites ; la forcer renvoie 400. Les définitions de fonctions `defer_loading` valides restent appelables comme fonctions ordinaires. Voir les [limites de traduction](/guides/claude-code/#search-restrictions-and-deferred-tools-on-translated-routes). |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, fonction nommée→`{type:"function",name}`, hébergée WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
 | `stop_sequences` | `stop` |
@@ -692,7 +695,7 @@ Sur l’adaptateur Anthropic prévu, les blocs signés non masqués (y compris t
 **Taxonomie des erreurs :** 400 `invalid_request_error`, 401 `authentication_error`,
 402 `billing_error`, 403 `permission_error`, 404 `not_found_error`, 409 `conflict_error`,
 413 `request_too_large`, 429 `rate_limit_error`, 504 `timeout_error`, 529 `overloaded_error`,
-autre 5xx `api_error`. `Retry-After` est conservé.
+autre 5xx `api_error`. `Retry-After` est envoyé en secondes entières (une date HTTP devient le nombre de secondes restantes), plafonné à huit jours.
 
 ## Mise en cache des prompts et utilisation des jetons
 

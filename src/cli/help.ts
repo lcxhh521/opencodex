@@ -1,3 +1,4 @@
+import { EXPORT_CLIENT_IDS } from "../clients/client-ids";
 import { resolveHelpPath } from "./help-catalog";
 import type { Capability } from "./capabilities";
 import { MODELS_CONTEXT_DETAILS, MODELS_CONTEXT_USAGE } from "./help-models-context";
@@ -48,7 +49,8 @@ Usage:
   ocx connect <url>           Connect this machine to a remote OpenCodex hub (credential via stdin)
   ocx remote-workspace <sub>  Pair/run an OCX-only remote execution computer
   ocx disconnect              Restore local state and clear the hub connection
-  ocx sync [--restart-codex]  Fetch models from providers and inject into Codex config
+  ocx sync [--local-only] [--json] [--restart-codex]  Sync models and linked Children
+                              --expect-link <id> | --expect-hub-key <id>: only from that Home/hub key (exit 5 otherwise)
   ocx sync-cache [--restart-codex]
                               Refresh Codex's model cache from the active catalog
   ocx catalog pull <https-url> Install a validated remote catalog and refresh the Codex cache
@@ -70,7 +72,7 @@ Usage:
   ocx restart                  Stop and restart the proxy
   ocx v2 <sub>                multi_agent_v2 surface (status|on|off|mode|keep-native-v1|threads|mode-hint)
   ocx health [--json]          Check proxy health (exit 0=healthy, 1=not)
-  ocx capabilities [--json]    List declared capabilities and the API routes they drive
+  ocx capabilities [--json] [--contracts]  List capabilities and contracts
   ocx ready [--json] [--wait [--timeout <s>]]  Check post-sync readiness (exit 0 only when ready)
   ocx resolve [--json]        Config home, effective port, and liveness (JSON for shells)
   ocx provider <sub>          Providers, connectivity, quota, and selected models
@@ -79,20 +81,21 @@ Usage:
   ocx alias <sub>             Short names for providers and models (list, set, rm, defaults)
   ocx combo <sub>             Combo routing strategies and failover
   ocx agent <sub>             Subagents, injection, effort caps, and sidecars
-  ocx message <sub>           Loaded local Codex sessions and queued peer messages (sessions|send)
+  ocx message <sub>           Codex queued messages, explicit SSH peers and foreground ownership
   ocx effort [sub]            Inspect and configure reasoning effort caps and defaults
+  ocx fallback <sub>          Turn model or provider fallback off per scope; per-device local fallback
   ocx observe <sub>           Logs, usage, storage, memory, and debug data
   ocx inspect <sub>           Effective config, catalog, analytics, pacing, client-config
   ocx route <sub>             Routing features (combo, policy)
   ocx logs [filters]          Alias of ocx observe logs
-  ocx usage [--range <today|1d|7d|30d|all>] [--provider <name>] [--model <id>]
+  ocx usage [--range <today|1d|7d|30d|all>] [--provider <name>] [--model <id>] [--top <1-1000>]
                               Token and estimated-cost report (alias of ocx observe usage)
   ocx storage <sub>           Storage report, cleanup, trash, and the cleanup policy
   ocx memory [--json]         Alias of ocx observe memory
   ocx api-key <sub>           Alias of ocx access key
   ocx access <sub>            External API keys and endpoint information
   ocx api <sub>               Protocol paths: vocabulary, request-path preview, and policy
-  ocx export --client <id>    Print a client config wired to the running proxy (19 clients)
+  ocx export --client <id>    Print a client config wired to the running proxy (${EXPORT_CLIENT_IDS.length} clients)
   ocx integration client <sub> Enable, disable, inspect or roll back a client integration
   ocx grok <sub>              Grok Build model selection and apply
   ocx system <sub>            Runtime settings, startup, sync, OpenCodex updates, and Codex CLI inspection
@@ -100,9 +103,11 @@ Usage:
   ocx advisor <status|on|off|set|consent>  Advisor sidecar settings and context-sharing consent
   ocx companion <show|set|reset>  Menu-bar and widget companion usage settings
   ocx lab <sub>               Inspect Lab evidence and control local automation
+  ocx codex-provider <sub>    Confirm custom Codex provider routing: status|allow|revoke
   ocx chatgpt <sub>          Desktop integration: launch|restore|status|network|install-watcher|uninstall-watcher (macOS)
   ocx claude [args...]        Launch Claude Code wired to the proxy (model discovery on)
   ocx claude desktop [sub]    Manage and apply Claude Desktop's four-family profile
+  ocx codex [args...]         Launch Codex through the proxy's routing (pass-through when disabled)
   ocx opencode [args...]      Launch opencode wired to the proxy (runtime provider config)
   ocx mcode [args...]         Launch MiniMax Code through its managed provider
   ocx mmx text <sub> [args]   Launch MiniMax CLI text through the proxy

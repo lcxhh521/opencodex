@@ -34,10 +34,11 @@ import type {
   CodexRestartResponse,
 } from "../lib/codex-restart-contract";
 import { getServerListenPort } from "../server/lifecycle";
+import type { DesktopPickerState } from "./desktop-app/picker-freshness";
 
 async function defaultRestartDesktopApp(): Promise<CodexDesktopRestartSummary> {
-  const { restartCodexDesktopApp } = await import("./desktop-app-restart");
-  const outcome = restartCodexDesktopApp({ allowHandoff: false });
+  const { restartCodexDesktopAppAsync } = await import("./desktop-app-restart");
+  const outcome = await restartCodexDesktopAppAsync({ allowHandoff: false });
   return {
     attempted: outcome.attempted,
     stopped: outcome.stopped,
@@ -47,9 +48,40 @@ async function defaultRestartDesktopApp(): Promise<CodexDesktopRestartSummary> {
   };
 }
 
+async function defaultDesktopPickerState(): Promise<DesktopPickerState> {
+  const { readCodexDesktopPickerState } = await import("./desktop-app/picker-freshness");
+  return readCodexDesktopPickerState();
+}
+
+async function defaultCatalogBinding(): Promise<string | null> {
+  const { readCodexCatalogBinding } = await import("./desktop-app/picker-freshness");
+  return readCodexCatalogBinding();
+}
+
+async function readBinding(io: CodexRestartServiceIo): Promise<string | null | undefined> {
+  try {
+    return await (io.catalogBinding ?? defaultCatalogBinding)();
+  } catch {
+    // Distinct from null ("binds no catalog"): an unreadable binding cannot prove sameness.
+    return undefined;
+  }
+}
+
+async function readPickerState(io: CodexRestartServiceIo): Promise<DesktopPickerState> {
+  try {
+    return await (io.desktopPickerState ?? defaultDesktopPickerState)();
+  } catch {
+    return "unknown";
+  }
+}
+
 export interface CodexRestartServiceIo {
   /** Desktop-restart seam, so a route test cannot terminate the developer's own Codex. */
   restartDesktopApp?: () => Promise<CodexDesktopRestartSummary>;
+  /** Whether the desktop picker predates the catalog; decides if the shell must restart. */
+  desktopPickerState?: () => Promise<DesktopPickerState>;
+  /** The catalog config.toml binds, read before and after the sync to catch a rebinding. */
+  catalogBinding?: () => Promise<string | null>;
   /** Process-layer seam, forwarded to every app-server-processes call. */
   processIo?: CodexAppServerProcessIo;
   /** Catalog refresh seam. Resolves to whether a catalog or cache write happened. */
@@ -133,6 +165,7 @@ async function runCodexRestart(io: CodexRestartServiceIo): Promise<CodexRestartR
   // roster; stopping app-servers before the write would hand the replacement the
   // same stale file it just lost.
   let synced = false;
+  const bindingBefore = await readBinding(io);
   try {
     const port = (io.listenPort ?? getServerListenPort)();
     synced = await (io.syncCatalog ?? defaultSyncCatalog)(port);
@@ -146,15 +179,34 @@ async function runCodexRestart(io: CodexRestartServiceIo): Promise<CodexRestartR
   (io.resetStateCache ?? resetCodexAppServerCatalogStateCache)();
   const before = (io.collectState ?? collectCodexAppServerCatalogState)(io.processIo ?? {});
 
-  // Done here, before the early returns, because the model picker lives in the DESKTOP
-  // app: "no app-server is running" is not a reason to leave a stale roster on screen,
-  // and an operator who pressed restart still wants the app back on the current catalog.
+  // Decided here, before the early returns, because the model picker lives in the DESKTOP
+  // app: "no app-server is running" is not a reason to leave a stale roster on screen.
+  //
+  // The shell gets a restart attempt whenever its picker cannot be proven current: at
+  // or before the catalog mtime it is stale, and newer is unknown because an earlier
+  // sync may have rebound an already-existing catalog file (#4761). Quitting it
+  // discards composer drafts, unsent picker selections and pending approvals. The
+  // attempt is explicit, not a guarantee: the restart helper can refuse or partially
+  // fail, and desktopApp reports that outcome.
   //
   // allowHandoff is false and that is deliberate. The handoff waits for the CALLING
   // process to exit, and this runs inside a long-lived proxy that does not, so every
   // handoff started here would sit out its window and fail after the operator had
   // already been told it was handed off. An honest refusal beats that.
-  const desktop = await (io.restartDesktopApp ?? defaultRestartDesktopApp)();
+  //
+  // A sync that rebinds model_catalog_json without rewriting the catalog bytes leaves the
+  // catalog mtime older than the shell, yet the shell loaded the previous binding. Seen
+  // across this request's own sync, that is proof of staleness, so it skips the probe.
+  const bindingAfter = await readBinding(io);
+  const rebound = bindingBefore === undefined || bindingAfter === undefined || bindingBefore !== bindingAfter;
+  const picker: DesktopPickerState = rebound ? "stale" : await readPickerState(io);
+  const desktop: CodexDesktopRestartSummary = picker === "current" || picker === "not_running"
+    ? {
+      attempted: false, stopped: [], surviving: [], relaunch: "skipped",
+      reason: picker === "current" ? "picker_current" : "no_targets",
+      pickerState: picker,
+    }
+    : { ...await (io.restartDesktopApp ?? defaultRestartDesktopApp)(), pickerState: picker };
 
   const nothingToDo = (): CodexRestartResponse => ({
     desktopApp: desktop,

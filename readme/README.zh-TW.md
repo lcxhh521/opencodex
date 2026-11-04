@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="../assets/banner.png" alt="opencodex——適用於 Codex、Claude Code、Claude Desktop 與 Grok Build 的通用供應商代理" width="100%">
+  <img src="../assets/banner.png" alt="opencodex — 連接 Codex、Claude Code、Claude Desktop、Grok Build 等工具的本機閘道" width="100%">
 </p>
 
-<h3 align="center">make codex open!</h3>
-<p align="center"><b>適用於 OpenAI Codex、Claude Code、Claude Desktop 與 Grok Build 的通用供應商代理</b><br>
-兩條命令，這四個就都能跑你指定的任何 LLM。</p>
+<h3 align="center">一個本機閘道，連接你的 AI 程式開發工具與模型。</h3>
+<p align="center"><b>在 Codex、Claude Code、Claude Desktop 和 Grok Build 中使用你選擇的模型，<br>並透過受管理的設定連接 OpenCode、Pi、Qoder、WorkBuddy、Kilo、Cline、T3 Code 等工具。</b><br>
+<a href="https://opencodex.me/zh-tw/reference/client-support/">查看所有支援的工具 →</a></p>
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="在 X 上關注 @claudeebum"></a>
@@ -80,10 +80,7 @@ Sol 主導會話，並呼叫 Kimi K3 子代理。
   <a href="../README.md">English</a> · <a href="README.fr.md">Français</a> · <a href="README.ko.md">한국어</a> · <a href="README.zh-CN.md">简体中文</a> · <b>繁體中文</b> · <a href="README.ru.md">Русский</a> · <a href="README.ja.md">日本語</a> · <a href="README.tr.md">Türkçe</a> · 📖 <a href="https://opencodex.me/zh-tw/"><b>完整文件 →</b></a>
 </p>
 
-opencodex 是輕量級本機代理，把 Codex 的 Responses API 翻譯成你的供應商所用的協議——串流、工具呼叫、
-reasoning token、圖片，雙向皆可。在 Codex、Claude Code、Claude Desktop 與 Grok Build 上使用 Claude、
-Gemini、Grok、GLM、DeepSeek、Kimi、Qwen、Ollama 或任何其他 LLM。它也能為 Codex 認證管理
-**ChatGPT 帳號池**：新增帳號、在儀表板重新整理配額，讓新會話自動路由到使用量最低的健康帳號，既有執行緒則固定在啟動它的帳號上。
+opencodex 是連接程式開發工具與模型供應商的輕量級本機閘道。它接收 Responses、Chat Completions 和 Anthropic Messages API 請求，並轉換成供應商使用的協定；在用戶端、模型和供應商支援的情況下，傳遞串流、工具呼叫、推理和影像。你可以在 Codex、Claude Code、Claude Desktop、Grok Build 及[用戶端支援頁面](https://opencodex.me/zh-tw/reference/client-support/)列出的工具中使用 Claude、Gemini、Grok、GLM、DeepSeek、Kimi、Qwen、Ollama 等供應商。它也能管理 Codex 驗證用的 **ChatGPT 帳號池**：新增帳號並在儀表板重新整理配額，新工作階段會自動路由至用量最低的健康帳號，既有對話則保持綁定原始帳號。
 
 ## 快速開始
 
@@ -100,6 +97,21 @@ ocx start                         # 代理 + 儀表板位於 localhost:10100
 （40+ 內建，或任何 OpenAI 相容端點）、挑選模型、管理帳號。隨時可用 `ocx gui`
 重新開啟儀表板。
 
+### 連接你的工具
+
+連接你正在使用的工具：
+
+| 工具 | 連接方式 |
+|---|---|
+| Codex | 開啟儀表板 **Connect** 頁面的 Codex 開關，然後照常執行 `codex`。在本機監聽時，這會讓 Codex 內建供應商指向代理。使用終端機時，請在儀表板新增供應商之前執行 `ocx init` 並接受其 Codex 提示。 |
+| Claude Code | 安裝 `claude` CLI 後執行 `ocx claude`。它會在需要時啟動代理，並透過代理啟動 Claude Code。 |
+| Claude Desktop | 執行 `ocx claude desktop`。全新安裝時會為整個應用程式設定閘道設定檔；既有的 first-party 設定會保留，可執行 `ocx claude desktop apply --gateway` 明確切換。詳見 [Claude Code 指南](https://opencodex.me/zh-tw/guides/claude-code/)。 切換後請完全結束並重新開啟 Claude Desktop。 |
+| Grok Build | 在本機監聽且啟用 Grok 整合時，若 `~/.grok` 存在，`ocx start` 會註冊模型；在 Grok Build 中選擇 `ocx-*` 模型。遠端設定請參見 [Grok Build 指南](https://opencodex.me/zh-tw/guides/grok-build/)。新增供應商後，重新啟動代理（或在啟用 Codex 自動啟動時執行 `ocx ensure`）以更新清單。 |
+| 具備受管理整合的工具 | 使用儀表板的 **Connect** 頁面，或執行 `ocx integration client enable --client <id>`。 |
+| 其他工具 | 將自訂 OpenAI 相容基本 URL 設為 `http://localhost:10100/v1`，或將 Anthropic 基本 URL 設為 `http://localhost:10100`。 |
+
+[用戶端支援頁面](https://opencodex.me/zh-tw/reference/client-support/)列出各工具的連接方式與使用的協定。
+
 <details>
 <summary><b>桌面應用程式（Beta）</b></summary>
 
@@ -111,7 +123,7 @@ ocx start                         # 代理 + 儀表板位於 localhost:10100
 | 平台 | 檔案 | 說明 |
 |---|---|---|
 | macOS 13+（Apple Silicon 與 Intel） | `OpenCodex-<version>-macos.dmg` | 通用建置，以 Developer ID 簽章並經過公證 |
-| Windows（x64） | `OpenCodex-<version>-windows-x64.msi` | 尚未經程式碼簽章：SmartScreen 會詢問一次，選擇 **More info → Run anyway** |
+| Windows（x64） | `OpenCodex-<version>-windows-x64.msi` | 正透過 SignPath Foundation 推出程式碼簽章（[程式碼簽章政策](https://opencodex.me/zh-tw/reference/code-signing/)）；在版本簽章之前，SmartScreen 會詢問一次，選擇 **More info → Run anyway** |
 | Linux（x86_64） | `OpenCodex-<version>-linux-x86_64.AppImage` 或 `-linux-amd64.deb` | 系統匣需要支援 AppIndicator 的桌面環境 |
 
 每個檔案在發行頁面上都附有 `.sha256`。在 macOS 14+ 上，應用程式還附帶
@@ -449,6 +461,16 @@ bun run test
 經維護者代為帶入或重寫而落地的貢獻者工作，
 若 commit 沒有寫出原作者，會記錄在
 **[CREDITS.md](../CREDITS.md)**。
+
+## 程式碼簽章政策 (Code signing policy)
+
+Windows 執行檔正在改用 Authenticode 簽章（[#7207](https://github.com/lidge-jun/opencodex/issues/7207)）。推出進度、簽章驗證方式與完整政策請見 [Windows 程式碼簽章指南](https://opencodex.me/zh-tw/reference/code-signing/)。
+
+Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+
+- Committers and reviewers: [lidge-jun](https://github.com/lidge-jun)
+- Approvers: [lidge-jun](https://github.com/lidge-jun)
+- Privacy: This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
 
 ## 免責聲明
 

@@ -270,7 +270,7 @@ CODEX_CLI_PATH launcher: ${app.shim === null ? "unknown" : app.shim ? "yes" : "n
       console.error("ChatGPT process inspection failed; no launcher was changed and no app was opened. Retry after resolving inspection.");
       return 1;
     }
-    if (binary) writeChatgptShimLauncher(undefined, binary);
+    if (binary) writeChatgptShimLauncher(undefined, binary, install.root);
     if (sub === "launch" && intercept) {
       // The intercept script owns the restart under its lock so the watcher cannot race it.
       if (pac || cloud) await refreshChatgptUnblockPac(pac?.entryPort ?? null, cloud);

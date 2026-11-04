@@ -62,54 +62,11 @@ resolver enforces source identity and expiry before those credentials reach rout
 
 ## Multi-agent surface mode (3-state)
 
-`OcxConfig.multiAgentMode` controls the `multi_agent_version` field stamped on catalog entries:
+See [surface selection and capacity](subagent-capacity.md#multi-agent-surface-mode-3-state) for the mode, global flag and hybrid configuration contract.
 
-| Mode | Behavior |
-| --- | --- |
-| `"v1"` | Force ALL entries to `multi_agent_version = "v1"` ??overrides upstream pins (sol/terra included). |
-| `"default"` | Respect upstream model pins (sol/terra=v2, luna=v1, others=null ??codex feature flag decides). On sync, stale forced values are cleared and upstream pins restored. |
-| `"v2"` | Force ALL entries to `multi_agent_version = "v2"` ??overrides upstream pins (luna included). |
+### Concurrent child limit
 
-The override is applied as a final pass in both `buildCatalogEntries` (live `/v1/models` path) and
-`mergeCatalogEntriesForSync` (on-disk sync), AFTER all normalization and visibility processing. This
-ensures `normalizeRoutedCatalogEntry` (which deletes `multi_agent_version` from routed entries) does
-not clobber the forced value.
-
-A forced pass records each row's pre-override value once, in `opencodex_multi_agent_version_origin`
-(a string pin, or null for none); repeated forced passes never replace it. Returning to `"default"`
-consumes the record. Pristine baseline and native pins still win; the record only decides a native
-row the baseline predates, which previously kept the forced stamp because an absent baseline entry
-cannot tell a stale forced value from a genuine pin (issue 5636). Rows written before the record
-existed keep that non-destructive read.
-
-`getDefaultConfig()` (`src/config/proxy-env.ts`) writes `multiAgentMode: "v1"` explicitly, using the version
-constant from `src/config/multi-agent-surface.ts`, so v1 is the install default while a v2
-native-to-routed child task is undeliverable ciphertext. The repair and salvage merges in
-`src/config/diagnostics.ts` pin `multiAgentMode` and `multiAgentSurfaceAdvisoryVersion` to the stored
-document, because spreading the defaults underneath would repair an unrelated missing field
-into a surface change its operator never made.
-An absent key still means `"default"`, because selecting base deletes the key ??absence cannot be
-read as "never configured". An install that predates that change is therefore not rewritten; it is
-asked once. `multiAgentSurfaceAdvisoryRequired()` is true while the resolved mode is not v1 and
-the stored `multiAgentSurfaceAdvisoryVersion` is below `MULTI_AGENT_SURFACE_ADVISORY_VERSION`, and
-only the operator answering the dashboard notice writes that version.
-
-CLI: `ocx v2 mode v1|default|v2`. GUI: segmented control on the Models page. API: `GET/PUT /api/v2`
-with `multiAgentMode` field.
-
-The `multi_agent_v2` feature flag and the logical maximum thread count are separate from
-`multiAgentMode` (`src/codex/features.ts`): the mode decides which surface Codex advertises, while
-the flag and thread count decide what the native runtime allows.
-Because the global feature has precedence over catalog pins, Codex config injection reconciles it
-to disabled whenever persisted OpenCodex mode explicitly selects v1. This includes a fresh install
-on a Codex home that had previously enabled v2; external-provider ownership and read-only injection
-preflight still prohibit that write. The transition runs inside the same write lock and preimage as
-the rest of injection, so a later refusal rolls the flag back with the files.
-
-`keepNativeChatGptOnV1` makes mode `v2` a catalog-driven hybrid: OpenCodex disables the global
-`multi_agent_v2` override because codex-rs resolves that override before a model row's explicit
-`multi_agent_version`. Native ChatGPT rows then select v1 from the catalog and routed rows select
-v2. An explicit attempt to enable the global flag while the hybrid pin is active is rejected.
+See [concurrent child limit](subagent-capacity.md#concurrent-child-limit) for GUI/API units and canonical Codex setting ownership.
 
 ### What the five-model `spawn_agent` window is, and how V1 differs from V2
 
@@ -128,7 +85,7 @@ Three different numbers, often conflated:
 | --- | --- | --- |
 | Models **advertised** as overrides | `min(5, picker-visible eligible rows)` | `multi_agents_spec.rs:785-790` |
 | Models **eligible** as targets | no numeric cap (only `"disabled"` is excluded, and only on V2) | `multi_agents_common.rs:36-42` |
-| **Concurrent** subagents | V1 6 children (root excluded); V2 total 4 including root ??3 children | `config/mod.rs:211-212`, `:1497-1506` |
+| **Concurrent** subagents | Configurable child limit, independent of the five-model window | [Concurrent child limit](#concurrent-child-limit) |
 
 **The cap is the same 5 on both surfaces, but the window's contents are not.** The eligibility
 filter runs *before* `.take(5)`, and it behaves differently per surface: on a V1 call
@@ -278,7 +235,10 @@ catalogs and model candidates withhold those providers' models; the provider its
 stays active. At 20 or more canonical Models switch rows, initialization appends
 all corresponding disabled selectors once. Existing registrations and later manual
 choices are not reinitialized. OAuth/ChatGPT forwarding is exempt using the same
-usable-key override predicate as routing. Display aliases do not add switch rows.
+key-mode override predicate as routing: a persisted `authMode: "key"` on an
+opted-in OAuth preset is honored even while its credential cannot be resolved
+(paused last key, missing env reference, disabled pool), so that row registers
+as pending rather than as an OAuth login. Display aliases do not add switch rows.
 
 `src/providers/initial-model-selection-runtime.ts` commits the decision against a
 matching registration/inventory snapshot before catalog authority is captured.
@@ -294,6 +254,28 @@ dashboard offers bare native and routed choices; exact account-qualified choices
 through `ocx agent subagents set` or the opencodex configuration. Retired native rows are
 excluded by the [shared catalog](catalog.md#shared-catalog); saved user choices are not rewritten
 by that retirement. Quota fallback retains independent shared/Reserve evidence.
+
+### Native source priority
+
+`src/codex/catalog/native-priority.ts` owns native priority provenance for the builder and merge.
+It accepts only safe integers in `0..1000`, trying the current discovered descriptor, pristine
+catalog-backup baseline, the exact slug's retained `opencodex_native_source_priority`, then the
+upstream snapshot, finally `9`. Invalid candidates are skipped. Published `priority` and
+`opencodex_spawn_priority` never supply source provenance. Every ordinary emitted native row
+carries its unbanded source value; `src/codex/catalog/derive-entry.ts` strips it from template clones.
+Featured bare rows retain their rank. With a nonempty featured list, unfeatured bare natives use
+`featured.length + 100 + sourcePriority`; otherwise they use `sourcePriority`. Account-selector
+stride priorities and routed priority `5` (or their existing selector band) keep their own rules;
+the source bound does not promise disjointness from account-selector priorities. Complete picker
+ordering remains the final display override, independently of private guidance priority.
+
+`src/server/codex-model-list.ts` resolves the active catalog path once per live Codex-shaped list,
+reads its pristine baseline and exact-slug retained fields directly from that file, and supplies
+both to the same builder. Missing, null or corrupt catalogs contribute empty inputs. This path
+never creates a backup or publishes a catalog. For equal inputs, live `/v1/models?client_version`,
+the published catalog and its `models_cache.json` copy carry equal priorities. Concurrent reads may
+observe the complete previous or next publication. Coverage: `tests/codex-integration/native-source-priority.test.ts`
+and `tests/server/server-native-catalog-priority.test.ts`.
 
 When account selectors are active, one featured bare native id expands into a complete selector row
 group. Catalog priorities use the selector count as a stride so each group stays together without
@@ -341,6 +323,7 @@ catalog path calls it, and opencodex never creates, repairs, or removes a role f
 - The role name must equal a listed `*.toml` stem, which is also the path-traversal check. The
   target must be a regular file owned by the running user; the replacement is atomic and does
   not follow a symbolic link.
+- Every PUT that writes the role TOML appends one row to `codex-agent-roles.jsonl` under `integrationsDir()` (`src/codex/role-model-history.ts`): time, `batch`, role, model and effort before and after, and the canonical Codex home (`getCodexHome()`) it wrote. An unchanged save appends nothing, and a failed append is logged without failing the write. Before appending, the writer separates an unterminated suffix with a newline: torn JSON remains skippable and a complete final row remains valid, so a restart does not swallow a newly issued batch's first row. The server hands out batch ids: a write without the optional body field `batch` starts a new batch, and a recorded write's response names it as `batch`; a later write that sends that id (1 to 64 letters, digits or dashes, else 400 `invalid_batch`) joins it, so auto-assign's Apply all and a Restore send the id from their first write's response with every later one. A write joins a batch only while the current home's retained history holds it whole, else 409 `batch_closed`, so an id compaction dropped, or one the server never issued, cannot start over and pass for the beginning of a batch; a batch holds at most 50 rows, else 409 `batch_full`; both are refused before the role file is touched. Each row stores its number in its batch, which keeps that cap durable and lets every read drop a batch missing any of its rows, so a cut batch is never listed or restored. `GET /api/codex-agent-roles` returns the current Codex home's newest whole batches as `history`, never more than 50 rows, when LazyCodex is detected (a batch over 50 rows from an older file is skipped); rows another Codex home wrote are never listed, so a proxy restarted against a different home starts with an empty list. The file is bounded: before appending, the writer captures the last 256 KiB and 1000 rows. An append that crosses either limit compacts that snapshot plus the new row to the newest whole batches, targeting 128 KiB. A kept Restore and its complete source batches are budgeted together, displacing unrelated older batches and using up to 256 KiB and 1000 rows in total when needed. If that group cannot fit both limits, it expires rather than exceeding the bounded read window. A history file it cannot read sets `historyUnavailable: true` with an empty list, and the role list and saves keep working. The dashboard restores a batch by writing each role's earliest `before` through this same PUT under a new batch, naming the restored batch in `restores`; the server refuses such a write with 409 `restore_not_in_history` unless the current home's retained history (every whole batch the file holds, not only the 50 listed rows) holds that batch for that role with exactly those earlier values, so leaving the 50-row listing alone does not invalidate a Restore. Compaction preserves a retained Restore's source from the pre-append snapshot while their combined rows fit both retention limits; this is bounded history, not an indefinite reservation against later writes.
 - On `PUT /api/codex-agent-roles/{role}`, `effort` is optional: omitted keeps the role's
   `model_reasoning_effort`, a level inserts or replaces it, and JSON `null` removes its root line
   and trailing comment. Only a one-line string value can be removed; a multiline or non-string
@@ -373,25 +356,33 @@ the same refusal as the PUT. Applying a proposal is the ordinary
   is not sent. The call goes through the proxy's own `/v1/chat/completions` via
   `postLocalChatCompletion` (`src/lib/local-chat-completion.ts`, shared with the routed vision describer), on
   the root `model` of Codex `config.toml` unless the caller names one. An answer that is not the strict JSON
-  shape, a missing role, or a field outside the vocabulary leaves that role **unsized** with the reason;
-  nothing is guessed. Keys beyond the five answer fields are ignored, and all five stay required. The
+  shape, a missing role, or a tier or effort outside the vocabulary leaves that role **unsized** with the reason;
+  a missing or unknown domain defaults to general. Keys beyond the six answer fields are ignored; the other five stay required. The
   sizing model never names a model.
-- **Mapping is deterministic code.** `src/codex/role-auto-assign.ts` draws candidates from
-  `subagentSelectableModels` (the same list the role picker renders) and tiers them: `codexRoleTiers` in the
-  opencodex config first, then price rank (input plus output per 1M tokens). Three or more priced models
-  split evenly across the three tiers. Fewer are anchored at the top, the dearest frontier and each cheaper
-  one a tier lower, so one is frontier and two are standard and frontier; fast is the tier left empty,
-  which keeps a standard role on the cheaper model. Unpriced, unmapped models are never proposed. A role
-  gets the lowest sufficient tier, then the lowest price. Effort binds to ladder positions of the chosen
-  model (floor, default or middle, the rung above, ceiling), collapsing inside the range; it is proposed
-  for every sized role whose chosen model has a non-empty ladder. Apply and `--apply` insert or
-  replace `model_reasoning_effort` through the same span-preserving editor as `model`, located by
-  the same TOML-aware scan. An empty ladder gives `proposedEffort: null`, meaning no proposal;
-  Apply omits `effort` and preserves the existing pin. A null proposal never means a null PUT. A routed
-  model's ladder is its row's
-  `reasoningEfforts`; a row that declares none takes the ladder the written Codex catalog shows for it, an
-  explicit empty list stays empty, and a row without its own default takes the catalog's default when that
-  rung is on the ladder.
+- **Mapping is deterministic code.** `src/codex/role-auto-assign.ts` draws candidates from `subagentSelectableModels` (the
+  same list the role picker renders) and tiers them: `codexRoleTiers` in the opencodex config first, then measured score in
+  the role's task domain, then price rank (input plus output per 1M tokens). The sizing answer carries a neutral `domain`
+  (coding, agentic, reasoning, writing, knowledge, general; missing means general), and `src/codex/role-capability.ts` reads
+  that domain's scores from Artificial Analysis once per UTC day when `codexRoleCapability.artificialAnalysis.apiKey`
+  resolves, page by page from the free list `/api/v2/language/models/free` until `pagination.has_more` is false (the legacy `/api/v2/data/llms/models` answers 410 Gone after 2026-11-04); every domain takes the Intelligence Index, since the Coding and Agentic Indexes are always null and the free list has no math index. The source refuses redirects, keeps a 30-second timeout per request, and fails the read past ten pages or 16 MiB across them. With no key or on failure it
+  keeps configured tiers and price signals, reports the reason through `capability.error`, and returns null source
+  attribution. The `capability` block attributes the source; Artificial Analysis terms forbid redistribution, so its scores
+  are dropped from that block. Mapped models keep their mapped tier either way. With two or more measured unmapped
+  candidates, those are tiered by distinct score values (equal scores share a tier) without requiring prices, and unmeasured
+  unmapped ones are not proposed; otherwise price rank decides. `capability.error` is set only when no key is configured or
+  the source cannot be read; a source that answered but matched fewer than two candidates leaves it null, and a
+  proposal picked by price rank carries `tierSource: "price"`. Three or more priced models split evenly across the three
+  tiers. Fewer are anchored at the top, the dearest frontier and each cheaper one a tier lower, so one is frontier and two
+  are standard and frontier; fast is the tier left empty, which keeps a standard role on the cheaper model. Price tiering
+  excludes unpriced, unmapped models. A role gets the lowest sufficient tier, then the lowest price, then the higher
+  measured score, then the model it already uses when that model is in the tie, then picker order. Effort binds to ladder
+  positions of the chosen model (floor, default or middle, the rung above, ceiling), collapsing inside the range; it is
+  proposed for every sized role whose chosen model has a non-empty ladder. Apply and `--apply` insert or replace
+  `model_reasoning_effort` through the same span-preserving editor as `model`, located by the same TOML-aware scan. An empty
+  ladder gives `proposedEffort: null`, meaning no proposal; Apply omits `effort` and preserves the existing pin. A null
+  proposal never means a null PUT. A routed model's ladder is its row's `reasoningEfforts`; a row that declares none takes
+  the ladder the written Codex catalog shows for it, an explicit empty list stays empty, and a row without its own default
+  takes the catalog's default when that rung is on the ladder.
 
 The sizing call is injectable (`completeCodexRoleSizing` on the management deps), so route tests answer it
 without a provider. Sibling instances refuse the preview too: it sits under the refused
@@ -486,6 +477,15 @@ and stores only `features.multi_agent_v2.multi_agent_mode_hint_text` in Codex TO
 `null` removes that key. The hint affects new native Codex sessions when their v2 surface
 is active, without changing reasoning effort or the proxy guidance switch.
 
+The integrations toggle `PUT /api/native-integrations/claude` reconciles the generated `ocx-*` definitions
+through `syncClaudeAgentDefsBestEffort` after it persists Off, so the marker-owned regular files are
+pruned at once without model discovery (On keeps the launch and startup sync); a repeated Off reconciles again to remove
+definitions an older version left behind (#7968). The reconcile is best effort: an unlink failure
+leaves that file and the toggle still succeeds. A save that fails before publishing restores the in-memory block, so a
+retry on the same config is a real transition; one that published first keeps the new value. User-authored and symlinked `ocx-*` files are never
+touched, and a live sibling instance still owns the directory. Coverage:
+`tests/claude-integration/claude-first-party-agent-sync.test.ts`.
+
 Claude Code `ocx-*` agent definitions consume the same effective `claudeCode.blockedSkills` policy
 as inbound bundle elision. When the list is non-empty (default: `claude-api`), generated definitions
 whose marker-stripped model resolves to a routed id receive a preventive instruction not to invoke
@@ -504,7 +504,7 @@ The Models page saves routed snapshots in `modelPickerOrder` and records their o
 `modelPickerOrderMode` (`alphabetical`, `provider`, `most-used`). Mode is UI provenance, not a
 catalog sorting policy: catalog writers consume the saved array. Routed-only featured/native
 bands and complete-picker natural-rank preservation remain as described above. Public
-`buildCatalogEntries` accepts the order as its final argument and applies the complete-order
+`buildCatalogEntries` accepts the order before optional native-source inputs and applies the complete-order
 pass after building. On-disk convergence retains its existing post-merge final pass.
 
 Claude ModelInfo ordering receives optional `{ modelPickerOrder, featured }` after `fastRows`.
@@ -555,7 +555,7 @@ The account history response can include a [low-confidence effective capacity es
 
 Account quota surfaces use [safe probe diagnostics](transports/inventory.md#account-quota-failure-diagnostics) separately from quota validity, credential health and routing authority.
 
-Combo child requests normalize effort and thinking controls against the selected target while retaining reasoning summaries; strict unknown targets preserve caller controls. The [Responses transport owner](transports/responses.md) documents this boundary, and native Chat capability stripping applies only for an explicit empty declaration or no-reasoning model; an initial JEV null choice separately strips caller effort.
+Combo child requests normalize effort and thinking controls against the selected target while retaining reasoning summaries; strict unknown targets preserve caller controls. The [Responses transport owner](transports/responses.md) documents this boundary, and native Chat also honors explicit per-axis capability declarations; an initial JEV null choice separately strips caller effort.
 
 Live sideband admission and its bounded upstream handshake follow the [runtime contract](runtime.md#live-sideband-handshake); the ordinary Responses WebSocket exchange remains separate.
 

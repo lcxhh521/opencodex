@@ -5,6 +5,7 @@ import type { ResolvedOpenAiForwardSidecar } from "../providers/openai-sidecar";
 import type { CodexAuthPolicyConfig } from "../codex/auth-context";
 import { isCodexReserveRequestEligible } from "../codex/loopback-target";
 import type { DataPlaneAdmission } from "../server/auth-cors";
+import type { CapturedAdmissionPolicy } from "../types/admission-policy";
 import {
   customRowInputModalities,
   isModelVisionSidecarConsumer as isModelTextOnly,
@@ -121,7 +122,7 @@ function messagesHaveImage(parsed: OcxParsedRequest): boolean {
  */
 export function requiresVisionPreprocessing(
   config: Pick<OcxConfig, "providers"> & { customModels?: OcxConfig["customModels"] },
-  provider: Pick<OcxProviderConfig, "noVisionModels" | "modelInputModalities" | "modelCapabilities">,
+  provider: Pick<OcxProviderConfig, "noVisionModels" | "modelInputModalities" | "inputModalities" | "modelCapabilities">,
   modelId: string,
   providerName?: string,
 ): boolean {
@@ -145,7 +146,7 @@ export function requiresVisionPreprocessing(
   // the attachment to a model that cannot read it.
   if (customDeclared !== undefined) return !customDeclared.includes("image");
   if (isModelTextOnly(provider, modelId)) return true;
-  const runtimeModalities = modelRecordValue(provider.modelInputModalities, modelId);
+  const runtimeModalities = modelRecordValue(provider.modelInputModalities, modelId) ?? provider.inputModalities;
   if (Array.isArray(runtimeModalities) && runtimeModalities.length > 0) {
     return !runtimeModalities.includes("image");
   }
@@ -192,6 +193,7 @@ export interface VisionPlan {
   routedModel?: string;
   /** Loopback dispatch inputs for the routed backend (the listener decides WHICH local port). */
   routedConfig?: Pick<OcxConfig, "port" | "hostname" | "apiKeys" | "unauthenticatedLoopbackListener">;
+  advisorAdmissionPolicy?: CapturedAdmissionPolicy;
   settings: VisionSettings;
   maxDescriptionsPerTurn: number;
 }
@@ -214,6 +216,7 @@ export function planVisionSidecar(
     admission?: Pick<DataPlaneAdmission, "source">;
     codexAuthPolicy?: CodexAuthPolicyConfig;
     providerName?: string;
+    advisorAdmissionPolicy?: CapturedAdmissionPolicy;
   } = {},
 ): VisionPlan | undefined {
   if (!requiresVisionPreprocessing(config, provider, modelId, options.providerName)) return undefined;
@@ -231,6 +234,7 @@ export function planVisionSidecar(
     return {
       backend: "routed",
       routedModel,
+      advisorAdmissionPolicy: options.advisorAdmissionPolicy,
       routedConfig: {
         port: config.port,
         ...(config.apiKeys ? { apiKeys: config.apiKeys } : {}),
