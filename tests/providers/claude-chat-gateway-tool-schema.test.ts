@@ -149,6 +149,90 @@ describe("Claude behind a Chat Completions gateway: tool schema root", () => {
     }
   });
 
+  test.each(["oneOf", "anyOf", "allOf"])("preserves %s roots with unread declarations inside inline compositions", outer => {
+    for (const inner of ["oneOf", "anyOf", "allOf"]) {
+      for (const declaration of [{ properties: { payload: { type: "string" } } }, { $ref: "#/$defs/Payload" }]) {
+        for (const nested of [declaration, { allOf: [{ anyOf: [{ oneOf: [declaration] }] }] }]) {
+          const schema = { $defs: { Payload: { properties: { payload: { type: "string" } } } }, [outer]: [{ [inner]: [nested] }] };
+          const before = structuredClone(schema);
+          expect(toolFor("claude-sonnet-5-5", gateway, undefined, schema).parameters).toEqual({ ...schema, type: "object" });
+          expect(schema).toEqual(before);
+        }
+      }
+    }
+  });
+
+  test("constraint-only compositions flatten without scanning property schemas or literal values", () => {
+    const literal = { properties: { payload: { type: "string" } }, $ref: "#/missing" };
+    const properties = { nested: { anyOf: [literal] }, literal: { default: literal, examples: [literal], const: literal } };
+    const schema = { anyOf: [{ properties, allOf: [{ anyOf: [{ oneOf: [{ required: ["nested"], default: literal, const: literal, enum: [literal], examples: [literal] }] }] }] }] };
+    expect(toolFor("claude-sonnet-5-5", gateway, undefined, schema).parameters).toEqual({ type: "object", properties });
+  });
+
+  test("empty property maps in constraint-only compositions do not block flattening", () => {
+    for (const properties of [{}, Object.create(null)]) {
+      const schema = { oneOf: [{ allOf: [{ properties, required: ["payload"] }] }] };
+      expect(toolFor("claude-sonnet-5-5", gateway, undefined, schema).parameters).toEqual({ type: "object" });
+    }
+  });
+
+  test("empty property maps do not hide deeper declarations or references", () => {
+    for (const declaration of [{ properties: { payload: { type: "string" } } }, { $ref: "#/missing" }]) {
+      const schema = { anyOf: [{ allOf: [{ properties: {}, oneOf: [declaration] }] }] };
+      expect(toolFor("claude-sonnet-5-5", gateway, undefined, schema).parameters).toEqual({ ...schema, type: "object" });
+    }
+  });
+
+  test("nonempty and invalid property maps retain the conservative fallback", () => {
+    for (const properties of [JSON.parse('{"__proto__":{"type":"string"}}'), null, [], "", false, 0]) {
+      const schema = { anyOf: [{ allOf: [{ properties }] }] };
+      expect(toolFor("claude-sonnet-5-5", gateway, undefined, schema).parameters).toEqual({ ...schema, type: "object" });
+    }
+  });
+
+  test("shared constraint-only nodes flatten after shared Chat normalization clones them", () => {
+    // The adapter entry point cannot exercise the later guard's object-identity branch.
+    const shared = { properties: {}, required: ["payload"] };
+    const schema = { anyOf: [{ allOf: [shared], oneOf: [shared] }] };
+    expect(schema.anyOf[0].allOf[0]).toBe(schema.anyOf[0].oneOf[0]);
+    expect(toolFor("claude-sonnet-5-5", gateway, undefined, schema).parameters).toEqual({ type: "object" });
+  });
+
+  test("bounds inline composition inspection per schema, including depth and repeated branches", () => {
+    const chain = (depth: number) => {
+      let node: Record<string, unknown> = { required: ["payload"] };
+      for (let i = 0; i < depth; i++) node = { allOf: [node] };
+      return node;
+    };
+    const boundary = { anyOf: [chain(256)] };
+    expect(toolFor("claude-sonnet-5-5", gateway, undefined, boundary).parameters).toEqual({ type: "object" });
+    for (const schema of [
+      { anyOf: [chain(257)] },
+      { anyOf: [{ allOf: Array.from({ length: 257 }, () => ({ required: ["payload"] })) }] },
+      { anyOf: Array.from({ length: 257 }, () => ({ allOf: [{ required: ["payload"] }] })) },
+    ]) {
+      expect(toolFor("claude-sonnet-5-5", gateway, undefined, schema).parameters).toEqual({ ...schema, type: "object" });
+    }
+  });
+
+  test("an unread later branch restores the whole root instead of partially merged properties", () => {
+    const schema = { anyOf: [
+      { properties: { first: { type: "string" } } },
+      { allOf: [{ properties: { later: { type: "number" } } }] },
+    ] };
+    const before = structuredClone(schema);
+    expect(toolFor("claude-sonnet-5-5", gateway, undefined, schema).parameters).toEqual({ ...schema, type: "object" });
+    expect(schema).toEqual(before);
+  });
+
+  test("the inline inspection budget is shared across different root composition keys", () => {
+    const variants = (count: number) => Array.from({ length: count }, () => ({ required: ["payload"] }));
+    const boundary = { anyOf: [{ allOf: variants(128) }], allOf: [{ oneOf: variants(128) }] };
+    expect(toolFor("claude-sonnet-5-5", gateway, undefined, boundary).parameters).toEqual({ type: "object" });
+    const overBudget = { ...boundary, allOf: [{ oneOf: variants(129) }] };
+    expect(toolFor("claude-sonnet-5-5", gateway, undefined, overBudget).parameters).toEqual({ ...overBudget, type: "object" });
+  });
+
   test("a non-Claude wire override excludes a Claude request alias", () => {
     const fn = toolFor("claude-alias", gateway, "gpt-5.6-terra");
     expect(fn.parameters).toEqual({ ...unionRoot, type: "object" });
