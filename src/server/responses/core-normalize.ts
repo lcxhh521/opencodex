@@ -1,4 +1,6 @@
 import { effectiveAzureOutputBudget } from "../../adapters/azure";
+import { normalizeThinkingOptions } from "../../clients/reasoning-controls";
+import { nativeEffortClamp, shouldApplyNativeEffortClamp } from "../../codex/catalog";
 import { sanitizeLogMetadataString } from "../../lib/redact";
 import type { RouteResult } from "../../router";
 import type { InboundWire } from "../../providers/registry";
@@ -154,6 +156,7 @@ export async function applyFinalRouteRequestNormalization(args: {
 
   // Only Anthropic message routes retain the Codex-facing selector. Other providers must keep
   // their existing response.model contract even when their public and wire model ids differ.
+  // Request preparation assigns the original client label separately for synthetic turns.
   const responseModelId = parsed.modelId;
   const preserveAnthropicResponseModel = route.providerName === "anthropic"
     || route.provider.adapter === "anthropic";
@@ -341,6 +344,21 @@ export async function applyFinalRouteRequestNormalization(args: {
   }
 
   {
+    // Native passthrough keeps its snapshot-owned effort contract, including saved exclusions.
+    if (!shouldApplyNativeEffortClamp(route.providerName, route.provider, finalSelectedModelId)) {
+      const previousEffort = parsed.options.reasoning;
+      const previousThinkingEnabled = parsed.options.thinkingEnabled;
+      normalizeThinkingOptions(route.provider, route.modelId, parsed.options);
+      const raw = parsed._rawBody as { reasoning?: unknown } | undefined;
+      if (previousEffort !== undefined && parsed.options.reasoning === undefined) {
+        if (raw) raw.reasoning = stripEmptyLadderEffort(raw.reasoning, []);
+      }
+      if (previousThinkingEnabled !== undefined && parsed.options.thinkingEnabled === undefined
+        && raw?.reasoning && typeof raw.reasoning === "object" && !Array.isArray(raw.reasoning)) {
+        delete (raw.reasoning as { enabled?: boolean }).enabled;
+        if (Object.keys(raw.reasoning).length === 0) delete raw.reasoning;
+      }
+    }
     const { applyEffortCap, effortCapAppliesTo, supportedLadderFor } = await import("../effort-policy");
     const surface = collabSurface(parsed);
     if (effortCapAppliesTo(surface, req.headers, config, parsed._compactionRequest === true)) {
@@ -357,15 +375,17 @@ export async function applyFinalRouteRequestNormalization(args: {
   }
 
   {
-    const { nativeEffortClamp, shouldApplyNativeEffortClamp } = await import("../../codex/catalog");
+    const raw = parsed._rawBody as { reasoning?: { effort?: string } } | undefined;
+    // The parser folds `ultra` to `max` only in options.reasoning; the passthrough adapter
+    // serializes the raw body, so a raw `ultra` must reach the clamp itself (#7590).
+    const rawUltra = raw?.reasoning && typeof raw.reasoning === "object" && raw.reasoning.effort === "ultra";
     const clamped = shouldApplyNativeEffortClamp(route.providerName, route.provider, finalSelectedModelId)
-      ? nativeEffortClamp(route.modelId, parsed.options.reasoning)
+      ? nativeEffortClamp(route.modelId, rawUltra ? "ultra" : parsed.options.reasoning)
       : null;
     if (clamped) {
       parsed.options.reasoning = clamped;
-      const raw = parsed._rawBody as { reasoning?: { effort?: string } } | undefined;
       if (raw?.reasoning && typeof raw.reasoning === "object") raw.reasoning.effort = clamped;
-      logCtx.requestedEffort = `${logCtx.requestedEffort ?? "max"}->${clamped}`;
+      logCtx.requestedEffort = `${logCtx.requestedEffort ?? (rawUltra ? "ultra" : "max")}->${clamped}`;
     }
   }
   // Chat ingress cannot strip effort against a provisional policy pick. Apply the

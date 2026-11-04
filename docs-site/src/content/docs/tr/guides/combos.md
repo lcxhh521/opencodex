@@ -229,8 +229,9 @@ ikiye ayrılır.
 | --- | --- |
 | HTTP 401, 403, 404, 408, 429 veya herhangi bir 5xx | Hedefi soğutun ve bir sonraki uygun hedefe atlayın. |
 | Sınıflandırılmış kimlik doğrulama, abonelik, kota, hız sınırı, aşırı yük veya yukarı akış sunucu hatası | Yalnızca durum yeterli olmadığında bile hedefi soğutun ve atlayın. |
-| İstemci iptali (499), `origin_rejected`, siber politika reddi, bağlam taşması veya diğer geçersiz istek | Durun ve hatayı döndürün; başka bir hedef isteği geçerli kılmaz. |
-| `user` alanını açıkça reddeden, `reasoning.effort`/`reasoning_effort` için desteklenmeyen değer bildiren veya modele özgü görüntü girdisini reddeden (`param: input`) yapılandırılmış HTTP 400 | Çıktı başlamadan önce bekleme süresi kaydetmeden sonraki uygun hedefe atlar; aşağıdaki isteğe bağlı parametre uyumluluğuna bakın. |
+| İstemci iptali (499), `origin_rejected`, siber politika reddi veya diğer geçersiz istek | Durun ve hatayı döndürün; başka bir hedef isteği geçerli kılmaz. |
+| Çıktıdan önce doğrulanan bağlam aşımı (HTTP 400 dahil) | Soğutma olmadan denenmemiş uygun hedefe geçer; hedefler tükenirse ilk doğrulanan HTTP 400 bağlam hatasını döndürür (başka durum koduyla gelen bağlam reddi de sonraki hedefe geçirir ama saklanmaz). |
+| `user` alanını açıkça reddeden, `reasoning.effort`/`reasoning_effort` için desteklenmeyen değer bildiren, modele özgü görüntü girdisini reddeden (`param: input`) veya rotanın okuyamadığı girdi medyasını reddeden (`unsupported_input_modality`) yapılandırılmış HTTP 400 | Çıktı başlamadan önce bekleme süresi kaydetmeden sonraki uygun hedefe atlar; aşağıdaki isteğe bağlı parametre uyumluluğuna bakın. |
 | Süreç içi bir bağdaştırıcının (`runTurn`) yürüttüğü Responses turunda, geçerli isteğin bildirmediği ilk araç çağrısı (herhangi bir çıktıdan ve yeniden oynatılamaz yan etkiden önce) | Hedefi bekleme süresine alır ve aynı araç kataloğuyla sonraki hedefe atlar. Görünür çıktıdan veya yeniden oynatılamaz bir yan etkiden sonra ret kesindir. Chat Completions ve Anthropic Messages istekleri değişmez. |
 | Diğer sınıflandırılmamış hatalar | Durun ve hatayı döndürün. |
 
@@ -240,8 +241,13 @@ yerine onu kullanır; Codex sıfırlama başlıkları ve yapılandırılmış `c
 açık `Retry-After` gecikmesi en fazla 24 saat, sıfırlama kaynaklı, yapılandırılmış ve varsayılan soğuma süreleri en fazla 10 dakika ile sınırlandırılır.
 
 Geçerli istek denenen aynı hedefi asla yeniden denemez. Daha sonraki istekler
-soğuma süresi dolana kadar onu atlar. Uygun hiçbir hedef kalmazsa proxy
+soğuma süresi dolana kadar onu atlar. Henüz hiçbir hedef denenmemişse ve uygun hedef yoksa proxy
 `error.code = "combo_unavailable"` ile HTTP 503 döndürür.
+
+Doğrulanmış bir HTTP 400 bağlam reddinden sonra hedefler veya gönderim bütçesi tükenirse ilk ret
+`context_length_exceeded` olarak döner; kota hataları dahil sonraki yeniden denenebilir hatalardan önceliklidir.
+Kalan hedeflerin akıl yürütmeyi yeniden oynatamaması veya ücretli kullanım onayının bulunmaması da buna dahildir.
+İptal, sonraki ölümcül ret ve açık geri dönüş politikası reddi hemen durdurur; onaysız ücretli hedefe istek gönderilmez.
 
 :::note
 Yük devretme kasıtlı olarak sınırlandırılmıştır. Hedefe özgü kullanılabilirlik,
@@ -305,8 +311,9 @@ Arayüzü](/tr/guides/sub-agent-surface/) sayfasına bakın.
 
 Yerel kontrol panelini açın ve **Modeller → Kombolar** seçeneğini belirleyin.
 Çalışma alanı komboları oluşturur, düzenler, yeniden adlandırır ve kaldırır;
-hedef seçicisi ise devre dışı bırakılmış modelleri ve iç içe geçmiş komboları
-hariç tutar.
+model seçicileri gizli modelleri de içerir. Görünürlük yalnızca dış model listelerini etkiler,
+kombo içindeki seçimi etkilemez; gizli bir modeli seçmek onu dışarıda görünür yapmaz.
+Hedef seçicisi devre dışı sağlayıcıları, iç içe komboları ve yalnızca karar hizmeti sunan JEV sağlayıcılarını hariç tutar.
 
 Her hedef ayrıca canlı bir kota rozeti gösterir: **Kullanılabilir**, **Kota tükendi** veya **Kota bilinmiyor**.
 Düzenleyici, kota nedeniyle Kaydet ve Oluştur işlemlerini yalnızca kullanılabilir hedeflerin tümü için yapılandırılmış kimlik bilgisine ait çıkarım sınırının tükendiğini doğrulayan geçerli sunucu bilgisi varsa engeller. Yalnızca görüntüleme amaçlı hesap, model, arama ve MCP kotaları ya da eksik veya süresi dolmuş yönlendirme kanıtları bu engellemeye neden olmaz. Engelleme, ilgili sıfırlama zamanında veya verinin güncellik süresi dolduğunda sona erer ve sayfa etkin ya da görünür olduğunda yeniden kontrol edilir; Yenile, hem kombo verilerini hem de kotaları yeniden yükler.
@@ -323,8 +330,8 @@ ocx combo remove <kimlik> --yes
 ```
 
 `set` ayrıca `--strategy`, `--sticky`, `--effort`, `--alias`, `--native-alias`,
-`--display-name` ve `--rename-from` kabul eder. Bu alanı temizlemek için
-`--effort`, `--alias` veya `--display-name` değeri olarak `-` kullanın.
+`--display-name`, `--description` ve `--rename-from` kabul eder. Bu alanı temizlemek için
+`--effort`, `--alias`, `--display-name` veya `--description` değeri olarak `-` kullanın.
 `--native-alias`, şu anda desteklenen yalın bir yerel model takma adı ve boş
 olmayan bir görüntüleme adı gerektirir. `create` ve `update`, `set`'in takma
 adlarıdır; `delete`, `remove`'un takma adıdır; ve aynı alt komutlar `ocx route
@@ -374,6 +381,7 @@ saklanır:
 | `alias` | Hayır | yok | İsteğe bağlı kırpılmış genel model kimliği; yukarıdaki takma ad kurallarını kullanın. Boş bir değer takma ad yok olarak saklanır. |
 | `nativeAlias` | Hayır | `false` | Şu anda desteklenen yalın bir yerel `alias`'ın yönlendirme ve katalog önceliği almasına açıkça izin verin. Asla takma addan çıkarılmaz. |
 | `displayName` | Hayır | yok | Sınırlı salt görüntüleme katalog etiketi. `nativeAlias` true olduğunda gerekli ve boş değildir. |
+| `description` | Hayır | yok | Salt görüntüleme katalog satırı açıklaması; `displayName` ile aynı sınırlar geçerlidir. Ayarlanmazsa üretilen `Routed via opencodex → combo (combo).` metni korunur. |
 
 ## Sorun Giderme
 
@@ -403,12 +411,16 @@ tam doğrulama mesajını görüntüler.
 ### Yük devretme ilk hatadan sonra neden durdu?
 
 Hata hedefe özgü olmaktan ziyade uç (terminal) bir hataydı. Geçersiz girdiyi
-düzeltin, aşırı büyük bir bağlamı azaltın, bir politika reddini işleyin veya
+düzeltin, bir politika reddini işleyin veya
 reddedilen istek kaynağını düzeltin. Kombolar bu durumlar için atlama yapmaz.
 
 
 ## İsteğe bağlı parametre uyumluluğu
 
-Sonlandırıcı 400 hatalarının dar bir istisnası vardır: `user` alanını açıkça reddeden, `reasoning.effort`/`reasoning_effort` için desteklenmeyen değer bildiren veya modele özgü görüntü girdisini reddeden (`param: input`) yapılandırılmış hata, çıktı başlamadan önce sonraki uygun hedefe geçebilir. Bu uyumsuzluk için bekleme süresi kaydedilmez. Güvenlik politikası reddi, iptal ve başlamış çıktı yeniden yürütülmez.
+Sonlandırıcı 400 hatalarının dar bir istisnası vardır: `user` alanını açıkça reddeden, `reasoning.effort`/`reasoning_effort` için desteklenmeyen değer bildiren, modele özgü görüntü girdisini reddeden (`param: input`) veya rotanın okuyamadığı girdi medyasını reddeden (`unsupported_input_modality`) yapılandırılmış hata, çıktı başlamadan önce sonraki uygun hedefe geçebilir. Bu uyumsuzluk için bekleme süresi kaydedilmez. Güvenlik politikası reddi, iptal ve başlamış çıktı yeniden yürütülmez.
 
 [Canonical compatibility details](/guides/combos/#request-local-target-compatibility).
+
+## Soğuma kurtarma rezervasyonu
+
+`cooldownReprobe: { enabled: true }` ile etkinleştirilen kurtarma denemesi yalnızca onu ayıran isteğe aittir; diğer istekler kayıtlı soğuma sürelerine uymaya devam eder. Rezervasyon, soğuma beklemesi ve JEV seçimi boyunca korunur. Bekleme sırasında yeniden kullanılabilir olan hedef, soğuma kaydı değişmediyse tekrar denenebilir. Yeni bir soğuma kaydı o hedefin rezervasyonunu geçersiz kılar. Başarı yalnızca yanıt veren hedefin değişmemiş soğuma kaydını kaldırır; denenmeyen hedefler ve yeni hatalar soğuma kayıtlarını korur. Sağlayıcının devre dışı olması, kota, istek uygunluğu ve iptal kontrolleri geçerliliğini korur. [Ayarlar ve sınırlar](/guides/combos/#retry-all-cooled-targets-opt-in) bölümüne bakın.

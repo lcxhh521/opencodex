@@ -2,8 +2,13 @@ import { parseResetCooldownMs } from "../codex/routing";
 import { classifyError, isCyberPolicyCode } from "../lib/errors";
 import { isNonReplayableUpstreamCode } from "../lib/upstream-retry";
 import { isAnthropicBillingFailure } from "../providers/anthropic-billing-refusal";
+import { isKiroAccountProfileRefusal } from "../adapters/kiro-refusal";
 import type { OcxComboTarget } from "../types";
 import { targetKey } from "./types";
+import { isDefiniteContextOverflow } from "../lib/context-overflow-verdict";
+
+// The verdict lives in a dependency-free leaf so the presentation classifier can share it.
+export { isDefiniteContextOverflow };
 import {
   captureConfigGeneration,
   sweepExpiredOnWrite,
@@ -12,6 +17,7 @@ import {
 
 interface TargetCooldown {
   cooldownUntil: number;
+  revision: number;
   status?: number;
 }
 
@@ -43,6 +49,8 @@ const HTTP_MONTH_INDEX: Record<string, number> = {
 
 /** Map<`${comboId}\0${provider/model}`, TargetCooldown> */
 const targetCooldowns = new Map<string, TargetCooldown>();
+// Never reset: an in-flight reservation may still refer to an entry cleared from the map.
+let nextCooldownRevision = 0;
 let lastReconciledGeneration = 0;
 let liveComboTargets = new Set<string>();
 
@@ -162,6 +170,42 @@ export function isComboTargetInCooldown(
   return true;
 }
 
+/** The live cooldown expiry for one target, or undefined once it is absent or elapsed. */
+export function comboTargetCooldownExpiry(
+  comboId: string,
+  target: Pick<OcxComboTarget, "provider" | "model">,
+  now = Date.now(),
+): number | undefined {
+  const key = cooldownMapKey(comboId, target);
+  const entry = targetCooldowns.get(key);
+  if (!entry) return undefined;
+  if (entry.cooldownUntil <= now) {
+    targetCooldowns.delete(key);
+    return undefined;
+  }
+  return entry.cooldownUntil;
+}
+
+/** Identity of the current live write, independent of its possibly repeated expiry. */
+export function comboTargetCooldownRevision(
+  comboId: string,
+  target: Pick<OcxComboTarget, "provider" | "model">,
+  now = Date.now(),
+): number | undefined {
+  return isComboTargetInCooldown(comboId, target, now)
+    ? targetCooldowns.get(cooldownMapKey(comboId, target))?.revision : undefined;
+}
+
+/** Lift only the reserved write; a replacement with even the same expiry survives. */
+export function clearComboTargetCooldownIfUnchanged(
+  comboId: string,
+  target: Pick<OcxComboTarget, "provider" | "model">,
+  expectedRevision: number,
+): void {
+  const key = cooldownMapKey(comboId, target);
+  if (targetCooldowns.get(key)?.revision === expectedRevision) targetCooldowns.delete(key);
+}
+
 export function isTransientRequestRateLimit(input: {
   status?: number;
   code?: string | null;
@@ -252,7 +296,7 @@ export function coolComboTarget(
     // A spent account window or an unpaid/rejected credential does not turn over in a minute,
     // so the 60s default would re-offer a target that cannot succeed. Only the duration
     // changes; the scope and hop decisions are untouched.
-    ?? (isAccountWindowExhausted(options?.message ?? "", options?.code)
+    ?? (isAccountWindowExhausted(options?.message ?? "", options?.code, options?.status)
       || PROVIDER_SCOPED_FAILURE_CODES.has(normalizedFailureCode(options?.code))
       ? MAX_COOLDOWN_MS
       : isTransientRequestRateLimit({
@@ -261,6 +305,7 @@ export function coolComboTarget(
         message: options?.message,
       }) ? COMBO_REQUEST_RATE_COOLDOWN_MS : DEFAULT_COOLDOWN_MS);
   targetCooldowns.set(cooldownMapKey(comboId, target), {
+    revision: ++nextCooldownRevision,
     // Local fallbacks are capped at ten minutes; explicit server delays at one day.
     cooldownUntil: now + (serverDelayMs ?? Math.min(Math.max(cooldownMs, 1), MAX_COOLDOWN_MS)),
     status: options?.status,
@@ -312,7 +357,8 @@ export function sweepExpiredComboTargetCooldowns(now = Date.now()): number {
   return removed;
 }
 
-export function clearComboTargetCooldowns(comboId?: string): void {
+/** Clear all cooldowns, one combo, or only the supplied target keys within that combo. */
+export function clearComboTargetCooldowns(comboId?: string, targetKeys?: Iterable<string>): void {
   if (comboId === undefined) {
     targetCooldowns.clear();
     liveComboTargets.clear();
@@ -320,6 +366,10 @@ export function clearComboTargetCooldowns(comboId?: string): void {
     return;
   }
   const prefix = `${comboId}\0`;
+  if (targetKeys !== undefined) {
+    for (const key of targetKeys) targetCooldowns.delete(`${prefix}${key}`);
+    return;
+  }
   for (const key of targetCooldowns.keys()) {
     if (key.startsWith(prefix)) targetCooldowns.delete(key);
   }
@@ -349,11 +399,37 @@ const ACCOUNT_EXHAUSTION_CODES = new Set(["usage_limit_exceeded", "usage_limit_r
 // Token-plan windows (Alibaba's DeepSeek/Qwen plans) report "Your token-plan 1-week quota has been
 // exhausted" (#5494). The match is anchored to that phrasing: a looser "quota ... exhausted" would
 // also catch per-minute limits, and this arm outranks the transient rate-limit duration.
-const ACCOUNT_EXHAUSTION_TEXT = /usage limit (?:has been )?reached|token-plan\s+\S+\s+quota has been exhausted/;
+const ACCOUNT_EXHAUSTION_TEXT = /usage limit (?:has been )?reached|token-plan\s+\S+\s+quota has been exhausted|(?:account|weekly|monthly|daily)\s*(?:usage\s+)?quota (?:(?:has been |is )?exhausted|exceeded)/i;
 
-function isAccountWindowExhausted(message: string, code?: string | null): boolean {
-  return ACCOUNT_EXHAUSTION_CODES.has(normalizedFailureCode(code))
-    || ACCOUNT_EXHAUSTION_TEXT.test(message.toLowerCase());
+/**
+ * Determines whether an error signals that an account's quota or usage window has been exhausted.
+ *
+ * Explicit error codes (`usage_limit_exceeded`, `insufficient_quota`, etc.) are always authoritative.
+ * For HTTP 400 (Bad Request), prose alone is not authoritative because client validation errors
+ * may echo prompt contents or parameter values containing quota-related words.
+ *
+ * @param message The error message text.
+ * @param code The normalized or raw error code.
+ * @param status The HTTP status code, if known.
+ * @returns True if the failure represents an account window exhaustion.
+ */
+function isAccountWindowExhausted(
+  message: string,
+  code?: string | null,
+  status?: number,
+): boolean {
+  const normalized = normalizedFailureCode(code);
+  if (ACCOUNT_EXHAUSTION_CODES.has(normalized) || normalized === "insufficient_quota") {
+    return true;
+  }
+  // On HTTP 400 (Bad Request / parameter validation), prose alone is not authoritative evidence
+  // of account quota exhaustion because validation errors may echo user prompts or parameter values
+  // quoting "quota exhausted". An authoritative account exhaustion verdict on 400 requires a
+  // structured exhaustion code.
+  if (status === 400 || status === 422) {
+    return false;
+  }
+  return ACCOUNT_EXHAUSTION_TEXT.test(message.toLowerCase());
 }
 
 function isProviderScopedQuotaCap(
@@ -361,6 +437,7 @@ function isProviderScopedQuotaCap(
   message: string,
   code?: string | null,
 ): boolean {
+  if (status === 400 || status === 422) return false; // Validation prose may reflect the caller's input.
   const normalizedCode = normalizedFailureCode(code);
   const text = message.toLowerCase();
   if (
@@ -371,6 +448,12 @@ function isProviderScopedQuotaCap(
   }
   return text.includes("err_free_prompt_cap")
     || (text.includes("free tier") && text.includes("single request"));
+}
+
+/** A structured account-window exhaustion code; prose never qualifies (a request can echo it). */
+function hasAccountExhaustionCode(code?: string | null): boolean {
+  const normalized = normalizedFailureCode(code);
+  return ACCOUNT_EXHAUSTION_CODES.has(normalized) || normalized === "insufficient_quota";
 }
 
 /**
@@ -385,7 +468,7 @@ function isRequestLocalFreePromptCap(
   message: string,
   code?: string | null,
 ): boolean {
-  if (status !== 400) return false;
+  if (status !== 400 && status !== 422) return false;
   const text = message.toLowerCase();
   if (normalizedFailureCode(code) === "free_rate_limited") return true;
   if (text.includes("err_free_prompt_cap")) return true;
@@ -403,6 +486,9 @@ const REQUEST_SHAPE_FAILURE_CODES = new Set([
   "tool_catalog_too_large",
   "cursor_root_envelope_limit",
   "target_incompatible",
+  // A route that cannot read the request's media (image input to a text-only CLI route) is
+  // healthy for every other request, so cooling it would only block unrelated turns.
+  "unsupported_input_modality",
 ]);
 
 /** Credential/billing failures that every target sharing the provider inherits. */
@@ -623,74 +709,6 @@ function isProviderTargetContextOverflow(
     && /\bprompt\s+\d+\s*>\s*\d+\s+maximum context length\b/i.test(message);
 }
 
-/** A status can carry a verdict about the REQUEST; 401/403/429 speak about the credential. */
-const CONTEXT_VERDICT_STATUSES: ReadonlySet<number> = new Set([400, 413, 422]);
-
-/**
- * Phrases a provider emits when the INPUT does not fit this model's context window. Matched
- * against the innermost provider message only, so an unrelated refusal that merely quotes one
- * of these tokens in a code field cannot authorize a replay.
- */
-const DEFINITE_CONTEXT_OVERFLOW_PHRASES = [
-  "exceeds the context window",
-  "exceed the context window",
-  "context window exceeded",
-  "context length exceeded",
-  "maximum context length",
-  "maximum context window",
-  "too many tokens",
-];
-
-/** Wrapper envelopes unwrapped before the leaf message is read. */
-const MAX_CONTEXT_OVERFLOW_ENVELOPES = 4;
-
-function isDefiniteContextOverflowMessage(text: string): boolean {
-  const normalized = text.toLowerCase();
-  return normalized === "context_length_exceeded"
-    || DEFINITE_CONTEXT_OVERFLOW_PHRASES.some(phrase => normalized.includes(phrase));
-}
-
-/**
- * Confirm a context overflow from the provider MESSAGE rather than from a code token that
- * merely appears somewhere in the envelope. An upstream controls both fields and can emit a
- * contradictory pair -- `context_length_exceeded` beside `Unsupported parameter: user` -- and
- * that is not evidence the turn is too large for this model. `classifyError` reads the whole
- * blob, which is exactly the looseness this must not inherit.
- *
- * A JSON-shaped body that fails to parse is truncated or corrupt, not prose: `classificationText`
- * is capped at 500 characters by `normalizeUpstreamErrorText` before it reaches this function, so
- * a long envelope arrives here as a JSON prefix. Reading that prefix as plain text would let an
- * arbitrary field that happens to sit in the first 500 bytes authorize a hop, so it fails closed.
- *
- * Only the exact proxy wrapper is unwrapped, within a fixed envelope budget and 16,384 characters.
- */
-function isDefiniteContextOverflow(status: number, message: string): boolean {
-  if (!CONTEXT_VERDICT_STATUSES.has(status) && status < 500) return false;
-  if (message.length > 16_384) return false;
-  let text = message.trim();
-  // One pass per unwrapped envelope, plus one for the leaf the last envelope yields.
-  for (let unwrapped = 0; unwrapped <= MAX_CONTEXT_OVERFLOW_ENVELOPES; unwrapped += 1) {
-    const providerPrefix = /^Provider error \d{3}:\s*/.exec(text);
-    if (providerPrefix) text = text.slice(providerPrefix[0].length).trim();
-    if (!text.startsWith("{")) return isDefiniteContextOverflowMessage(text);
-    if (unwrapped === MAX_CONTEXT_OVERFLOW_ENVELOPES) return false;
-    let payload: unknown;
-    try { payload = JSON.parse(text); } catch { return false; }
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
-    const record = payload as Record<string, unknown>;
-    const response = record.response && typeof record.response === "object" && !Array.isArray(record.response)
-      ? record.response as Record<string, unknown>
-      : undefined;
-    const source = [record.error, response?.error, response?.last_error, record.last_error, record]
-      .find((candidate): candidate is Record<string, unknown> =>
-        !!candidate && typeof candidate === "object" && !Array.isArray(candidate)
-        && typeof (candidate as Record<string, unknown>).message === "string");
-    if (!source) return false;
-    text = (source.message as string).trim();
-  }
-  return false;
-}
-
 const CODEX_ACCOUNT_MODEL_REFUSAL = /^The '[^']{1,256}' model is not supported when using Codex with a ChatGPT account\.$/;
 
 export type CodexAccountModelRefusal = "other" | "refusal" | "ambiguous";
@@ -768,7 +786,13 @@ export function codexAccountModelRefusal(
 export function comboFailureDecision(
   status: number,
   message: string,
-  options?: { code?: string | null; codexModelRefusal?: CodexAccountModelRefusal },
+  options?: {
+    code?: string | null;
+    codexModelRefusal?: CodexAccountModelRefusal;
+    failedAdapter?: string;
+    /** The caller proved the failure is an adapter-normalized plan refusal (`isModelNotInPlanRefusal`). */
+    verifiedPlanRefusal?: boolean;
+  },
 ): ComboFailureDecision {
   if (status === 499) return "stop";
   if (message.toLowerCase().includes("origin_rejected")) return "stop";
@@ -814,8 +838,8 @@ export function comboFailureDecision(
   //
   // This MUST be tested before the generic stop list below. Our own refusal message says
   // "context window" -- that is what it refuses on -- and the classifier remaps that phrase,
-  // so checking the stop list first swallowed the signal and ended the chain. An UPSTREAM
-  // `context_length_exceeded` carries no admission code and still falls through to stop.
+  // so checking the stop list first swallowed the signal and ended the chain. Confirmed
+  // upstream context refusals already took the bounded message-classification hop above.
   //
   // Matched on the STRUCTURED code only, which classifyError now preserves for our own
   // refusal. A raw substring test would additionally let any upstream override a terminal
@@ -836,9 +860,15 @@ export function comboFailureDecision(
   // says nothing about the next combo target. Structured code only, plus the explicit prose
   // form upstreams emit when they carry no code, so an unrelated 400 stays terminal.
   const failureCode = normalizedFailureCode(options?.code || error.code);
-  if (["model_not_found", "model_unavailable", "unsupported_model"].includes(failureCode)) {
+  // The input-modality refusal is the same kind of verdict: this route cannot read the turn's
+  // media, and a later target may. Its 400 would otherwise end the chain as invalid_request_error.
+  if (["model_not_found", "model_unavailable", "unsupported_model", "unsupported_input_modality"].includes(failureCode)) {
     return "hop";
   }
+  // So is a plan refusal (#7684): this account's plan excludes THIS model, and it cools only the
+  // refused target because `comboFailureCooldownScope` reads a 400 as target-scoped. Unlike the
+  // codes above it is honoured only with caller-supplied provenance, never from the code alone.
+  if (failureCode === "model_not_in_plan" && options?.verifiedPlanRefusal === true) return "hop";
   if (modelRefusal === "refusal") return "hop";
   // `free_rate_limited` no longer routes through `isProviderScopedQuotaCap` (it is a
   // per-request cap, not provider-wide evidence), so keep its hop verdict explicit here.
@@ -850,9 +880,22 @@ export function comboFailureDecision(
   // could have served the request (#4903).
   if (isResponseFormatCapabilityRefusal(status, message, options?.code)) return "hop";
   if (isAnthropicBillingFailure(status, message, options?.code)) return "hop";
+  // Kiro's body validator rejects the request for the identity it was routed under. The account
+  // layer rotates logins first; this is the no-alternate case, so the next combo target is the
+  // only remaining chance to serve the turn. Only a caller that knows the failed target is a Kiro
+  // adapter grants it (the words alone prove nothing for another provider); it must precede the
+  // generic invalid_request_error stop.
+  if (options?.failedAdapter === "kiro" && isKiroAccountProfileRefusal(status, message)) return "hop";
+  // A structured account-window exhaustion code is provider-state evidence even inside a
+  // 400 / invalid_request_error envelope, so it must precede that stop. Exhaustion prose alone
+  // never reaches this arm: a validation error can quote quota wording back (#7625).
+  if (hasAccountExhaustionCode(options?.code)) return "hop";
   if (["origin_rejected", "context_length_exceeded", "invalid_request_error"].includes(error.code ?? "")) {
     return "stop";
   }
+  // Quota prose inside a request-validation status (400/422) is not authoritative without a
+  // structured code: the body can quote prompt or parameter text back (#7625).
+  if (error.code === "insufficient_quota" && (status === 400 || status === 422)) return "stop";
   // 402 (payment required) and 425 (too early) are provider-state signals, not verdicts about
   // the request: another combo target can still serve it.
   if ([401, 402, 403, 404, 408, 425, 429].includes(status) || status >= 500) return "hop";

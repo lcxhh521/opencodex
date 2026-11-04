@@ -1,3 +1,4 @@
+import { isolateCodexPoolAccountHeaders } from "../codex/forward-transport-headers";
 import type { NativeResponseControl } from "./responses/native-response-control";
 import type { ServerWebSocket } from "bun";
 import { responsesJsonEventSequence } from "./responses-json-events";
@@ -11,6 +12,8 @@ import { BoundedSseFrameBuffer } from "./sse-frame-buffer";
 import { sseDataPayload as parseSseBlock } from "./sse-payload-rewrite";
 import { safeResponseHeaders } from "./safe-response-headers";
 import type { AudioSocketTarget } from "./audio-dictation";
+import type { CodexWebSocketActivity } from "../codex/websocket-activity";
+import { AGENT_ASSERTION_HEADER } from "../lib/authorization-scheme";
 
 export { safeResponseHeaders } from "./safe-response-headers";
 
@@ -19,6 +22,7 @@ type ResponsesTerminalReporter = (status: ResponsesTerminalStatus) => void;
 type ResponsesPayloadObserver = (payload: string) => void;
 
 export interface WsData {
+  responsesActivity?: CodexWebSocketActivity;
   nativeControl?: NativeResponseControl;
   /** Content-free per-turn explanation; never a model capability assertion. */
   nativeSteeringUnavailable?: string;
@@ -61,7 +65,7 @@ export interface WsData {
   liveUpstreamHandoff?: LiveSidebandUpstreamHandoff;
   /** Once teardown starts, ignore new client frames until the upstream closes. */
   liveClosing?: boolean;
-  /** Schedules one bounded close retry without surrendering native-main ownership. */
+  /** Terminates a stalled close without releasing ownership before transport closure. */
   liveCloseFallback?: ReturnType<typeof setTimeout>;
   /** Turn/account ownership retained for the complete sideband socket lifetime. */
   liveTurnAdmissionLease?: AdmissionLease;
@@ -119,16 +123,22 @@ export class WsSendDroppedError extends Error {
 
 export function selectForwardHeaders(
   headers: Headers,
-  codexOverride?: { accessToken: string; chatgptAccountId: string },
+  codexOverride?: { accessToken: string; chatgptAccountId: string; kind?: "pool" | "main-pool" },
 ): Headers {
   const selected = new Headers();
   for (const name of FORWARD_HEADERS) {
     const value = headers.get(name);
-    if (value) selected.set(name, value);
+    if (value !== null) selected.set(name, value);
   }
   if (codexOverride) {
     selected.set("authorization", `Bearer ${codexOverride.accessToken}`);
     selected.set("chatgpt-account-id", codexOverride.chatgptAccountId);
+    if (codexOverride.kind !== "main-pool") isolateCodexPoolAccountHeaders(selected, codexOverride.chatgptAccountId);
+    else selected.delete("x-oai-attestation");
+  } else {
+    // Kept for the WS turn pipeline, which drops it again everywhere except first-party Direct.
+    const assertion = headers.get(AGENT_ASSERTION_HEADER);
+    if (assertion) selected.set(AGENT_ASSERTION_HEADER, assertion);
   }
   return selected;
 }

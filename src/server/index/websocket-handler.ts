@@ -2,6 +2,8 @@ import { nativeSteeringUnavailableReason, nativeResponseControlMode, type Native
 import { NativeInjectionChannel } from "../responses/native-injection";
 import { NativeSteeringChannel, NativeSteeringError } from "../responses/native-steering";
 import { createNativeSteeringLogObserver } from "../responses/native-steering-log";
+import { reasoningArchiveErrorResponse } from "../responses/reasoning-archive-error";
+import { captureAdmissionPolicy } from "../capture-admission-policy";
 import type { Server, ServerWebSocket } from "bun";
 import {
   LIVE_SIDEBAND_UPSTREAM_OPEN_TIMEOUT_MS,
@@ -18,6 +20,7 @@ import {
   webSocketFrameBytes,
 } from "./live-sideband";
 import { markActivity } from "../../lib/sidecar-tracker";
+import { isReplayRefusalResponse } from "../../lib/upstream-retry";
 import {
   buildWarmupCompletionFrames,
   buildWsErrorFrame,
@@ -89,6 +92,8 @@ import {
 import type { ServeOptionsContext } from "./serve-options";
 import type { RequestMetricsRecorder } from "../request-metrics";
 import { resolveInboundBodyLimitBytes } from "../request-decompress";
+import { responseToolOwnership } from "../responses/response-tool-ownership";
+import { runTurnStateCallerScope } from "../turn-state-handles";
 
 /**
  * The WebSocket half of the Bun.serve options, split out of serve-options.ts to keep that file
@@ -175,7 +180,7 @@ export function createWebsocketHandler(
             return;
           }
           try {
-            sendUpstreamFrame(upstream, raw);
+            sendUpstreamFrame(upstream, raw, ws.data.authContext);
             if (ws.data.liveMaxSessionMs !== undefined && upstream.bufferedAmount > MAX_WS_FRAME_BYTES) {
               closeLiveSideband(ws, 1013, "audio upstream backpressure");
             }
@@ -184,6 +189,8 @@ export function createWebsocketHandler(
           }
           return;
         }
+        if (ws.data.responsesActivity?.closing) return;
+        ws.data.responsesActivity?.touch();
         const rawBytes = typeof raw === "string" ? Buffer.byteLength(raw) : raw.byteLength;
         if (rawBytes > MAX_WS_FRAME_BYTES) {
           sendJsonFrame(ws, buildWsErrorFrame(413, {
@@ -223,6 +230,7 @@ export function createWebsocketHandler(
             if (frame.type === "response.inject") {
               if (!ws.data.nativeControl?.inject) throw new NativeSteeringError("injection_not_supported", "Native injection is disabled or unavailable on this route.");
               ws.data.nativeControl.inject(frame);
+              ws.data.responsesActivity?.acceptResults(frame.input);
               return;
             }
             if (frame.type === "response.steer") {
@@ -230,7 +238,10 @@ export function createWebsocketHandler(
               ws.data.nativeControl.steer(frame);
               return;
             }
-            if (ws.data.nativeControl?.continue(frame)) return;
+            if (ws.data.nativeControl?.continue(frame)) {
+              ws.data.responsesActivity?.acceptResults(frame.input);
+              return;
+            }
           } catch (error) {
             sendJsonFrame(ws, buildWsErrorFrame(400, {
               type: "invalid_request_error",
@@ -294,11 +305,14 @@ export function createWebsocketHandler(
         }
 
         // Only a genuinely admitted turn may receive steering or continuations.
+        const advisorAdmissionPolicy = captureAdmissionPolicy(config, ws.data.admission);
+        const finishActivity = ws.data.responsesActivity?.beginTurn(frame.input);
         ws.data.nativeControl = nativeControl;
         const payload: Record<string, unknown> = { ...frame };
         delete payload.type;
         turnAdmissionLease.bindAbortController(turnAbort);
-        void (async () => {
+        // The frame runs with its own caller slot, which admission fills for turn-state handle binding.
+        void runTurnStateCallerScope(async () => {
           const start = Date.now();
           const requestId = nextRequestLogId(start);
           // Resolved once at the handshake — a frame has no request headers left
@@ -333,6 +347,7 @@ export function createWebsocketHandler(
           try {
             let terminalRecorder: ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined;
             const response = await handleResponses(req, config, logCtx, {
+              advisorAdmissionPolicy,
               ...(wsAdmission ? { admission: wsAdmission } : {}),
               forceEmptyResponseId: true,
               inboundTransport: "websocket",
@@ -346,11 +361,22 @@ export function createWebsocketHandler(
                 terminalRecorder = recorder;
               },
             });
+            // This ingress finalizes directly, without the HTTP deferred logger.
+            // Preserve recorder provenance before framing a synthetic 429 as a WS error.
+            if (isReplayRefusalResponse(response)) {
+              logCtx.causeHint = "transport-ambiguous";
+              logCtx.terminalSource = "synthetic";
+            }
+            const observeLog = nativeControl?.relayActive
+              ? createNativeSteeringLogObserver(logCtx, () => recordFirstOutput(logCtx, start))
+              : (payload: string) => inspectResponseLogSsePayload(logCtx, payload);
+            const providerExecuted = responseToolOwnership(response);
             await sendResponseToWebSocket(ws, response, isCurrent, {
               untilEof: nativeControl?.relayActive === true,
-              onSsePayload: nativeControl?.relayActive
-                ? createNativeSteeringLogObserver(logCtx, () => recordFirstOutput(logCtx, start))
-                : payload => inspectResponseLogSsePayload(logCtx, payload),
+              onSsePayload: payload => {
+                ws.data.responsesActivity?.observePayload(payload, providerExecuted);
+                observeLog(payload);
+              },
               onTerminal: status => {
                 terminalRecorder?.(status, logCtx.terminalHttpStatus);
                 finalizeLog(httpStatusForRequestLogTerminal(status, logCtx), {
@@ -383,6 +409,15 @@ export function createWebsocketHandler(
                 }));
                 return;
               }
+              // A local archive refusal happens before any send. Carry the same sanitized 503
+              // body and stable code as HTTP so no filesystem path reaches the client frame.
+              const archiveError = reasoningArchiveErrorResponse(err);
+              if (archiveError) {
+                finalizeLog(archiveError.status);
+                const body = await archiveError.json() as { error: Record<string, unknown> };
+                sendJsonFrame(ws, buildWsErrorFrame(archiveError.status, body.error));
+                return;
+              }
               finalizeLog(502);
               sendJsonFrame(ws, buildWsErrorFrame(502, {
                 type: "proxy_error",
@@ -392,12 +427,13 @@ export function createWebsocketHandler(
               /* socket already gone or send dropped */
             }
           } finally {
+            finishActivity?.();
             turnAdmissionLease.release();
             if (ws.data.nativeControl === nativeControl) ws.data.nativeControl = undefined;
             if (!logged && turnAbort.signal.aborted) finalizeLog(499);
             if (ws.data.cancel === cancelTurn) ws.data.cancel = undefined;
           }
-        })();
+        });
       },
       close(ws: ServerWebSocket<WsData>, code: number, reason: string) {
         if (ws.data.kind === "remote-workspace-agent") {

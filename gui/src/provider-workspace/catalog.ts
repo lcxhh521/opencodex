@@ -25,6 +25,7 @@
  */
 
 import { isSubscriptionCliProvider } from "./subscription-cli";
+import type { ProviderDiscoverySummary } from "../models-groups";
 
 /**
  * Shape of a single provider value as it appears in the proxy config map.
@@ -58,11 +59,15 @@ export interface WorkspaceProvider {
     minIntervalMs?: number;
     maxConcurrentRequests?: number;
     models?: Record<string, { requestsPerMinute?: number; minIntervalMs?: number; maxConcurrentRequests?: number }>;
+    keySelection?: "active" | "round-robin";
+    keys?: { requestsPerMinute?: number; minIntervalMs?: number; maxConcurrentRequests?: number };
   };
   /** Codex account routing mode for the canonical `openai` forward provider. */
   codexAccountMode?: "direct" | "pool";
   /** Derived state of the two xAI Grok Responses model-adapter entries. */
   xaiResponsesOptInState?: boolean | "mixed";
+  initialModelSelection?: { status: "pending" | "ready" | "all-off"; modelCount?: number };
+  discovery?: ProviderDiscoverySummary;
 }
 
 /** Three-way pricing/ownership tier for a ready provider row. */

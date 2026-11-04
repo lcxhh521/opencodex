@@ -86,12 +86,12 @@ route-specific results rather than repeating this table.
 | `POST /api/grok/reset-coupons/consume` | Redeem an eligible reset coupon. Body `{ accountId?, tokenId?, operationId? }`. Optional `operationId` (UUIDv4) makes redemption idempotent: repeating the same ID replays the durable result without double-redemption. | 400 invalid JSON/UUID; 401 unauthenticated; 409 `operation_id_owned_by_another_account` / `coupon_unavailable` / `operation_token_mismatch` / `operation_state_changed` / `attempt_in_progress` / `attempt_unresolved`; 502 upstream error; 503 ledger capacity / `ledger_unavailable`; 500 `attempt_mark_failed` |
 | `GET /api/anthropic/reset-grants?accountId=...` | Read the Claude usage-limit reset grants of one Anthropic OAuth account: eligibility, each grant's resets left, validity window, and the windows it clears, plus any unconfirmed attempt still retryable | 400 no matching account; 401 re-authentication needed; 502 upstream unavailable |
 | `POST /api/anthropic/reset-grants/consume` | Spend one reset grant. Body `{ accountId, grantId, operationId }`; `operationId` is a UUIDv4 sent upstream as the request ID, so repeating it retries the same claim. Requires a dashboard session. A settled `reset` lifts the account's local cooldown only when it is a quota refusal recorded before the claim was first journaled and the windows the grant reported cleared cover every window that refusal named (both windows when it named none). A refusal recorded while the claim was in flight, an entitlement refusal, or an uncovered window stays, including on a same-id replay. The cached quota is dropped and usage is reread with a fresh request, so the pool can select the account before the old deadline. Model-family exclusions stay until that reread proves a family is no longer rejected. | 400 invalid body; 401 re-authentication needed; 403 `session_required`; 409 `grant_not_usable`, `in_flight`, `unresolved_prior_operation`, `unknown_outcome_expired`, `operation_identity_mismatch`; 500 `journal_write_failed`; 502 `unknown_outcome`; 503 journal busy, unavailable, or full |
-| `GET, PUT /api/claude-desktop` | Read or persist the Claude Desktop routed/native profile | 400 invalid or unavailable assignment |
+| `GET, PUT /api/claude-desktop` | Read or persist the Claude Desktop routed/native profile and its model visibility. PUT requires a valid `profile`, including when setting or clearing `visibility` (`visibility`: omit to keep, `null` to clear); a visibility-only body returns 400 | 400 missing/invalid profile, invalid or unavailable assignment, invalid visibility, or a visibility that hides every available model; 409 profile or supplied visibility changed during discovery/save |
 | `POST /api/claude-desktop/apply` | Write the saved profile to Claude Desktop's managed config | 400/500 write failure |
-| `GET, POST /api/codex/desktop-compatibility/certificate` | Inspect or explicitly prepare Windows compatibility certificate trust | 403 local dashboard required for POST; 409 stale, busy, or incomplete state |
-| `GET, POST /api/codex/desktop-compatibility/runtime` | Inspect or explicitly start, stop, launch, or run a bounded native compatibility trial | 403 local dashboard required for POST; 409 unsupported build, untrusted certificate, or incomplete state |
-| `GET, POST /api/codex/desktop-compatibility/settings` | Read or save the next-start observation preference with its current revision | 403 local dashboard required for POST; 409 stale, invalid, or unconfirmed configuration |
-| `GET /api/claude-desktop/status` | Inspect saved-versus-applied profile and Desktop health | 400 status read failure |
+| `GET, POST /api/codex/desktop-compatibility/certificate` | Inspect or explicitly prepare Windows compatibility certificate trust | 403 paired local dashboard required for POST; 409 stale, busy, or incomplete state |
+| `GET, POST /api/codex/desktop-compatibility/runtime` | Inspect or explicitly start, stop, launch, or run a bounded native compatibility trial | 403 paired local dashboard required for POST; 409 unsupported build, untrusted certificate, or incomplete state |
+| `GET, POST /api/codex/desktop-compatibility/settings` | Read or save the next-start observation preference with its current revision | 403 paired local dashboard required for POST; 409 stale, invalid, or unconfirmed configuration |
+| `GET /api/claude-desktop/status` | Inspect saved-versus-applied profile, Desktop health, and `appliedModels: { name: string; label: string }[] \| null`. This is the selected profile's on-disk static list, not a verified observation of the running Desktop process; `null` means no applied gateway profile or no readable static list (including discovery-only mode), not an empty list | 400 status read failure |
 | `GET, PUT /api/claude-code` | Read or update Claude Code gateway, auth-mode, model-map, context, agent, and sidecar settings | 400 invalid field or shape |
 
 `tokenId`, when supplied, must be a non-empty string; invalid values return `400 invalid_token_id` before credentials are read or the ledger is opened. Within the 30-day retention window, a same-`operationId` retry that omits `accountId` uses the recorded account, even if the active account changed. An executable `open` retry that omits `tokenId` uses its recorded token. An explicit different account or token is still refused. A definitive failure clears a matching speculative pending hold in the dashboard, allowing a new explicitly confirmed attempt; actual unknown outcomes remain held.
@@ -243,7 +243,7 @@ completes.
 | Method and path | Purpose | Notable errors |
 | --- | --- | --- |
 | `GET /api/combos` | List normalized combos and their public model ids | Catalog work can return `catalog_busy` |
-| `PUT /api/combos` | Create, replace, or rename one combo | 400 invalid id, target, config, rename, or ordinary collision; 409 Codex-account namespace collision |
+| `PUT /api/combos` | Create, replace, or rename one combo | 400 invalid id, target, config, rename, or ordinary collision (a combo validation 400 also names the first invalid top-level field in `field`, for example `targets` or `decisionProvider`); 409 Codex-account namespace collision |
 | `DELETE /api/combos?id=...` | Delete one combo and clear its selection/cooldown state | 400 missing id; 404 unknown combo |
 
 See [Combos](/guides/combos/) for target strategies, cooldowns, aliases, and routing failures.
@@ -253,7 +253,7 @@ See [Combos](/guides/combos/) for target strategies, cooldowns, aliases, and rou
 | Method and path | Purpose | Notable errors |
 | --- | --- | --- |
 | `GET /api/codex-prompt` | Read the prompt-layer snapshot: layers, base variants, selection, and drift state | — |
-| `GET /api/codex-prompt/text` | Probe the model-visible prompt text via `codex debug prompt-input` | Fail-soft: an unavailable probe degrades to a status in the body, not an HTTP error |
+| `GET /api/codex-prompt/text` | Probe the model-visible prompt text via `codex debug prompt-input`; one caller budget includes metadata, shared wait and execution; synchronous metadata is checked for expiry after it returns | Fail-soft: an unavailable probe degrades to a status in the body, not an HTTP error; timeout preserves locally read base instructions; earlier external cancellation stays cancelled |
 | `PUT /api/codex-prompt/toggle` | Enable or disable one toggleable layer | 400 invalid body or unknown layer; 409 `stale_revision`, `layer_not_toggleable` |
 | `PUT /api/codex-prompt/custom` | Replace the custom-layer set | 400 invalid body, `invalid_characters`, `body_too_large` when a normalized UTF-8 layer exceeds 65,536 bytes, `composed_too_large` over 131,072 bytes; 409 `stale_revision` |
 | `PUT /api/codex-prompt/base/select` | Select the default base prompt or one stored variant | 400 invalid body, `unknown_layer` for an id matching no stored variant; 409 `stale_revision`, `developer_instructions_not_owned` when the current base is external |
@@ -270,16 +270,18 @@ See [Codex prompt layers](/guides/codex-prompt/) for the layer model and the key
 | `GET /api/config` | Return the redacted, management-safe configuration DTO | — |
 | `PUT /api/config` | Disabled full-config replacement guard | 405; use focused endpoints instead |
 | `GET, PUT /api/settings` | Read runtime/startup settings or update auto-start, stream mode, app-owned memory budget, and `codexAccountPickerEnabled` | 400 invalid, non-object, or empty update |
+| `GET, PUT /api/native-reasoning-retention` | Read resolved model/account reasoning-retention booleans; partial PUT preserves omitted fields, JSON `null` restores defaults. See [native reasoning retention](/reference/configuration/server/#native-reasoning-retention). | 400 unknown field, invalid type or non-object/non-null body |
+| `GET, PUT /api/workflow-budget/settings` | Read the effective per-task workflow ceilings with defaults and allowed ranges; partial PUT preserves omitted fields, JSON `null` restores defaults. See [workflow limits](/reference/configuration/server/#workflow-limits). | 400 unknown field, non-integer or out-of-range value, or non-object/non-null body |
 | `GET /api/startup-health` | Read cached service/shim startup health | — |
 | `POST /api/startup-action` | Install or repair the service or Codex shim | 400 invalid action; 500 action failure |
 | `GET, POST /api/windows-tray` | Read Windows tray state or install/start/stop/uninstall it | 400 unsupported platform/action; 500 operation failure |
 | `GET /api/diagnostics/project-config` | Read cached project configuration warnings | — |
 | `POST /api/sync` | Sync the current model catalog into Codex | 500 failed sync |
 | `GET /api/update/check` | Asynchronously check the `latest` or `preview` package channel and refresh the package cache on success | 400 invalid tag |
-| `POST /api/update/run` | Asynchronously check a fresh package version, then start an update job, optionally followed by restart | 400 invalid body; job-specific conflict/error status |
+| `POST /api/update/run` | Asynchronously check a fresh package version, then start an update job, optionally followed by restart | 400 invalid body; 409 `update_restart_unsupervised` when the proxy runs inside a systemd unit other than OpenCodex's own user service, or the worker cannot leave the service cgroup (with or without restart, since the update stops the proxy first); job-specific conflict/error status |
 | `GET /api/update/status` | Poll an update job by id | 404 unknown job |
 | `GET, PUT /api/sidecar-settings` | Read or update web-search and vision sidecar model/backend settings | 400 invalid shape, backend, or limit |
-| `GET, PUT /api/shadow-call-settings` | Read or update shadow-call interception settings | 400 invalid shape or value |
+| `GET, PUT /api/shadow-call-settings` | Read or update shadow-call interception settings, including `sourceModels`; GET also returns the runtime-owned `sourceModelOptions` inventory | 400 invalid shape or value, including an empty, duplicate, whitespace-bearing, or provider-qualified source prefix, or more than 32 prefixes / 128 characters per prefix; source-list failures carry `code: shadow_call_source_invalid`, target conflicts `code: shadow_call_target_invalid` |
 
 ### Logs, usage, and storage
 
@@ -290,10 +292,11 @@ upstream model evidence remains absent rather than being inferred from the reque
 
 Failed request rows can include bounded `upstreamErrorType`, `upstreamErrorCode`, and
 `upstreamRequestId` diagnostics. On the Codex upstream WebSocket path, a bare error followed by
-EOF retains recognized rate-limit or overload codes in the synthesized failed terminal.
-Request logs record these as 429 for `rate_limit_exceeded` / `rate_limit_error`, or 503 for
-`server_is_overloaded` / `overloaded_error`. A recognized type without a code uses the same
-status. On the streaming path, an explicit unknown code records the 5xx status the Codex
+EOF retains recognized rate-limit, overload, or client-refusal codes in the synthesized failed terminal.
+Request logs record these as 429 for `rate_limit_exceeded` / `rate_limit_error`, 503 for
+`server_is_overloaded` / `overloaded_error`, and 400/401/403/404 for `invalid_request_error` /
+`authentication_error` / `permission_error` / `not_found_error`. A recognized type without a code
+uses the same status. On the streaming path, an explicit unknown code records the 5xx status the Codex
 WebSocket wrapper states as a top-level integer `status` or `status_code` (one of the two, not
 both); otherwise, and for buffered JSON callers, it remains a generic 502 failure. The client
 terminal keeps `upstream_server_error` for unknown codes either way. Bare-error status is provisional:
@@ -471,11 +474,28 @@ Explicit all-zero user rates mean a known-zero estimate; **Reset to automatic** 
 override and restores the usual catalog fallback. These remain display estimates, not bills.
 
 `GET /api/providers/{provider}/model-costs` returns `{ provider, modelCosts }`, with sanitized
-four-rate entries keyed by exact upstream model ID. `PUT` on the same route accepts
-`{ modelId, cost }`, where `cost` is `{ input, output, cacheRead, cacheWrite }` or `null` to reset.
+four-rate entries and their optional `promptLengthPricing` policy, keyed by exact upstream model ID.
+`PUT` on the same route accepts `{ modelId, cost }`, where `cost` contains
+`{ input, output, cacheRead, cacheWrite }` and optionally `promptLengthPricing`, or is `null` to reset.
 All four rates must be finite numbers from 0 through 1,000,000, in USD per 1M tokens.
 Unknown fields and malformed rates are rejected. A write preserves other models' overrides
 and returns `{ ok: true, provider, modelId, cost }`; reset returns `cost: null`.
+
+The **Model price** dialog offers **Automatic**, **Flat rate**, and **Custom threshold**
+prompt-length pricing. Automatic (also the default when the policy is absent) retains catalog
+context rules with the saved base rates. Flat disables context adjustments. Custom selects four
+absolute alternative rates using one positive safe-integer `thresholdTokens` and `comparison`
+(`"gt"` for `>`, `"gte"` for `≥`). All prompt tokens count, including cache reads and writes;
+output does not. The selected rates apply to the whole request, including output, not just the
+excess tokens. Custom replaces the catalog context rule both below and above its threshold.
+Custom rates are standard-speed rates: an applicable Fast/Priority adjustment applies once after
+rate selection and follows the catalog's Priority relation for that model. Only a model whose
+catalog relation is `lower-bound` reports `priorityLowerBound: true`; a model with no catalog rule
+applies any Priority multiplier once.
+`{ "mode": "automatic" }` is accepted on write and stored as an absent policy, so GET and PUT
+receipts never contain it.
+**Reset to automatic** removes the entire override, including base rates and the policy.
+See the [configuration example](../configuration/providers/#prompt-length-pricing).
 
 ```bash
 ocx models price ollama/custom-model --json
@@ -588,9 +608,9 @@ Labels are read on login/import or refresh, never inferred from quota percentage
 | --- | --- | --- |
 | `GET /api/oauth/providers` | List providers with public OAuth login flows | — |
 | `GET /api/key-providers` | List providers configured through API-key login | — |
-| `POST /api/oauth/login` | Start an OAuth login or account-add flow | 400 unknown/invalid provider; `oauth_mutation_busy` |
-| `POST /api/oauth/login/code` | Submit a manual callback URL or authorization code | 400 invalid provider/code; `oauth_mutation_busy` |
-| `POST /api/oauth/login/cancel` | Cancel a public in-progress OAuth flow | 400 unknown provider |
+| `POST /api/oauth/login` | Start an OAuth login or account-add flow. `mode: "code"` starts a code-display login (Anthropic only) and returns `mode`, `flowId`, `expiresAt` | 400 unknown/invalid provider, invalid `mode`, `code_mode_unsupported`; `oauth_mutation_busy` |
+| `POST /api/oauth/login/code` | Submit a manual callback URL or authorization code. For a code-display flow (with `flowId`) returns the token-exchange outcome `{ok, account}` / `{ok:false, error}` | 400 invalid provider/code, `state_mismatch`, `invalid_or_expired_code`, `provider_unreachable`, `malformed_input`; 409 `no_pending_login`; `oauth_mutation_busy` |
+| `POST /api/oauth/login/cancel` | Cancel a public in-progress OAuth flow or dismiss its settled failure; an optional `flowId` names one code-display flow (a flow of another provider is refused) | 400 unknown provider |
 | `GET /api/oauth/status` | Poll one provider's OAuth flow | 400 unknown provider |
 | `POST /api/oauth/logout` | Remove the selected provider credential | 400 unknown provider; `oauth_mutation_busy` |
 | `GET /api/oauth/accounts` | List masked accounts; Anthropic and generic OAuth account rows include their `paused` state. Kiro rows include `autoSelectable` and a closed `skipReason` when excluded from automatic selection; an active singleton may still send. Quota remains opt-in. | 400 invalid provider |
@@ -605,6 +625,9 @@ Labels are read on login/import or refresh, never inferred from quota percentage
 | `PUT /api/providers/keys/active` | Select a provider's active key | 400 invalid input; 404 provider/key missing |
 | `PUT /api/providers/keys/alias` | Set or clear a provider-key alias | 400 invalid input; 404 provider/key missing |
 | `GET, POST, PATCH, DELETE /api/keys` | List, create, edit, or delete data-plane admission keys | 400 invalid body/id; 404 key missing |
+
+`POST /api/oauth/login/cancel` can also dismiss the selected settled failed login attempt. It leaves stored credentials and successful login results intact; status then reports the remaining flow or idle. Cancelling an in-progress attempt still records its cancelled outcome.
+
 
 For Anthropic, `routes` is an ordered array of `{name, match, accounts, fallback?}` rules on both settings endpoints. GET and write echoes include `routes` (`null` when absent); unified DTOs expose `routes: null` for other kinds. A supplied `routes` on another kind is rejected. Omission preserves rules, `[]` matches nothing, and `null` clears them. The `accounts` values are stored IDs; removed IDs remain valid in a rule so re-adding an account can restore routing. Management responses retain valid configured names; request logs identify a match only as `route:#<n>` (1-based list position). If a hand-edited stored rule is invalid, both settings GETs return `routes: null` and a `routesError` diagnostic instead of presenting that rule as valid; the stored value remains available for correction. Valid or absent rules omit `routesError`.
 
@@ -636,6 +659,23 @@ API page. The CLI drives these routes with `ocx api protocols`, `ocx api explain
 [API surfaces](/reference/configuration/server/#api-surfaces-apisurfaces) for how the Messages
 setting interacts with `claudeCode.enabled` across upgrades and downgrades.
 
+### Home identity and the served-by header
+
+`GET /healthz` includes `instanceId`, this install's opaque Home id: `home_` followed by 32 hex
+characters, generated at random once per install. It is the same value as `producer.homeId` in
+`GET /api/quota-pool`, it stays the same across restarts, and it is never a hostname or derived from
+one. Every response to `GET /v1/models` carries the same value in the `x-opencodex-served-by`
+header, so a client can tell which Home answered without reading logs. A Remote Link Child relays the
+Home's header unchanged, and a Hub-mode client's Codex reads the Hub's response directly, so on any
+device the header names the Home that served the model list. `GET /readyz` lists
+`served-by-header` in `features` when the build sends it.
+
+Right after a fresh install starts, before its identity file exists, or when that file is
+unreadable, both the `instanceId` field and the header are left out; an empty value is never sent.
+Deleting `quota-pool-identity.json` from the OpenCodex home rotates the id together with every
+quota-pool account reference when the proxy next starts; a running proxy keeps reporting the id it
+already read.
+
 ### Providers
 
 | Method and path | Purpose | Notable errors |
@@ -646,7 +686,10 @@ setting interacts with `claudeCode.enabled` across upgrades and downgrades.
 | `DELETE /api/providers?name=...` | Delete a provider, reassigning the default when possible | 404 unknown provider; 409 `last_provider`; 409 `provider_has_dependent_combos` |
 | `POST /api/providers/test?name=...` | Perform a bounded live provider connectivity/model-discovery probe | 404 unknown provider; failures are normally returned as `ok: false` evidence |
 | `GET /api/provider-quotas` | Read provider quota reports; `refresh=1` forces refresh | — |
+| `GET /api/quota-pool` | Read the passive `ocx.quota-pool/1` account quota pool (per-account and pooled windows, opaque account references) from cached evidence only; never probes or refreshes, and ignores `refresh`. Pooled windows are a plan-weighted estimate over the routable accounts' readings from the last 30 minutes, plus an `availability` window while no account can run. Also readable from a Remote Link Child or Hub client at `/api/machine/hub-relay/api/quota-pool` | — |
 | `GET /api/quota-resets` | List recently detected quota-window resets and whether detection is enabled; `limit=<n>` caps the count | 400 invalid `limit` |
+| `GET /api/fallback` | Read the `ocx.fallback/1` fallback state: effective global switches, provider and route overrides, devices with local fallback permission, and the last 20 fallbacks taken or refused. Also readable from a Remote Link Child at `/api/machine/hub-relay/api/fallback` (link aliases omitted) | — |
+| `PUT /api/fallback` | Set or clear switches: one write `{ scope: "global"\|"provider"\|"route"\|"device", key?, setting: "model"\|"provider"\|"localFallback", value: true\|false\|null }`, or `{ writes: [ … ] }` with up to 8 applied in one config mutation; `localFallback` is per device; a device key may be a link alias. Returns the new state | 400 invalid body; 404 `unknown_device` (nothing written); 409 `config_unavailable` |
 | `GET, PUT /api/provider-context-caps` | Read or update global, all-provider, or one-provider context caps | 400 invalid request; 404 unknown provider |
 | `GET /api/provider-presets` | Return GUI provider presets derived from the runtime registry | — |
 
@@ -655,6 +698,16 @@ accepts only a boolean or `null` to clear this setting; omission preserves it. A
 also preserves an omitted setting, including the latest stored `false`; an explicit submitted
 boolean wins. See [Context windows on custom providers](/reference/configuration/providers/#context-windows-on-custom-providers)
 for its default-off, custom-provider-only behavior.
+
+When Antigravity's quota-summary endpoint has no usable response, quota reports may also include
+per-model Cloud Code Assist usage windows when the model-discovery response provides them. These
+measurements are diagnostic; an absent model window does not establish that the model is unavailable.
+
+With `quota=1`, an Anthropic or Antigravity account row whose probe returned no quota carries
+`quotaUnavailable: true` and, when the cause is known, a closed `quotaFailure` code:
+`account_unavailable` (sign the account in again), `access_denied`, `rate_limited`, `timeout`,
+`transport_error`, `upstream_error` or `response_unusable` (retry later), among others. The code
+never includes upstream text, and a quota failure never changes the row's `health`.
 
 The provider context-cap response includes `caps` (active limits) and `values` (last selected
 values, retained while disabled). Enabling a provider without `value` restores its selection,
@@ -721,7 +774,7 @@ the 503 without reporting model capacity; provider overload errors retain their 
 | `POST /api/system/restart` | Begin a drain-aware process restart without removing client injection; optional JSON `drainGraceMs` explicitly shortens the default 60s grace | Returns 202; repeated calls report the existing grace; 400 invalid body or grace |
 | `POST /api/stop` | Stop the service, restore native Codex, remove managed Grok injection, and drain the proxy | 409 service ownership conflict; 409 `respawnable_service` when a Windows Task Scheduler wrapper could respawn the proxy and the caller is not `ocx stop` (nothing is changed); 409 `self_unload_service` when this proxy is running as the installed launchd/systemd service, because stopping the manager from inside it would end the process before native Codex is restored — run `ocx stop` instead (nothing is changed); 409 when the installed manager refuses to stop; 409 `service_state_unknown` when the Task Scheduler state cannot be read (nothing is changed; repair the query and retry) |
 | `GET /api/system/codex-app-server` | Report whether running Codex app-servers predate the current model catalog | — |
-| `POST /api/system/codex-restart` | Refresh the catalog, then restart stale Codex app-servers and fully quit and relaunch the Codex desktop app so the model picker reloads. When the proxy itself is running inside the Codex app, the desktop restart is refused rather than handed off. | Returns 200 with `code: partially_stopped` when a target survives |
+| `POST /api/system/codex-restart` | Refresh the catalog, then restart Codex app-servers. A running Codex desktop app is given a restart attempt so the model picker can reload; the `desktopApp` response fields report a refusal, surviving targets, or a failed relaunch. A shell newer than the catalog is still reported as `desktopApp.pickerState: "unknown"`, because its start time cannot prove which `model_catalog_json` binding it loaded; an earlier sync may have rebound an already-existing catalog. A shell no newer than the catalog, or one whose binding this request changed, is `stale`. A closed desktop returns `desktopApp.reason: "no_targets"`; its `pickerState` may be `not_running`, or `stale` when this request changed the catalog binding. When the proxy itself is running inside the Codex app, the desktop restart is refused rather than handed off. | Returns 200 with `code: partially_stopped` when a target survives |
 
 ### Codex authentication delegation
 
@@ -748,10 +801,12 @@ manager. Its routes are:
 | `POST /api/codex-auth/accounts/clear-cooldown` | Clear runtime cooldown for one account or all accounts | 400 invalid id |
 | `GET, PUT /api/codex-auth/active` | Read or select the active account | 400 invalid or missing account; 409 paused/legacy-row conflict or `account_selection_unavailable` |
 | `PUT /api/codex-auth/auto-switch` | Set the global quota threshold with `{ threshold }`, or an account override with `{ id, threshold }`; `null` restores global inheritance, and `__main__` selects the Desktop login | 400 invalid id/threshold; 404 missing account |
+| `GET /api/codex-auth/preserve-signed-in` | Read policy, current `affectedAccountIds`, `identityKnown`, `nextAccountId`, `nextUsesSignedInQuota` (actual next choice, even when disabled), `pinnedAccountId`, `bindings`, `priorityFailbackEnabled`, and `fallbackConsumesSignedInQuota` | 503 native profile busy/unreadable |
+| `PUT /api/codex-auth/preserve-signed-in` | Strict `{ enabled: boolean, applyToBound?: boolean }`; explicit `applyToBound: true` requires enabled, releases affected bindings/pin for next request; reports `releasedPin` | 400 invalid body; 503 native profile busy/unreadable |
 | `PUT, PATCH /api/codex-auth/pool-strategy` | Update Codex account-pool selection strategy | 400 invalid strategy/config |
 | `PUT /api/codex-auth/failover` | Set the account failover threshold | 400 invalid threshold |
 | `GET /api/codex-auth/quota` | Read cached quota state by account | — |
-| `GET /api/codex-auth/low-quota-events?limit=20` | Read only this server’s last 0–100 low-quota log/notice and pause-save events (default 20); includes account id and status (`logged` for the default log-only alert; `delivered` for a successful injected notice sink; `succeeded` for a completed pause save) | 400 invalid limit; management authentication required |
+| `GET /api/codex-auth/low-quota-events?limit=20` | Read only this server’s last 0–100 low-quota log/notice and pause-save events (default 20); includes account id and status (`logged` for the default log-only alert or a host without a supported notifier; `delivered` when the opted-in OS notifier accepted the notice; `failed` when it failed or timed out; `cancelled` when its episode ended first; `succeeded` for a completed pause save) | 400 invalid limit; management authentication required |
 | `GET /api/codex-auth/reset-credits` | Inspect reset-credit eligibility for an account | 400 missing account id; upstream status passthrough; 500 lookup failure |
 | `POST /api/codex-auth/reset-credits/consume` | Consume an eligible reset credit. Optional `operationId` (UUIDv4) makes the redemption idempotent: the same id replays one durable outcome instead of spending a second credit. | 400 missing account id or invalid `operationId`; 409 `identity_mismatch` when the id belongs to another account; upstream status passthrough; 503 `server_busy`, `capacity`, or `unavailable`; 500 consume failure |
 | `POST /api/codex-auth/login` | Start Codex login or reauthentication | 400 invalid request; conflict/busy login states |
@@ -812,13 +867,16 @@ same selector is restored if that account id is added again.
 
 `GET /api/codex/desktop-compatibility/certificate` returns public certificate status:
 support, state, fingerprint, expiry, renewal notice, trust observation and any active operation.
+The certificate response also reports `mutationAuthorized` for the current session and ingress;
+this flag is read-only guidance, and each mutation checks authorization again.
 It never generates a key, decrypts private material or registers OS trust. Certificate trust alone
 does not mean a compatibility relay is running or the private key has been verified in this process.
 
 POST accepts `action: "prepare" | "trust" | "remove-trust" | "renew"` and `confirmed: true`.
 Trust actions also require the exact uppercase SHA-256 `fingerprint` returned by status.
-These mutations require a GUI-session principal from trusted loopback ingress; an admin token alone
-receives 403. They are intended for a local confirmation flow, not unattended certificate enrollment.
+These mutations require an operator-paired GUI-session principal from trusted loopback ingress;
+an admin token or an automatically issued loopback GUI session receives 403. They are intended for
+a local confirmation flow, not unattended certificate enrollment.
 
 Prepare stores a constrained 30-day authority with a Windows CurrentUser-DPAPI-protected private key.
 Subsequent preparations reuse it. Trust actions never create missing state or silently replace an
@@ -838,13 +896,17 @@ CurrentUser protection does not isolate secrets from other processes running as 
 
 ## Experimental Windows compatibility runtime
 
-`GET /api/codex/desktop-compatibility/runtime` is an inert status read. POST requires a
-local GUI session and `{ action, confirmed: true }`, where action is `start`, `stop`,
+`GET /api/codex/desktop-compatibility/runtime` is an inert status read. POST requires an
+operator-paired local GUI session and `{ action, confirmed: true }`, where action is `start`, `stop`,
 `observe`, `launch`, or `apply`. Only `apply` additionally requires `accountWideConsent: true`.
 The endpoint is experimental. The dashboard exposes it under **Codex Set → Desktop compatibility**;
 the **Resume observation when OpenCodex starts** toggle saves the optional
 `desktopCompatibility.startOnProxyStart` preference. OpenCodex managed client mode does not offer these
 local controls or forward them to the shared hub.
+Open the dashboard at the configured loopback origin. Before changing compatibility settings,
+use the panel's `ocx gui pair --origin "<dashboard-origin>"` command and submit its one-use pairing
+code in the panel. Controls stay disabled until the new local session is verified; pairing does
+not itself change certificate trust, runtime state or the auto-start preference.
 
 Start requires an already prepared, trusted certificate, a freshly verified native file-based
 ChatGPT login and the assessed Codex Windows build `26.924.2738.0`. It begins in Observe mode.
@@ -888,7 +950,8 @@ Failed cleanup reports `cleanup-required`; it does not claim that the runtime is
 system proxy settings and application files are not modified by these runtime commands.
 
 The separate settings endpoint returns `{ startOnProxyStart, revision }`. POST requires
-`{ startOnProxyStart: boolean, revision, confirmed: true }` from a local GUI session. A stale
+`{ startOnProxyStart: boolean, revision, confirmed: true }` from an operator-paired local GUI
+session on trusted loopback ingress; an unpaired session receives 403. A stale
 revision refuses the write; a valid update preserves unrelated config fields and verifies
 the persisted result. This preference affects the next proxy start, never current runtime
 state, app launch or an Apply trial. An uncertain response must be followed by GET, not an

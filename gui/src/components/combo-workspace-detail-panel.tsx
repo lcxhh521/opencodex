@@ -49,6 +49,7 @@ export function DetailPanel({
   providers,
   models,
   capabilityModels = models,
+  visionEnabled,
   onBack,
   onSaved,
   onRequestRemove,
@@ -70,6 +71,8 @@ export function DetailPanel({
   providers: ProviderOption[];
   models: ModelOption[];
   capabilityModels?: ModelOption[];
+  /** Vision Sidecar enabled state; undefined = unknown, renders no warning. */
+  visionEnabled?: boolean;
   onBack?: () => void;
   onSaved: (item: ComboItem) => void;
   onRequestRemove?: () => void;
@@ -103,7 +106,7 @@ export function DetailPanel({
   const [copied, setCopied] = useState(false);
   const dirty = !draftEquals(draft, baseline);
   const allTargetsExhausted = comboQuotaState(draft.targets, providerQuotaStates, providerMap) === "exhausted";
-  const baselineSyncKey = JSON.stringify([baseline.id, baseline.alias, baseline.nativeAlias, baseline.displayName, baseline.strategy, baseline.stickyLimit, baseline.defaultEffort, baseline.imageInput, baseline.reasoningEffortMode, baseline.decisionProvider, baseline.decisionModel, baseline.decisionTimeoutMs, baseline.targets.map(t => [t.provider, t.model, t.weight, t.reasoningEfforts, t.modelProfile])]);
+  const baselineSyncKey = JSON.stringify([baseline.id, baseline.alias, baseline.nativeAlias, baseline.displayName, baseline.strategy, baseline.stickyLimit, baseline.defaultEffort, baseline.imageInput, baseline.reasoningEffortMode, baseline.decisionProvider, baseline.decisionModel, baseline.decisionTimeoutMs, baseline.sessionPin === undefined, baseline.sessionPin, baseline.targets.map(t => [t.provider, t.model, t.weight, t.reasoningEfforts, t.modelProfile])]);
   const effortMap = useMemo(() => {
     const map = new Map<string, string[] | undefined>();
     for (const model of capabilityModels) {
@@ -167,7 +170,7 @@ export function DetailPanel({
       displayName,
       model: comboPublicModelId(trimmedId, alias),
       // The server keeps these only for JEV, so the saved baseline must not carry stale ones.
-      ...(draft.strategy === "jev" ? {} : { decisionProvider: null, decisionModel: null, decisionTimeoutMs: null }),
+      ...(draft.strategy === "jev" ? {} : { decisionProvider: null, decisionModel: null, decisionTimeoutMs: null, sessionPin: undefined }),
     };
     const renameFrom = !isCreate && trimmedId !== baseline.id ? baseline.id : undefined;
     try {
@@ -355,6 +358,7 @@ export function DetailPanel({
                 decisionProvider={draft.decisionProvider ?? null}
                 decisionModel={draft.decisionModel ?? null}
                 decisionTimeoutMs={draft.decisionTimeoutMs ?? null}
+                sessionPin={draft.sessionPin}
                 disabled={busy}
                 onChange={(patch) => updateDraft((d) => ({ ...d, ...patch }))}
               />
@@ -411,6 +415,7 @@ export function DetailPanel({
               models={capabilityModels}
               imageInput={draft.imageInput ?? "auto"}
               reasoningEffortMode={draft.reasoningEffortMode ?? "strict"}
+              visionEnabled={visionEnabled}
               disabled={busy}
               onChange={(patch) => updateDraft((d) => ({ ...d, ...patch }))}
             />

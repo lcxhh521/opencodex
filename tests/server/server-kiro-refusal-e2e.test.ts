@@ -10,6 +10,7 @@ import { createRequestExecutionBudget } from "../../src/lib/request-execution-bu
 import { ADAPTER_REGISTRY } from "../../src/adapters/registry";
 import { encodeMessage } from "../../src/lib/eventstream-decoder";
 import { KIRO_COMPLETION_TOOL_NAME } from "../../src/adapters/kiro-constants";
+import { clearComboSelectionState, clearComboTargetCooldowns } from "../../src/combos";
 import { clearGenericFailoverHealth } from "../../src/oauth/generic-account-failover";
 import { clearAccountQuotaCache } from "../../src/providers/quota";
 import { kiroAccountEvidence, noteKiroMonthlyRefusal } from "../../src/providers/kiro-usage";
@@ -32,11 +33,15 @@ beforeEach(() => {
   process.env.KIRO_REGION = "us-east-1";
   clearAccountQuotaCache();
   clearGenericFailoverHealth();
+  clearComboSelectionState();
+  clearComboTargetCooldowns();
 });
 afterEach(() => {
   globalThis.fetch = realFetch;
   clearAccountQuotaCache();
   clearGenericFailoverHealth();
+  clearComboSelectionState();
+  clearComboTargetCooldowns();
   if (oldHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = oldHome;
   if (oldRegion === undefined) delete process.env.KIRO_REGION;
@@ -188,35 +193,172 @@ describe("Kiro refusal recovery through Responses", () => {
     } finally { ADAPTER_REGISTRY.kiro.create = originalCreate; await server?.stop(true); }
   });
 
-  for (const [status, reason] of [[400, "MONTHLY_REQUEST_COUNT"], [403, "TEMPORARILY_SUSPENDED"],
+  for (const [status, reason] of [[400, "MONTHLY_REQUEST_COUNT"],
+    [400, "OVERAGE_REQUEST_LIMIT_EXCEEDED"], [429, "OVERAGE_REQUEST_LIMIT_EXCEEDED"], [403, "TEMPORARILY_SUSPENDED"],
     [429, "USER_REQUEST_RATE_EXCEEDED"]] as const) {
-    test(`streaming Kiro ${status} ${reason} rotates with paired bearer profile and region`, async () => {
-      const [a] = await seed();
-      saveConfig(config());
-      const observed: Array<{ url: string; auth: string | null; profile: string | null }> = [];
-      globalThis.fetch = (async (input, init) => {
-        const url = input instanceof Request ? input.url : String(input);
-        if (url.startsWith("https://runtime.") && url.endsWith(".kiro.dev/")) {
-          observed.push({ url, auth: new Headers(init?.headers).get("authorization"),
-            profile: new Headers(init?.headers).get("x-amzn-kiro-profile-arn") });
-          if (observed.length === 1) return new Response(JSON.stringify({ reason }), { status });
-          return answer("served by b");
-        }
-        return realFetch(input, init);
-      }) as typeof fetch;
-      const server = startServer(0);
-      try {
-        const response = await post(server, true);
-        expect(response.status).toBe(200);
-        expect(await response.text()).toContain("served by b");
-        expect(observed).toEqual([
-          { url: "https://runtime.us-east-1.kiro.dev/", auth: "Bearer access-a", profile: aProfile },
-          { url: "https://runtime.eu-west-1.kiro.dev/", auth: "Bearer access-b", profile: bProfile },
-        ]);
-        if (status === 400) expect(kiroAccountEvidence(a!).exhausted).toBe(true);
-      } finally { await server.stop(true); }
-    });
+    for (const stream of [false, true]) {
+      test(`${stream ? "streaming" : "buffered"} Kiro ${status} ${reason} rotates with paired bearer profile and region`, async () => {
+        const [a, b] = await seed();
+        saveConfig(config());
+        const refusalBody = reason === "OVERAGE_REQUEST_LIMIT_EXCEEDED"
+          ? { __type: "com.amazon.kiro.runtimeservice#ServiceQuotaExceededException", reason,
+            message: "You have reached the limit for overages." } : { reason };
+        const observed: Array<{ url: string; auth: string | null; profile: string | null }> = [];
+        globalThis.fetch = (async (input, init) => {
+          const url = input instanceof Request ? input.url : String(input);
+          if (url.startsWith("https://runtime.") && url.endsWith(".kiro.dev/")) {
+            observed.push({ url, auth: new Headers(init?.headers).get("authorization"),
+              profile: new Headers(init?.headers).get("x-amzn-kiro-profile-arn") });
+            if (observed.length === 1) return new Response(JSON.stringify(refusalBody), { status });
+            return answer("served by b");
+          }
+          return realFetch(input, init);
+        }) as typeof fetch;
+        const server = startServer(0);
+        try {
+          const response = await post(server, stream);
+          expect(response.status).toBe(200);
+          expect(await response.text()).toContain("served by b");
+          expect(observed).toEqual([
+            { url: "https://runtime.us-east-1.kiro.dev/", auth: "Bearer access-a", profile: aProfile },
+            { url: "https://runtime.eu-west-1.kiro.dev/", auth: "Bearer access-b", profile: bProfile },
+          ]);
+          expect(getAccountSet("kiro")!.activeAccountId).toBe(b!.id);
+          if (reason === "MONTHLY_REQUEST_COUNT" || reason === "OVERAGE_REQUEST_LIMIT_EXCEEDED")
+            expect(kiroAccountEvidence(a!).exhausted).toBe(true);
+        } finally { await server.stop(true); }
+      });
+    }
   }
+
+
+  // A 400 the vendor's validator calls improperly formed: account B can serve what A cannot.
+  const IMPROPER = JSON.stringify({ message: "ValidationException: Improperly formed request" });
+  const KIRO_URL = (url: string) => url.startsWith("https://runtime.") && url.endsWith(".kiro.dev/");
+
+  test("Kiro improperly-formed 400 rotates to the sibling account and is served", async () => {
+    await seed(); saveConfig(config());
+    const auths: Array<string | null> = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (!KIRO_URL(url)) return realFetch(input, init);
+      auths.push(new Headers(init?.headers).get("authorization"));
+      return auths.length === 1 ? new Response(IMPROPER, { status: 400 }) : answer("served by b");
+    }) as typeof fetch;
+    const server = startServer(0);
+    try {
+      const response = await post(server, true);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("served by b");
+      expect(auths).toEqual(["Bearer access-a", "Bearer access-b"]);
+    } finally { await server.stop(true); }
+  });
+
+  const comboConfig = (primary: "kiro" | "other"): OcxConfig => ({
+    ...config(),
+    providers: { ...config().providers,
+      other: { adapter: "openai-chat", baseUrl: "https://other.example/v1", authMode: "key",
+        apiKey: "sk-other", models: ["model-other"] },
+      fallback: { adapter: "openai-chat", baseUrl: "https://fallback.example/v1", authMode: "key",
+        apiKey: "sk-fallback", models: ["model-fallback"] } },
+    combos: { fan: { strategy: "failover", targets: [
+      primary === "kiro" ? { provider: "kiro", model: "claude-sonnet-4.5" } : { provider: "other", model: "model-other" },
+      { provider: "fallback", model: "model-fallback" },
+    ] } },
+  }) as unknown as OcxConfig;
+  const comboPost = (server: ReturnType<typeof startServer>) => realFetch(new URL("/v1/responses", server.url), {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "combo/fan", input: "hello", stream: false }) });
+  const fallbackOk = () => Response.json({ id: "chatcmpl-1", object: "chat.completion", model: "model-fallback",
+    choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: "served by fallback" } }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } });
+
+  test("combo hops to the next target once every Kiro account has refused as improperly formed", async () => {
+    await seed(); saveConfig(comboConfig("kiro"));
+    let kiroSends = 0; let fallbackSends = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (KIRO_URL(url)) { kiroSends++; return new Response(IMPROPER, { status: 400 }); }
+      if (url.startsWith("https://fallback.example/")) { fallbackSends++; return fallbackOk(); }
+      return realFetch(input, init);
+    }) as typeof fetch;
+    const server = startServer(0);
+    try {
+      const response = await comboPost(server);
+      const text = await response.text();
+      expect(response.status).toBe(200);
+      expect(text).toContain("served by fallback");
+      expect(kiroSends).toBe(2);
+      expect(fallbackSends).toBe(1);
+    } finally { await server.stop(true); }
+  });
+
+  test("combo never forwards a non-Kiro target's identical 400 to the next target", async () => {
+    await seed(); saveConfig(comboConfig("other"));
+    let otherSends = 0; let fallbackSends = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.startsWith("https://other.example/")) {
+        otherSends++;
+        return Response.json({ error: { message: "ValidationException: Improperly formed request",
+          type: "invalid_request_error" } }, { status: 400 });
+      }
+      if (url.startsWith("https://fallback.example/")) { fallbackSends++; return fallbackOk(); }
+      return realFetch(input, init);
+    }) as typeof fetch;
+    const server = startServer(0);
+    try {
+      const response = await comboPost(server);
+      await response.text();
+      expect(response.status).toBe(400);
+      expect(otherSends).toBe(1);
+      expect(fallbackSends).toBe(0);
+    } finally { await server.stop(true); }
+  });
+
+  test("combo stops on a Kiro 400 that is a malformed payload, not an account refusal", async () => {
+    await seed(); saveConfig(comboConfig("kiro"));
+    let fallbackSends = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (KIRO_URL(url)) return new Response(JSON.stringify({ message: "Improperly formed request" }), { status: 400 });
+      if (url.startsWith("https://fallback.example/")) { fallbackSends++; return fallbackOk(); }
+      return realFetch(input, init);
+    }) as typeof fetch;
+    const server = startServer(0);
+    try {
+      const response = await comboPost(server);
+      await response.text();
+      expect(response.status).toBe(400);
+      expect(fallbackSends).toBe(0);
+    } finally { await server.stop(true); }
+  });
+
+  test("combo never hops a Kiro-configured target whose model is routed through another adapter", async () => {
+    await seed();
+    const routed = comboConfig("kiro");
+    routed.providers.kiro = { ...routed.providers.kiro!, modelAdapters: { "claude-sonnet-4.5": "openai-chat" } };
+    saveConfig(routed);
+    let routedSends = 0; let fallbackSends = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.startsWith("https://runtime.us-east-1.kiro.dev/") && !KIRO_URL(url)) {
+        routedSends++;
+        return new Response(IMPROPER, { status: 400, headers: { "content-type": "application/json" } });
+      }
+      if (url.startsWith("https://fallback.example/")) { fallbackSends++; return fallbackOk(); }
+      return realFetch(input, init);
+    }) as typeof fetch;
+    const server = startServer(0);
+    try {
+      const response = await comboPost(server);
+      await response.text();
+      // Same-provider account moves may still run; only the cross-target hop is fenced here.
+      expect(routedSends).toBeGreaterThan(0);
+      expect(response.status).toBe(400);
+      expect(fallbackSends).toBe(0);
+    } finally { await server.stop(true); }
+  });
 
 
   test("Kiro web-search sidecar completion clears B's older verdict after rotated refusal", async () => {
@@ -519,6 +661,198 @@ describe("Kiro refusal recovery through Responses", () => {
         expect(body).toContain("Kiro");
         expect(body).not.toContain('"reason"');
       } finally { await server.stop(true); }
+    });
+  }
+});
+
+/**
+ * #4312: Kiro's CONTENT_FILTERED / GUARDRAIL_INTERVENED stop is an `incomplete` with
+ * `retryable: false`. A Responses client must see it as a terminal `response.failed` on every
+ * delivery that owns a bridge call: the adapter stream, both sidecar loops, and runTurn. No
+ * runTurn adapter emits this verdict today, so that case drives the same event through a
+ * `runTurn` stand-in on the Kiro registry entry.
+ */
+describe("Kiro content-filter stop through Responses streaming", () => {
+  const frame = (eventType: string, payload: Record<string, unknown>) => encodeMessage(
+    { ":message-type": "event", ":event-type": eventType },
+    new TextEncoder().encode(JSON.stringify(payload)));
+  const filtered = (stopReason: string) => new Response(Buffer.concat([
+    frame("assistantResponseEvent", { content: "Partial." }),
+    frame("metadataEvent", { stopReason }),
+  ]), { headers: { "content-type": "application/vnd.amazon.eventstream" } });
+  const lookupTool = { type: "function", name: "lookup", description: "Look something up.",
+    parameters: { type: "object", properties: { q: { type: "string" } }, required: ["q"] } };
+  const xai = { adapter: "openai-chat", baseUrl: "https://api.x.ai/v1", authMode: "key",
+    apiKey: "synthetic", models: ["grok-4"] };
+
+  for (const [label, stopReason, extra, tools] of [
+    ["adapter delivery", "CONTENT_FILTERED", {}, [lookupTool]],
+    ["adapter delivery", "GUARDRAIL_INTERVENED", {}, [lookupTool]],
+    ["web-search sidecar loop", "CONTENT_FILTERED",
+      { webSearchSidecar: { backend: "exa", exaApiKey: "synthetic" } },
+      [{ type: "web_search" }]],
+    ["image sidecar loop", "CONTENT_FILTERED",
+      { images: { bridgeEnabled: true }, providers: { ...config().providers, xai } }, [{ type: "image_generation" }]],
+    ["runTurn delivery", "CONTENT_FILTERED", {}, [lookupTool]],
+  ] as const) {
+    test(`${label}: ${stopReason} ends with one response.failed carrying invalid_prompt`, async () => {
+      await seed();
+      saveConfig({ ...config(), ...extra } as OcxConfig);
+      let sends = 0;
+      globalThis.fetch = (async (input, init) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.startsWith("https://runtime.") && url.endsWith(".kiro.dev/")) {
+          sends++;
+          return filtered(stopReason);
+        }
+        return realFetch(input, init);
+      }) as typeof fetch;
+      const originalCreate = ADAPTER_REGISTRY.kiro.create;
+      if (label === "runTurn delivery") {
+        ADAPTER_REGISTRY.kiro.create = (provider, context) => ({
+          ...originalCreate(provider, context),
+          async runTurn(_parsed, _incoming, emit) {
+            sends++;
+            emit({ type: "text_delta", text: "Partial." });
+            emit({ type: "incomplete", reason: "content_filter", retryable: false, endTurn: false,
+              message: `Kiro stopped with ${stopReason} before an explicit final answer` });
+          },
+        });
+      }
+      const server = startServer(0);
+      try {
+        const response = await realFetch(new URL("/v1/responses", server.url), {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ model: "kiro/claude-sonnet-4.5", input: "hello", stream: true, tools }),
+        });
+        expect(response.status).toBe(200);
+        const text = await response.text();
+        const terminals = text.split("\n\n").flatMap(block => {
+          const name = block.split("\n").find(line => line.startsWith("event: "))?.slice(7) ?? "";
+          const data = block.split("\n").find(line => line.startsWith("data: "))?.slice(6);
+          return /^response\.(completed|incomplete|failed)$/.test(name) && data
+            ? [{ name, response: JSON.parse(data).response as Record<string, any> }] : [];
+        });
+        expect(terminals.map(terminal => terminal.name)).toEqual(["response.failed"]);
+        const failed = terminals[0]!.response;
+        expect(failed.error.type).toBe("invalid_request_error");
+        expect(failed.error.code).toBe("invalid_prompt");
+        expect(failed.error.message).toContain(stopReason);
+        expect(failed.retryable).toBe(false);
+        // The refusal is neither replayed on the same account nor rotated to the other one.
+        expect(sends).toBe(1);
+      } finally { ADAPTER_REGISTRY.kiro.create = originalCreate; await server.stop(true); }
+    });
+  }
+});
+
+/**
+ * A tool-less turn runs in `disabled` completion mode. Kiro's safety filter answers it with no
+ * content at all, only a CONTENT_FILTERED metadataEvent (frame shape captured live). That used to
+ * fall through to the replay-safe `empty_kiro_stream`, which Claude clients saw as a retryable
+ * 502 overload and resent a refusal that repeats deterministically.
+ */
+describe("Kiro content-filter stop on a tool-less turn", () => {
+  const explanation = "The selected model cannot continue this conversation.";
+  const frame = (eventType: string, payload: Record<string, unknown>) => encodeMessage(
+    { ":message-type": "event", ":event-type": eventType },
+    new TextEncoder().encode(JSON.stringify(payload)));
+  // The captured refusal carries no content; the partial variant is the boundary where text already
+  // streamed before the filter, which must still end as a refusal rather than a normal completion.
+  const filtered = (partial: string | undefined) => () => new Response(Buffer.concat([
+    frame("initial-response", { conversationId: "" }),
+    ...(partial === undefined ? [] : [frame("assistantResponseEvent", { content: partial })]),
+    frame("metadataEvent", { stopDetails: { refusal: { category: "BIO", explanation } }, stopReason: "CONTENT_FILTERED" }),
+    frame("contextUsageEvent", { contextUsagePercentage: 1.79 }),
+  ]), { headers: { "content-type": "application/vnd.amazon.eventstream" } });
+  let upstream = filtered(undefined);
+
+  async function serve(run: (server: ReturnType<typeof startServer>) => Promise<void>): Promise<number> {
+    await seed(); saveConfig(config());
+    let sends = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.startsWith("https://runtime.") && url.endsWith(".kiro.dev/")) {
+        sends++;
+        return upstream();
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+    const server = startServer(0);
+    try { await run(server); } finally { await server.stop(true); }
+    return sends;
+  }
+  const messages = (server: ReturnType<typeof startServer>, stream: boolean) => realFetch(
+    new URL("/v1/messages", server.url), {
+      method: "POST", headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model: "kiro/claude-sonnet-4.5", max_tokens: 64, stream,
+        messages: [{ role: "user", content: "hello" }] }),
+    });
+
+  for (const [label, partial] of [["no content", undefined], ["partial text", "Partial answer"]] as const) {
+    describe(label, () => {
+      beforeEach(() => { upstream = filtered(partial); });
+
+      test("/v1/messages answers with stop_reason refusal, not a retryable overload", async () => {
+        const sends = await serve(async server => {
+          const response = await messages(server, false);
+          expect(response.status).toBe(200);
+          const body = await response.json() as Record<string, unknown>;
+          expect(body.type).toBe("message");
+          expect(body.stop_reason).toBe("refusal");
+        });
+        // Neither replayed on the same account nor rotated to the other one.
+        expect(sends).toBe(1);
+      });
+
+      test("/v1/messages streaming ends with a refusal message_delta", async () => {
+        const sends = await serve(async server => {
+          const response = await messages(server, true);
+          expect(response.status).toBe(200);
+          const wire = await response.text();
+          expect(wire).not.toContain("overloaded_error");
+          expect(wire).toContain('"stop_reason":"refusal"');
+          expect(wire).toContain("event: message_stop");
+        });
+        expect(sends).toBe(1);
+      });
+
+      test("/v1/responses streaming fails terminally with Kiro's refusal explanation", async () => {
+        const sends = await serve(async server => {
+          const response = await post(server, true);
+          expect(response.status).toBe(200);
+          const text = await response.text();
+          const terminals = text.split("\n\n").flatMap(block => {
+            const name = block.split("\n").find(line => line.startsWith("event: "))?.slice(7) ?? "";
+            const data = block.split("\n").find(line => line.startsWith("data: "))?.slice(6);
+            return /^response\.(completed|incomplete|failed)$/.test(name) && data
+              ? [{ name, response: JSON.parse(data).response as Record<string, any> }] : [];
+          });
+          expect(terminals.map(terminal => terminal.name)).toEqual(["response.failed"]);
+          const failed = terminals[0]!.response;
+          expect(failed.error.code).toBe("invalid_prompt");
+          expect(failed.error.message).toContain("CONTENT_FILTERED");
+          expect(failed.error.message).toContain("BIO");
+          expect(failed.error.message).toContain(explanation);
+          expect(failed.retryable).toBe(false);
+        });
+        expect(sends).toBe(1);
+      });
+
+      test("/v1/responses non-streaming keeps the content-filter incomplete body", async () => {
+        const sends = await serve(async server => {
+          const response = await post(server, false);
+          expect(response.status).toBe(200);
+          const body = await response.json() as Record<string, any>;
+          // The buffered Responses wire keeps its incomplete body for a refusal (the shared contract in
+          // server-terminal-refusal-wiring.test.ts); partial text must not turn it into a completed
+          // response.
+          expect(body.status).toBe("incomplete");
+          expect(body.incomplete_details.reason).toBe("content_filter");
+          expect(body.error ?? null).toBeNull();
+        });
+        expect(sends).toBe(1);
+      });
     });
   }
 });

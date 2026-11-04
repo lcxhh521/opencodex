@@ -16,6 +16,8 @@
  * the shared abort helpers from here).
  */
 import { clearableDeadline } from "./abort";
+import { errorDestinationLabel, errorDestinationText, type ErrorDestinationLabel } from "./error-destination";
+export { errorDestinationLabel, providerErrorDestinationLabel, errorDestinationText } from "./error-destination";
 import { redactSecretString } from "./redact";
 
 /**
@@ -32,6 +34,20 @@ const nonReplayableResponses = new WeakSet<Response>();
 
 export function markResponseNonReplayable(response: Response): void {
   nonReplayableResponses.add(response);
+}
+
+/**
+ * A server-instructed wait longer than the retry budget: same-target 429 replay loops stop and
+ * return the original response, while key rotation and ordinary error delivery are unaffected.
+ */
+const sameTargetRetryHolds = new WeakSet<Response>();
+
+export function markSameTargetRetryHold(response: Response): void {
+  sameTargetRetryHolds.add(response);
+}
+
+export function isSameTargetRetryHold(response: Response): boolean {
+  return sameTargetRetryHolds.has(response);
 }
 
 export function isNonReplayableResponse(response: Response): boolean {
@@ -144,6 +160,7 @@ export function retainReplayRefusal<T extends Response>(response: T): T {
 
 /** Carry the verdict from a response onto the one that replaces it. */
 export function carryReplayRefusal<T extends Response>(source: Response, rewrapped: T): T {
+  if (sameTargetRetryHolds.has(source)) sameTargetRetryHolds.add(rewrapped);
   return isReplayRefusalResponse(source) ? retainReplayRefusal(rewrapped) : rewrapped;
 }
 
@@ -183,9 +200,9 @@ export function createTransientSendBudget(): TransientSendBudget {
  */
 export class SendBudgetExhaustedError extends Error {
   readonly code = "request_send_budget_exhausted";
-  constructor(label?: string) {
-    super(label
-      ? `request send budget exhausted before dispatch (${label})`
+  constructor(label?: ErrorDestinationLabel) {
+    super(label !== undefined
+      ? `request send budget exhausted before dispatch (${errorDestinationText(label)})`
       : "request send budget exhausted before dispatch");
     this.name = "SendBudgetExhaustedError";
   }
@@ -200,7 +217,7 @@ export class SendBudgetExhaustedError extends Error {
  */
 export class InvalidSendBudgetError extends Error {
   constructor(value: unknown) {
-    super(`invalid upstream send budget: ${String(value)}`);
+    super(`invalid upstream send budget: ${typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : "invalid"}`);
     this.name = "InvalidSendBudgetError";
   }
 }
@@ -295,7 +312,12 @@ export async function releaseResponseBodyBestEffort(
   }
   const cancel = body.cancel().catch(() => {});
   if (!signal) {
-    await Promise.race([cancel, new Promise<void>(resolve => setTimeout(resolve, timeoutMs))]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([cancel, new Promise<void>(resolve => { timer = setTimeout(resolve, timeoutMs); })]);
+    } finally {
+      clearTimeout(timer);
+    }
     return;
   }
   await new Promise<void>(resolve => {
@@ -496,6 +518,8 @@ export interface ResetRetryOptions {
   abortSignal?: AbortSignal;
   /** Short host/path label for the retry warn log (no secrets/query strings). */
   label?: string;
+  /** Client error labels are separate from the operational retry-log label. */
+  destination?: ErrorDestinationLabel;
   /** Total upstream sends allowed, including the first one. Not a per-layer retry count. */
   attempts?: number;
   /**
@@ -565,14 +589,13 @@ export class UpstreamRetryEvidenceError extends Error {
     /** True when a connection-reset retry already reached the origin. */
     public readonly resetSeen = false,
   ) {
-    const detail = cause instanceof Error ? cause.message : String(cause);
     const kinds: string[] = [];
     if (transientStatuses.length > 0) kinds.push("transient 5xx response(s)");
     if (resetSeen) kinds.push("a credential-visible connection reset");
     super(
       kinds.length > 0
-        ? `upstream fetch failed after ${kinds.join(" and ")}: ${detail}`
-        : `upstream fetch failed: ${detail}`,
+        ? `upstream fetch failed after ${kinds.join(" and ")}`
+        : "upstream fetch failed",
       { cause },
     );
     this.name = "UpstreamRetryEvidenceError";
@@ -632,7 +655,7 @@ export async function fetchWithResetRetry(
   // Zero is zero. The old Math.max(1, ...) floor meant an exhausted budget still bought one
   // more send on every recovery leg, which is most of what made a bounded per-layer retry
   // compose into an unbounded per-request count.
-  if (attempts === 0) throw new SendBudgetExhaustedError(opts.label);
+  if (attempts === 0) throw new SendBudgetExhaustedError(opts.destination ?? (opts.label ? errorDestinationLabel(opts.label) : undefined));
   try {
   let lastError: unknown;
   let sawReset = false;
@@ -645,7 +668,7 @@ export async function fetchWithResetRetry(
     // Reported before the await, one physical send at a time: a send that rejects has still
     // been made, and this helper leaves through four exits (return, reset give-up, non-reset
     // rethrow, abort), so a per-send report is the only shape that is correct on all of them.
-    if (opts.onSendsConsumed?.beforeSend && !opts.onSendsConsumed.beforeSend()) throw new SendBudgetExhaustedError(opts.label);
+    if (opts.onSendsConsumed?.beforeSend && !opts.onSendsConsumed.beforeSend()) throw new SendBudgetExhaustedError(opts.destination ?? (opts.label ? errorDestinationLabel(opts.label) : undefined));
     if (!opts.onSendsConsumed?.beforeSend) opts.onSendsConsumed?.(1);
     try {
       let response: Response;
@@ -727,7 +750,7 @@ export async function fetchWithTransientRetry(
   const countedFetch: ReplayableFetch = (recovery) => {
     // Incremented BEFORE the await so a rejected send still consumes budget; counting only
     // successes would let a reset storm loop without bound.
-    if (opts.onSendsConsumed?.beforeSend && !opts.onSendsConsumed.beforeSend()) throw new SendBudgetExhaustedError(opts.label);
+    if (opts.onSendsConsumed?.beforeSend && !opts.onSendsConsumed.beforeSend()) throw new SendBudgetExhaustedError(opts.destination ?? (opts.label ? errorDestinationLabel(opts.label) : undefined));
     sent += 1;
     const run = () => doFetch(recovery);
     return opts.onSendsConsumed?.execute ? opts.onSendsConsumed.execute(run) : run();
@@ -749,13 +772,16 @@ export async function fetchWithTransientRetry(
   // and throws from one, and a caller sharing the budget across request legs must be told the
   // real count on every one of them.
   try {
-  if (budget === 0) throw new SendBudgetExhaustedError(opts.label);
+  if (budget === 0) throw new SendBudgetExhaustedError(opts.destination ?? (opts.label ? errorDestinationLabel(opts.label) : undefined));
   let attemptStart = Date.now();
   let res = await fetchWithResetRetry(countedFetch, innerResetOptions());
   for (let attempt = 0; sent < budget; attempt++) {
     // A non-replayable gateway status was settled after the request body had already left
     // for the origin; retrying it here is the automatic resend the marker exists to forbid.
-    if (res.ok || !isTransientUpstreamStatus(res.status) || isNonReplayableResponse(res)) return res;
+    // An upstream that answers with the exact `x-should-retry: false` verdict has said the same
+    // thing about its own failure, so the ladder stops and hands the response back untouched.
+    if (res.ok || !isTransientUpstreamStatus(res.status) || isNonReplayableResponse(res)
+      || res.headers.get(REPLAY_REFUSAL_NO_RETRY_HEADER) === REPLAY_REFUSAL_NO_RETRY_VALUE) return res;
     // Checked before cancelResponseBodyBestEffort so an already-aborted caller never receives
     // a response whose body we just cancelled.
     if (opts.abortSignal?.aborted) return res;

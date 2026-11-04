@@ -47,6 +47,8 @@ const VENICE_BASE_URL = "https://api.venice.ai/api/v1";
 const SYNTHETIC_BASE_URL = "https://api.synthetic.new/v2";
 const DEEPINFRA_BASE_URL = "https://api.deepinfra.com";
 const NEURALWATT_BASE_URL = "https://api.neuralwatt.com/v1";
+const ABLITERATION_BASE_URL = "https://api.abliteration.ai";
+const ABLITERATION_CREDITS_URL = `${ABLITERATION_BASE_URL}/v1/credits`;
 
 
 function isCanonicalA6apiBaseUrl(baseUrl: string): boolean {
@@ -130,6 +132,11 @@ function isCanonicalDeepInfraBaseUrl(baseUrl: string): boolean {
 
 function isCanonicalNeuralwattBaseUrl(baseUrl: string): boolean {
   return normalizedBaseUrl(baseUrl) === NEURALWATT_BASE_URL;
+}
+
+function isCanonicalAbliterationBaseUrl(baseUrl: string): boolean {
+  const normalized = normalizedBaseUrl(baseUrl);
+  return normalized === ABLITERATION_BASE_URL || normalized === `${ABLITERATION_BASE_URL}/v1`;
 }
 
 function a6apiPayload(value: unknown): Record<string, unknown> | null {
@@ -1043,6 +1050,56 @@ async function fetchNeuralwattQuota(provider: string, config: OcxProviderConfig)
   return windows > 0 ? report(provider, "neuralwatt:quota", quota) : null;
 }
 
+/**
+ * Abliteration `GET /v1/credits` body: `{ data: { total_credits, total_usage } }`, both in USD.
+ * `total_credits` is everything granted or purchased and `total_usage` is finalized spend, so the
+ * balance is their difference. A well-formed reply with zero total credits is authoritative: it has
+ * no ceiling to meter against, so it clears any previous row instead of fabricating a bar. A
+ * malformed reply returns null and leaves the last-good row in place.
+ */
+export function parseAbliterationCredits(
+  body: Record<string, unknown> | null,
+): ProviderQuota | typeof AUTHORITATIVE_EMPTY_QUOTA | null {
+  const data = asRecord(body?.data);
+  const total = toFiniteNumber(data?.total_credits);
+  const used = toFiniteNumber(data?.total_usage);
+  if (total === undefined || used === undefined || total < 0 || used < 0) return null;
+  if (total === 0) return AUTHORITATIVE_EMPTY_QUOTA;
+  const percent = normalizePercent((used / total) * 100);
+  if (percent === undefined) return null;
+  return {
+    creditsUsd: { used, limit: total, remaining: Math.max(0, total - used), percent },
+    updatedAt: Date.now(),
+  };
+}
+
+/**
+ * Abliteration `GET /v1/credits` — the organization credit balance for the active project key.
+ * The balance funds every inference request on this key, so display and routing scope agree.
+ * `503 credit_balance_unavailable`, 408 and 429 are transient and keep the last-good row.
+ */
+async function fetchAbliterationQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
+  // Never send a configured API key to a lookalike host or through a redirect.
+  if (!isCanonicalAbliterationBaseUrl(config.baseUrl)) return null;
+  const apiKey = resolveProviderApiKey(config.apiKey)?.trim();
+  if (!apiKey) return null;
+  const response = await quotaFetch(provider, config, ABLITERATION_CREDITS_URL, {
+    headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
+    redirect: "error",
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    return response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429
+      ? TERMINAL_QUOTA_FAILURE
+      : null;
+  }
+  const raw = await readQuotaJson(response);
+  if (raw === QUOTA_JSON_READ_FAILURE) return null;
+  const quota = parseAbliterationCredits(asRecord(raw));
+  if (quota === null || quota === AUTHORITATIVE_EMPTY_QUOTA) return quota;
+  return keyReport(provider, "abliteration:credits", quota, config, apiKey, quota);
+}
+
 
 export function normalizedBaseUrl(value: string): string | null {
   try {
@@ -1068,18 +1125,17 @@ export function isCanonicalCommandCodeBaseUrl(baseUrl: string): boolean {
   return normalized === COMMAND_CODE_BASE_URL || normalized === `${COMMAND_CODE_BASE_URL}/provider/v1`;
 }
 
-/** Prefer the nested `data` shell when the outer object is only an envelope. */
-function unwrapKimiQuotaPayload(value: unknown): Record<string, unknown> | null {
-  const body = asRecord(value);
-  if (!body) return null;
-  const nested = asRecord(body.data);
-  if (!nested) return body;
-  // A null/non-usable outer field is a placeholder, not data — an envelope like
-  // { usage: null, data: { usage: {...} } } must still unwrap to the nested payload.
+/**
+ * Pick the envelope carrying the legacy windows (weekly, 5h, total credits). The monthly
+ * `usages` container is located separately, so its presence never hides a nested window.
+ */
+function kimiLegacyWindowBody(root: Record<string, unknown>): Record<string, unknown> {
+  const nested = asRecord(root.data);
+  if (!nested) return root;
+  // A null outer field is a placeholder, not data — { usage: null, data: { usage: {...} } } unwraps.
   const usable = (field: unknown): boolean => field !== undefined && field !== null;
-  const outerHasUsage = usable(body.usage) || usable(body.limits) || usable(body.totalQuota);
-  const nestedHasUsage = usable(nested.usage) || usable(nested.limits) || usable(nested.totalQuota);
-  return !outerHasUsage && nestedHasUsage ? nested : body;
+  const hasLegacy = (body: Record<string, unknown>): boolean => usable(body.usage) || usable(body.limits) || usable(body.totalQuota);
+  return !hasLegacy(root) && hasLegacy(nested) ? nested : root;
 }
 
 function kimiLimitLabel(item: Record<string, unknown>, detail: Record<string, unknown>): string {
@@ -1089,21 +1145,43 @@ function kimiLimitLabel(item: Record<string, unknown>, detail: Record<string, un
     .toLowerCase();
 }
 
+/** Highest percentage a window with a positive remainder may report; 100 means exhausted. */
+const KIMI_BELOW_EXHAUSTED_PERCENT = 99.999;
+
+/**
+ * Counter-derived percentage, or undefined when the counters cannot be trusted. Any
+ * exhaustion signal (used at or past the limit, or remaining at or below zero) wins first,
+ * even beside an impossible companion counter: dropping it would let an over-quota account
+ * look available. Otherwise a negative used or a remaining above the limit is impossible.
+ * A positive remainder never rounds up to exhaustion.
+ */
+function kimiCounterPercent(row: Record<string, unknown>): number | undefined {
+  const limit = toFiniteNumber(row.limit);
+  if (limit === undefined || limit <= 0) return undefined;
+  const used = toFiniteNumber(row.used);
+  const remaining = toFiniteNumber(row.remaining);
+  if ((used !== undefined && used >= limit) || (remaining !== undefined && remaining <= 0)) return 100;
+  if ((used !== undefined && used < 0) || (remaining !== undefined && remaining > limit)) return undefined;
+  if (used !== undefined) return (used / limit) * 100;
+  if (remaining === undefined) return undefined;
+  return Math.min(((limit - remaining) / limit) * 100, KIMI_BELOW_EXHAUSTED_PERCENT);
+}
+
+/** Parse consumed usage, preferring valid counters, then a valid [0, 1] ratio, then direct percentages. */
 function parseKimiQuotaRow(value: unknown, resetFallback?: Record<string, unknown>): { percent: number; resetAt?: number } | null {
   const row = asRecord(value);
   if (!row) return null;
   const resetAt = quotaResetAt(row) ?? (resetFallback ? quotaResetAt(resetFallback) : undefined);
-  const limit = toFiniteNumber(row.limit);
-  if (limit !== undefined && limit > 0) {
-    let used = toFiniteNumber(row.used);
-    if (used === undefined) {
-      const remaining = toFiniteNumber(row.remaining);
-      if (remaining !== undefined) used = limit - remaining;
-    }
-    if (used !== undefined) {
-      const percent = normalizePercent((used / limit) * 100);
-      if (percent !== undefined) return { percent, ...(resetAt !== undefined ? { resetAt } : {}) };
-    }
+  const counterPercent = kimiCounterPercent(row);
+  if (counterPercent !== undefined) {
+    const percent = normalizePercent(counterPercent);
+    if (percent !== undefined) return { percent, ...(resetAt !== undefined ? { resetAt } : {}) };
+  }
+  // Newer Kimi responses expose utilization as a fraction in [0, 1].
+  const ratio = toFiniteNumber(row.used_ratio ?? row.usedRatio);
+  if (ratio !== undefined && ratio >= 0 && ratio <= 1) {
+    const percent = normalizePercent(ratio * 100);
+    if (percent !== undefined) return { percent, ...(resetAt !== undefined ? { resetAt } : {}) };
   }
   // Some payloads expose utilisation directly when limit/used arithmetic is absent.
   const direct = normalizePercent(row.utilization ?? row.percent ?? row.usedPercent ?? row.used_percent);
@@ -1124,11 +1202,22 @@ function isKimiWeeklyLimit(item: Record<string, unknown>, detail: Record<string,
   return /weekly|7\s*(?:d|day)/.test(kimiLimitLabel(item, detail));
 }
 
+/** Keep legacy windows separate and use the first parseable monthly row across supported envelopes. */
 function parseKimiQuotaPayload(value: unknown): ProviderQuota | null {
-  const body = unwrapKimiQuotaPayload(value);
-  if (!body) return null;
+  const root = asRecord(value);
+  if (!root) return null;
+  const body = kimiLegacyWindowBody(root);
   let weekly = parseKimiQuotaRow(body.usage);
   const total = parseKimiQuotaRow(body.totalQuota);
+  const nested = asRecord(root.data);
+  let monthly: { percent: number; resetAt?: number } | null = null;
+  for (const container of [root, nested, asRecord(root.quota), asRecord(nested?.quota)]) {
+    const usages = asRecord(container?.usages);
+    if (!usages) continue;
+    monthly = parseKimiQuotaRow(usages.limit_month_total ?? usages.monthTotal)
+      ?? parseKimiQuotaRow(usages.limit_month_code ?? usages.monthCode);
+    if (monthly) break;
+  }
   let fiveHour: { percent: number; resetAt?: number } | null = null;
   if (Array.isArray(body.limits)) {
     for (const rawItem of body.limits) {
@@ -1153,6 +1242,10 @@ function parseKimiQuotaPayload(value: unknown): ProviderQuota | null {
     ...(weekly ? {
       weeklyPercent: weekly.percent,
       ...(weekly.resetAt !== undefined ? { weeklyResetAt: weekly.resetAt } : {}),
+    } : {}),
+    ...(monthly ? {
+      monthlyPercent: monthly.percent,
+      ...(monthly.resetAt !== undefined ? { monthlyResetAt: monthly.resetAt } : {}),
     } : {}),
     ...(total ? { customWindows: [{ label: "Total subscription credits", percent: total.percent, ...(total.resetAt !== undefined ? { resetAt: total.resetAt } : {}) }] } : {}),
     updatedAt: Date.now(),
@@ -1371,6 +1464,9 @@ export function keyQuotaReaderForProvider(name: string, provider: OcxProviderCon
   if (name === "synthetic" && isCanonicalSyntheticBaseUrl(provider.baseUrl)) return fetchSyntheticQuota;
   if (name === "deepinfra" && isCanonicalDeepInfraBaseUrl(provider.baseUrl)) return fetchDeepInfraQuota;
   if (name === "neuralwatt" && isCanonicalNeuralwattBaseUrl(provider.baseUrl)) return fetchNeuralwattQuota;
+  // Abliteration has no registry preset, so it is usually a custom provider under any name; the
+  // canonical-URL guard alone decides eligibility and keeps the key off lookalike hosts.
+  if (isCanonicalAbliterationBaseUrl(provider.baseUrl)) return fetchAbliterationQuota;
   return null;
 }
 

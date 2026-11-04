@@ -552,13 +552,13 @@ test("noncanonical Responses preserves provider-owned safety-buffering hints", a
         adapter: "openai-responses",
         baseUrl: "https://fixture.test/v1",
         authMode: "key" as const,
-        apiKey: "fixture-key",
+        apiKey: "fixture-key", models: ["model", "provider-model"],
       },
       {
         adapter: "openai-responses",
         baseUrl: "https://fixture.test/v1",
         authMode: "forward" as const,
-        headers: { authorization: "Bearer provider-static" },
+        headers: { authorization: "Bearer provider-static" }, models: ["model", "provider-model"],
       },
     ]) {
       const config = {
@@ -575,7 +575,7 @@ test("noncanonical Responses preserves provider-owned safety-buffering hints", a
       }), config, { model: "", provider: "" });
 
       expect(response.headers.get("x-codex-safety-buffering-enabled")).toBe("provider-owned");
-      expect(response.headers.get("x-codex-safety-buffering-faster-model")).toBe("provider-model");
+      expect(response.headers.get("x-codex-safety-buffering-faster-model")).toBe("provider-model"); // a configured model of this provider
       expect(await response.text()).toBe(upstream);
     }
   } finally {
@@ -1579,7 +1579,8 @@ describe("OpenAI Responses passthrough sanitization", () => {
 
     for (const lite of [false, true]) {
       const body = build(lite);
-      const tools = lite ? body.input[0]?.tools : body.tools;
+      const tools = body.tools;
+      if (lite) expect(body.input).toEqual([]);
       expect(tools?.map(tool => tool.name)).toEqual([
         "mcp__codex_app__safe_union",
         "mcp__codex_app__plain",
@@ -2000,14 +2001,14 @@ describe("OpenAI Responses passthrough sanitization", () => {
     // recorded a legacy web_search_call replays that stored item every turn. DeepSeek's
     // parser rejects an action without `queries` (#930) and Console Go rejects one
     // without `query` (#3071) — so upgrading alone would leave those threads broken.
-    const adapter = createResponsesPassthroughAdapter(provider);
+    const adapter = createResponsesPassthroughAdapter({ ...provider, authMode: "key", apiKey: "fixture-key", baseUrl: "https://api.openai.com/v1" });
     const request = adapter.buildRequest({
       modelId: "provider-model",
       context: { messages: [] },
       stream: true,
       options: {},
       _rawBody: {
-        model: "provider-model",
+        model: "provider-model", tools: [{ type: "web_search" }],
         input: [
           { type: "web_search_call", id: "ws_legacy", status: "completed", action: { type: "search", query: "legacy" } },
           { type: "web_search_call", id: "ws_batch", status: "completed", action: { type: "search", queries: ["a", "b"] } },
@@ -2030,14 +2031,14 @@ describe("OpenAI Responses passthrough sanitization", () => {
     // strings. Copying a non-string first member would satisfy the presence check and
     // still fail the Console Go validator this repair exists to satisfy — a repair that
     // reports success and produces an invalid shape is worse than no repair.
-    const adapter = createResponsesPassthroughAdapter(provider);
+    const adapter = createResponsesPassthroughAdapter({ ...provider, authMode: "key", apiKey: "fixture-key", baseUrl: "https://api.openai.com/v1" });
     const request = adapter.buildRequest({
       modelId: "provider-model",
       context: { messages: [] },
       stream: true,
       options: {},
       _rawBody: {
-        model: "provider-model",
+        model: "provider-model", tools: [{ type: "web_search" }],
         input: [
           { type: "web_search_call", id: "ws_num", status: "completed", action: { type: "search", queries: [42] } },
           { type: "web_search_call", id: "ws_obj", status: "completed", action: { type: "search", queries: [{ q: "x" }] } },
@@ -2056,14 +2057,14 @@ describe("OpenAI Responses passthrough sanitization", () => {
   });
 
   test("repairs a partly-malformed or already-queried empty action (#3071)", () => {
-    const adapter = createResponsesPassthroughAdapter(provider);
+    const adapter = createResponsesPassthroughAdapter({ ...provider, authMode: "key", apiKey: "fixture-key", baseUrl: "https://api.openai.com/v1" });
     const request = adapter.buildRequest({
       modelId: "provider-model",
       context: { messages: [] },
       stream: true,
       options: {},
       _rawBody: {
-        model: "provider-model",
+        model: "provider-model", tools: [{ type: "web_search" }],
         input: [
           { type: "web_search_call", id: "ws_mixed", status: "completed", action: { type: "search", queries: ["a", 42] } },
           { type: "web_search_call", id: "ws_qempty", status: "completed", action: { type: "search", query: "legacy", queries: [] } },
@@ -2096,23 +2097,23 @@ describe("OpenAI Responses passthrough sanitization", () => {
       { item: { type: "agent_message", id: "msg_wrong-dialect", content: [{ type: "output_text", text: "routed reply" }] }, expectedId: undefined },
       { item: { type: "agent_message", id: "amsg_1", content: [{ type: "output_text", text: "routed reply" }] }, expectedId: "amsg_1" },
     ];
-    const input = cases.map(({ item }) => item);
+    const input = cases.map(({ item }) => item), savedInput = structuredClone(input);
     const request = adapter.buildRequest({
       modelId: "gpt-5.5",
       context: { messages: [] },
       stream: true,
       options: {},
-      _rawBody: { model: "gpt-5.5", input },
+      _rawBody: { model: "gpt-5.5", tools: [{ type: "web_search" }], input },
     }, { headers: new Headers({ authorization: "Bearer token" }) });
     const body = JSON.parse(request.body) as { input: Record<string, unknown>[] };
-
     cases.forEach(({ expectedId }, index) => {
       if (expectedId === undefined) expect(body.input[index]).not.toHaveProperty("id");
       else expect(body.input[index].id).toBe(expectedId);
     });
     expect(body.input[5]).toEqual(input[5]);
+    for (const index of [8, 9]) expect(body.input[index]).toMatchObject({ type: "web_search_call", status: "completed" });
+    expect(input).toEqual(savedInput);
   });
-
   test("strips all item ids when store is false and preserves them otherwise", () => {
     const adapter = createResponsesPassthroughAdapter(provider);
     const input = [
@@ -2478,8 +2479,8 @@ describe("OpenAI Responses passthrough sanitization", () => {
       tool_choice: Record<string, unknown>;
     };
 
-    expect(body.tools).toBeUndefined();
-    expect(body.input[0]?.tools).toEqual([{ type: "web_search" }]);
+    expect(body.tools).toEqual([{ type: "web_search" }]);
+    expect(body.input).toEqual([]);
     expect(body.tool_choice).toEqual({ type: "web_search" });
   });
 
@@ -2641,10 +2642,7 @@ describe("OpenAI Responses passthrough sanitization", () => {
             tools: [{ type: "function", name: "read", defer_loading: true, parameters: {} }],
           },
         ],
-        input: [{
-          type: "additional_tools",
-          tools: [{ type: "function", name: "loose", defer_loading: true, parameters: {} }],
-        }],
+        input: [{ type: "additional_tools", tools: [{ type: "function", name: "loose", defer_loading: true, parameters: {} }] }],
       },
     }, { headers: new Headers() });
     const body = JSON.parse(request.body) as {
@@ -2655,7 +2653,9 @@ describe("OpenAI Responses passthrough sanitization", () => {
     expect(body.tools[0]).toEqual({ type: "web_search" });
     expect(body.tools[1]).toMatchObject({ type: "function", name: "workspace__read" });
     expect(body.tools[1]).not.toHaveProperty("defer_loading");
-    expect(body.input[0].tools[0]).not.toHaveProperty("defer_loading");
+    expect(body.tools[2]).toMatchObject({ type: "function", name: "loose" });
+    expect(body.tools[2]).not.toHaveProperty("defer_loading");
+    expect(body.input).toEqual([]);
   });
 
   test("preserves prompt_cache_key in the raw Responses passthrough body", () => {

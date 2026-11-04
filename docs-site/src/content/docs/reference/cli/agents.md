@@ -34,6 +34,23 @@ prints a proposed model and effort per role without writing anything. `--apply` 
 through the same write as `set`, skipping and naming the roles whose model and effort already match.
 See [Auto-assign](/guides/integrations/#auto-assign).
 
+One `--apply` accepts at most **50 changed roles**, so its recorded changes fit one complete
+history batch and can be restored together in the dashboard's **Change history**. Already-set,
+unsized and unassigned roles do not count toward this limit. If more than 50 roles would change,
+the command exits 5 before sending any role update. Preview without `--apply`, then use
+`ocx agent roles set <role> <model> [--effort <level>]` for individual changes.
+
+Updates run sequentially. If a request fails, earlier confirmed writes remain applied, later
+roles are not attempted, and the command keeps the original nonzero error exit. The receipt names
+confirmed writes, the role whose write was not confirmed, roles not attempted, and the server-issued
+history batch when known. A lost response can follow a saved write, including the first write before
+its batch id is received; inspect `ocx agent roles --json` and the dashboard history before retrying.
+No automatic retry or rollback occurs. History remains subject to its existing availability and
+retention limits; a batch id does not guarantee that every write was recorded or is still restorable.
+With `--json`, an interrupted apply adds `complete: false`, `unconfirmedRole` and `unattemptedRoles`
+beside the existing `applied`, `skipped` and `omoJsoncNotWritten` arrays. A preflight refusal instead
+adds `refusal` with code `too_many_role_changes`, the limit and the proposed change count.
+
 Human-readable suggestion output displays terminal control characters as visible escapes.
 Use `--json` when you need the original suggestion values without presentation escaping.
 
@@ -257,12 +274,28 @@ unqualified bare OpenAI model id. Bare `gpt-5.6-*` native aliases use Codex Pool
 Account-qualified OpenAI routes remain distinct, while provider-qualified routes such as
 `openai-apikey/gpt-5.6-*` use their configured API key and never fall through to the native alias.
 Read the safety and visibility contract in the guide before enabling the compatibility pair.
-With `--strategy jev` only, the decision method is chosen by one of two mutually exclusive flags.
+Only when the effective strategy is JEV (`--strategy jev`, or a stored JEV Combo when `--strategy` is omitted), the decision method is chosen by one of two mutually exclusive flags.
 `--decision-provider <provider|->` names a configured `jev-decision` row (for example a self-hosted
 Ollama `tev1`) as a System One-compatible server. `--decision-model <route|->` names an ordinary
 opencodex route (for example `ollama/qwen3:4b`) that answers the same choice as JSON; it cannot be
-this combo or any JEV combo. Omitting both uses TypeSafe. `--decision-timeout <ms|->` sets the
+this combo or any JEV combo. A new JEV Combo that omits both uses TypeSafe; an existing JEV Combo keeps
+its stored decision method until one of the flags changes it. `--decision-timeout <ms|->` sets the
 decision deadline (1000–120000, default 4000); `-` clears any of the three.
+
+`ocx combo set <id> --decision-quota-signals on|off|-` controls per-Combo advisory evidence.
+`--decision-quota-tiers '{"limited":80}'` sets partial threshold overrides; `-` clears them.
+Both are JEV-only. Omitted policy survives `--targets-file` or `--targets` replacement and rename. Without
+`--strategy`, replacing the targets of an existing Combo keeps its stored strategy, so a JEV Combo stays JEV with
+its decision method, quota settings and session pin; a new Combo defaults to failover. If the kept JEV
+policy rejects the new targets, the command fails, names that policy, and saves nothing. Off retains thresholds;
+switching away from JEV removes both settings. This adds quota data to the selected decision
+backend, not probes, new account selection or hard exclusions. See
+[quota defaults, freshness and privacy](/guides/combos/#advisory-quota-signals-for-jev).
+
+`ocx combo set <id> --session-pin <duration|->` (JEV only) keeps each client session on the target
+JEV chose for it while the session stays active, so the provider prompt cache stays warm. The
+duration is the idle window: `90s`, `20m`, `1h` or milliseconds, from 1 minute to 24 hours; `-`
+turns it off. See [Session pin for JEV](/guides/combos/#session-pin-for-jev).
 
 `ocx combo test [--combo <id>] [--decision-provider <provider|jev> | --decision-model <route>]
 [--decision-timeout <ms>]` sends one synthetic decision probe through a saved combo's method or an
@@ -302,6 +335,7 @@ explicit `lastResort: false`. `--image-input auto|disabled` and
 `--reasoning-effort-mode strict|adaptive` preserve omission, while explicit `auto`
 and `strict` override saved disabled/adaptive values. Reasoning-effort mode is
 separate from `--effort-mode fallback|force`, which governs the default effort.
+`--allow-metered-targets on|off` grants or clears operator consent for marked combo targets on a loopback-only proxy; public and linked callers still need configured-key consent.
 `--native-alias on|off` preserves explicit false; the legacy bare flag means true.
 Turning it off may require the intended alias clear, `--native-alias off --alias -`,
 to avoid retaining an incompatible native alias. Set/rename is an upsert without
@@ -325,6 +359,25 @@ counts and snapshot-window boundaries. Zero observations do not prove success.
 There is no monetary cost or comparative savings field in this report.
 
 See [Combos](/guides/combos/) for routing behavior and configuration guidance.
+
+## Fallback off
+
+### `ocx fallback <status|off|on|clear|local> ...`
+
+```bash
+ocx fallback status --json
+ocx fallback off --kind provider
+ocx fallback on --route combo/coding
+ocx fallback clear --provider anthropic --kind model
+ocx fallback local on --device mac-studio
+```
+
+`off`, `on` and `clear` take `--kind model|provider|all` (default `all`) and at most one scope:
+`--provider <name>`, `--route <selector>` or `--device <id|alias>`; with none they set the global switch.
+A device set to off always refuses; otherwise route beats provider beats global. `local` records whether a
+device may use its own providers while the Home is unreachable, a permission GOAT reads; OpenCodex itself
+still answers `home_unreachable` there. The commands talk to the live proxy; on a Remote Link Child,
+`status` reads the Home and writes are refused. See [Fallback off](/guides/fallback-off/).
 
 ## Routing profiles
 
@@ -415,7 +468,8 @@ Inspect proxy requests, usage, storage, memory, and debug data. The direct alias
 | Alias | Equivalent resource |
 | --- | --- |
 | `ocx logs [filters] [--follow] [--json|--jsonl|--events]` | `ocx observe logs` |
-| `ocx usage [--range <today|1d|7d|30d|all>] [--since <timestamp> --until <timestamp>] [--surface <all|codex|claude|grok>] [--provider <name>] [--model <id>] [--api-key-id <id>] [--json]` | `ocx observe usage` |
+| `ocx usage [--range <today|1d|7d|30d|all>] [--since <timestamp> --until <timestamp>] [--surface <all|codex|claude|grok>] [--provider <name>] [--model <id>] [--api-key-id <id>] [--search <text>] [--top <1-1000>] [--json]` | `ocx observe usage` |
+| `ocx usage compare [--range <today|1d|7d|30d>] [--json]` | `ocx observe usage compare` |
 | `ocx storage [--json]` | `ocx observe storage` |
 | `ocx memory [--json]` | `ocx observe memory` |
 
@@ -449,6 +503,43 @@ When some usage records cannot be included, human output warns, including when t
 Any displayed totals reflect readable records only. If a filter has no readable matches, the output shows
 the warning and guidance instead of total lines; skipped records may contain matches.
 `--json` preserves the response-level `usageIncomplete` diagnostic and reason.
+
+### Compare a range with the previous equal window
+
+```bash
+ocx usage compare --range today --json
+ocx usage compare --range 7d --provider xai
+```
+
+`ocx observe usage compare` is the equivalent family form. The command reads `GET /api/usage`
+twice: the named range ending now, then the same range evaluated one equal window earlier
+(one local day for `today`/`1d`, seven for `7d`, thirty for `30d`). Default range is `30d`.
+`--range all` is refused because open history has no previous equal window. `--since` and
+`--until` are not accepted; the windows are derived. Surface, provider, model, and API-key
+filters apply to both reads. Human output prints current, previous, signed delta, and percent
+change. `--json` is `{schemaVersion,range,current,previous,delta,change,incomplete}`. The two
+reads are sequential, not an atomic snapshot. Custom `since`/`until` on each response must
+match the requested window. Both reads use the same connection and credential. If the
+connection, account, or credential changes during the command, it reports an owner
+mismatch and asks you to retry instead of printing a comparison.
+
+### Page indexed request history
+
+```bash
+ocx logs history --provider xai --status 200 --limit 50 --json
+ocx logs history --cursor '<nextCursor>' --json
+ocx logs get <request-id> --json
+```
+
+`ocx observe logs history` and `ocx observe logs get` are the equivalent family
+forms. These read the derived request-history index, not the recent `ocx logs`
+ring. `--limit` is 1–100 (default 50). `--from` and `--to` accept epoch
+milliseconds or full ISO datetimes with a timezone and are inclusive. `--json`
+returns `{entries,hasMore,nextCursor,index}`. `--jsonl` emits rows only; when
+more pages exist, `nextCursor=…` is printed on stderr so a caller can resume
+without mixing the token into the row stream. Empty matches succeed. `get`
+returns one canonical row by request ID; `ocx logs explain` remains the
+route-decision view for that same ID.
 
 ### Filter a bounded log snapshot
 
@@ -489,7 +580,7 @@ ocx usage --range 7d --search 'model-a' --json
 
 `--search` matches a trimmed case-insensitive substring in model, provider or
 resolved model after reading the report. It sorts model rows by descending total
-tokens with stable ties and keeps up to 100. JSON adds
+tokens with stable ties and keeps up to 100 by default. JSON adds
 `modelView:{query,matchedModelCount,returnedModelCount,limit:100,truncated}`;
 human output labels the view and shows its selected model rows. Report totals,
 provider/day/account rows, exact filters and incomplete/window metadata remain
@@ -499,6 +590,8 @@ An explicit blank query (`--search=`) selects the top-100 view; omitting search
 preserves the existing output. Exact `--provider`/`--model` still scope the
 underlying report. Search does not broaden selected-key or connected-client
 self scope and is never sent as a new Hub API query parameter.
+
+`ocx usage --top 25` (also `ocx observe usage --top 25`) sets the human model table limit to an integer from 1 to 1000. The default is 10, or 100 with `--search`; the limit applies after search filtering. It changes local display only: report totals, provider/account rows and API parameters stay unchanged. With `--json`, a valid `--top` is ignored; JSON retains its existing full report or 100-row search view. Invalid limits return exit 2 before fetching.
 
 ### Saved companion usage totals
 
@@ -887,6 +980,43 @@ native-mode flags are rejected; failed runtime save has no local fallback. Apply
 is a separate existing Desktop action on its machine, so verify host/context
 before choosing it. Rendered models are not proof of native application.
 
+### `ocx codex [codex args...]`
+
+The key is supplied only when the configuration and its namespaces are protected from other principals; the current user and privileged OS authorities are trusted. Same-user processes are trusted: an actor with your write access can already read your OpenCodex key file. Same-user configuration replacement between verification and native startup is outside this threat model; the launcher does not freeze configuration at handoff.
+
+On a normal Windows installation, default ProgramData permissions allow other users to create directories. Automatic credentials are therefore withheld even when `ProgramData\OpenAI\Codex` is absent. The system Codex configuration folder under ProgramData must exist and be writable only by Administrators/SYSTEM, and its ancestors must prevent replacement by other users. Ask an administrator to review the directory policy. opencodex never changes ACLs itself and provides no provisioning command.
+
+Alternatively, supply the key yourself, for example by exporting `OPENCODEX_API_AUTH_TOKEN`; `ocx codex` leaves it untouched. Existing system configuration files still withhold automatic credentials and require separate review. Each withholding reason produces one short, specific stderr diagnostic without key values, key-file contents or key-file paths.
+
+Use `--` before a single-word prompt so it cannot select an unknown Codex subcommand.
+
+Automatic credentials also require a fresh ownership proof from this installation's running listener. For a standalone proxy, the proof must come from the exact HTTP origin in the managed Codex provider configuration; a running proxy on a different port or loopback address does not authorize that destination. A direct client proves its own machine listener and keeps its saved server URL checks, because the server it dials is a different installation. For a direct client the proof shows that the answering listener belongs to this installation; it does not prove which kind of listener it is. Without a matching proof, the launcher withholds the automatic token and leaves routing unchanged.
+
+The machine configuration namespace must also prevent other users from creating missing system files. An unprotected Windows ProgramData/OpenAI/Codex namespace withholds automatic credentials; the launcher does not create it. macOS accepts deny-only and read-only allow ACLs, but refuses any allow entry granting write, append, delete, attribute/security changes or ownership changes, even after a deny entry. Unknown tags and inspection errors refuse.
+
+A fresh service token is loaded only when argv is within the allowlist below, the environment has no nonempty HTTP(S)/ALL proxy or `CODEX_*`/`OPENAI_*`/`AZURE_OPENAI_*` overrides (canonical `CODEX_HOME` is allowed), and the home/config/system namespaces pass ownership checks. The configuration must contain only audited keys and the exact managed loopback provider, with no additional credential consumers or configuration layers. Every unsupported argument, including `-c`/`--config`, `-p`/`--profile`, unknown flags and `resume`/`fork`, withholds the token with a value-free diagnostic; explicit user credentials and original arguments are preserved.
+
+The canonical home directory and `config.toml` must belong to the current user. POSIX denies group/other writes; Windows checks owner SID and rejects DACL write grants outside the current user, SYSTEM and Administrators. Ancestor replacement permissions are checked too. macOS additionally requires no forced Codex configuration preferences. These checks exclude other-user writers; they do not isolate a malicious process running as the same user or an administrator.
+
+| Allowlist | Flags |
+| --- | --- |
+| Switches | `--no-daemon`, `--json`, `--ephemeral`, `--skip-git-repo-check`, `--no-alt-screen`, `--full-auto`, `--dangerously-bypass-approvals-and-sandbox`, `--search` |
+| One value | `--model`/`-m`, `--sandbox`/`-s`, `--ask-for-approval`/`-a`, `--image`/`-i` |
+
+
+
+Automatic credential delivery resolves `CODEX_HOME` as a literal path (including `~` and whitespace), verifies that home, and passes its canonical absolute path to the child. An unreadable home skips loading. Any nonempty `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` variable, in any letter case, also skips loading regardless of `NO_PROXY`; denied launches and user-exported credentials remain unchanged. With a newly loaded token, both child `NO_PROXY` and `no_proxy` include `127.0.0.1` and `::1`, preserving existing bypass entries. Enabling `features.respect_system_proxy` or forwarding `--enable`/`--disable` skips automatic loading.
+
+Ensure the proxy is running, then launch Codex with the original arguments. Routing remains in Codex configuration; the launcher never rewrites it. Native and foreign routes skip startup. Unknown routing warns and attempts startup; a failed startup warns and continues. Help/version and internal commands such as `login`, `doctor`, and `help` skip startup and automatic token loading.
+
+A missing `OPENCODEX_API_AUTH_TOKEN` is read from this installation's `service-api-token` only when the selected provider's complete transport configuration matches the managed block for the configured loopback listener or persisted local client connection. Names and injection comments alone grant no credential access. Unknown or remote destinations, default profiles, project configuration, `OPENAI_BASE_URL`, and forwarded `-c`/`--config`, `-p`/`--profile`, `-C`/`--cd`, or `--remote` options skip automatic loading. User-exported credentials and arguments are preserved; token-file overrides cannot select a different credential, and management-token collisions are refused.
+
+Only a matched autostart wrapper launches its backing Codex directly. Unknown state, including an inspection exception, requires a verified bypass; Windows CMD managed wrappers must match the complete current generated template before the selected absolute command runs with `OCX_SHIM_BYPASS=1`. Ordinary npm launchers remain supported. Unverifiable or obsolete wrappers refuse with exit 1 and start no Codex; run `ocx codex-shim install` to refresh them. This launch does not repair shims. The content check does not establish Windows backing-file provenance or prevent concurrent pathname replacement.
+
+On macOS, every launch, including help/version, verifies the selected executable when its selected path or canonical location is inside any `.app` bundle. Renamed bundles and symlinks into bundles require the same safe ownership, permissions and OpenAI signatures for the bundle and executable. A selected bundle member must stay inside that bundle's canonical `Contents/`, including through executable, directory or whole-bundle symlinks. Failed verification exits 1 without starting Codex. Ordinary non-bundle executables, including npm installations, retain their behavior.
+
+Use `ocx help codex` for launcher help and `ocx codex --help` for Codex help. Launching plain `codex` later retains its existing behavior.
+
 ### `ocx opencode [opencode args...]`
 
 Ensure the proxy is running, then launch opencode with the generated `provider.opencodex` and
@@ -903,13 +1033,32 @@ Manage and apply the Grok Build model fence.
 
 ## Client config export
 
+Hermes and Command Code export and integration apply/overwrite accept
+`--model-names alias|routed` (JSON API field: `modelNames`). Omission on export
+means `routed`; omission on a later integration Apply preserves its stored mode.
+This is independent of `preferModelAliasIds`. Only a provider-qualified alias
+that routes to the same provider/model is emitted; unsafe, missing or colliding
+aliases fall back to routed names, and combos keep their existing keys.
+
+`ocx export --client hermes --model-names alias --json` previews an existing
+current catalog without writing client files or managed state. A cold/stale
+catalog returns unavailable; load the catalog separately and retry. Explicit
+`--out` writes only the requested export artifact and retains its existing
+exclusive-create/`--force` behavior. For managed writes, pass the same mode to
+both `integration client preview --operation apply|overwrite` and `enable` when
+confirming a plan. The field is unsupported on disable/restore and other clients.
+An alias change during Apply or refresh can cause a conflict before any write;
+retry against the current catalog. Removed/renamed aliases migrate at the next successful refresh, with foreign-edit
+refusal. See [the integration guide](/guides/integrations/#opt-in-alias-model-names).
+
 ### `ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime|aside|raycast|omo|cline|kilo|commandcode|droid>`
 
 Print a client config wired to the running proxy. The command serializes the
 `opencodex` provider block — base URL, model list, and the client's credential
 reference or loopback placeholder — in the selected client's native format.
 
-The proxy must be running; the command resolves its live port, reads `/api/models`, and emits only
+The proxy must be running; the command resolves its live port, uses the current
+catalog (`/api/models` or the server-side client export), and emits only
 models Codex can currently see.
 
 OpenCode and Kilo exports preserve effective model limits, known capabilities, declared reasoning
@@ -1020,10 +1169,15 @@ the CLI, the API, and the GUI use the same bytes.
 
 Manage headless runtime settings, startup, sync, diagnostics, and updates.
 
-`ocx system codex-restart --yes` restarts Codex app-servers and fully quits and relaunches the
-Codex desktop app, through the same module as `ocx sync --restart-codex`. When the proxy itself
-is running inside the Codex app, the command refuses with an actionable message instead of
-promising a handoff it cannot complete.
+`ocx system codex-restart --yes` restarts Codex app-servers through the same module as
+`ocx sync --restart-codex`. It quits and relaunches the Codex desktop app when the app launched before the current model catalog was written or this request changed
+its `model_catalog_json` binding, because the model picker is built at
+launch. Otherwise the app stays open, respawns its own app-server, and keeps unsaved drafts and
+pending approvals. If the app or catalog state cannot be read, it takes the full restart. When
+the proxy itself is running inside the Codex app, the desktop restart refuses with an actionable
+message instead of promising a handoff it cannot complete.
+
+A `model_catalog_json` binding changed by this request also forces the desktop restart, even when the shell started after the catalog file was written.
 
 ```bash
 ocx system settings --stream-mode eager-relay
@@ -1077,14 +1231,17 @@ ocx system codex-cli-update check --json
 
 `check` makes no package-registry request and inspects bounded configured-candidate provenance evidence,
 including a redacted executable location and ownership evidence. Trusted published-launcher context authenticates
-the candidate snapshot, not successful Codex execution. Because this one-shot command never executes Codex,
-environment and persisted candidates remain report-only (`managed: false`, normally `selection_unattested`);
-`selectionAttested` remains `false`. The JSON report exposes `candidateAvailable`, `candidateVersion`, `candidateSource`,
+the candidate snapshot, not successful Codex execution. On POSIX, selection is attested only when the runtime
+resolver selects the same canonical environment candidate without executing it. A linked npm-global manifest
+can then establish `managed: true` when it proves ownership and, if a candidate version is reported, that version matches the manifest; persisted candidates remain unattested. The JSON report exposes `candidateAvailable`, `candidateVersion`, `candidateSource`,
 and `selectionAttested`. Inspecting the configured candidate requires a trusted published-launcher context;
 a direct Bun/source launch has no such proof, ignores ambient and persisted candidate state, and may report
-`candidate_unavailable` on POSIX. On Windows this first slice performs no candidate or configuration filesystem I/O:
-only a proof-captured absolute environment candidate can receive lexical app-bundle or version-manager labels;
-every other Windows candidate fails closed. Because that slice never consults persisted state, a Windows run
+`candidate_unavailable` on POSIX. On Windows x64, a proof-captured absolute standard npm `codex.cmd`
+can be managed when held local handles bind its package, a prefix-local Node/npm pair or the captured
+PATH metadata pair tied to the launcher architecture, and the first in-prefix platform backing.
+This metadata pair does not attest the interpreter a later CMD invocation would select.
+Plan paths and configured version-manager roots must use their canonical long DOS names;
+aliases, unavailable roots and reparse points leave the installation unmanaged. Other Windows layouts remain deferred or unmanaged. Windows never consults persisted state, so a run
 with no captured environment candidate reports `windows_inspection_deferred` rather than `candidate_unavailable`:
 the command cannot observe whether a Codex CLI is installed, so it reports the deferral instead of asserting
 that no candidate exists. The command does not execute Codex or a package manager, repair a shim,
@@ -1093,6 +1250,94 @@ version-manager, unverified standalone, and ambiguous shim states are reported a
 and are never classified as managed.
 
 On Windows, a captured bare command such as `CODEX_CLI_PATH=codex`, a remote path, or a device path reports `candidate_path_unavailable` instead. Those cases have a captured candidate; its path is not eligible for this inspection.
+
+#### Read-only Codex CLI update plan
+
+```bash
+ocx system codex-cli-update plan --channel latest --json
+```
+
+Run through the published Node launcher with the intended `CODEX_CLI_PATH` in the shell environment.
+The plan requires an attested npm-global installation and a linked package manifest version.
+Windows supports only an explicit absolute standard npm `codex.cmd` with a held-bound Node/npm toolchain —
+prefix-local when present, otherwise the captured-PATH pair anchored to the launcher architecture;
+PATH-only selection, OpenCodex autostart wrappers and global/vendor fallback stay deferred.
+It queries the official npm registry for an exact version, SHA-512 integrity and same-origin tarball,
+using the launcher's captured PATH and isolated temporary npm configuration, cache and logs. Proxy
+settings and `NODE_EXTRA_CA_CERTS` remain supported; cleanup is best-effort. No Codex command runs.
+
+An applicable plan reports `applicable: true` and a deterministic `planId` binding platform,
+installation-root/content digests, installed version, channel and exact main/platform artifacts. The plan is never
+persisted. It refuses downgrades, already-current versions, active Codex sessions and incomplete
+process observation. Supported Windows metadata queries use the observed Node/npm under matching
+held handles. Windows x64 can be applicable only for a bounded npm prefix with verified
+write authority; other observed prefixes retain `windows_apply_disabled`. Active/unknown sessions still refuse earlier. Unsupported
+Windows layouts return `windows_inspection_deferred` before registry/process queries.
+A refusal exits 0: inspect `applicable` and `refusal`. The printed install argv is indicative; this
+command installs nothing, changes no application state and never signals a session.
+A plan ID alone is not installation authorization: apply requires separate explicit confirmation.
+
+#### Confirmed Codex CLI apply and job status
+
+```bash
+ocx system codex-cli-update apply --plan-id <32-hex> --yes --request-id <stable-key> --json
+ocx system codex-cli-update status <job-id> --json
+```
+
+Apply supports the selected, managed, non-shim npm-global CLI on Linux/macOS and the restricted
+Windows x64 npm layout. It revalidates the
+approved plan under an installation lease, verifies the exact main/platform archives, installs them
+offline with lifecycle scripts disabled, and checks installed files and the selected CLI's version.
+Existing Codex sessions are never stopped; active or unknown process observations refuse the update.
+Windows supports shared prefixes with verified ACLs and no reparse paths. Observation includes
+unrelated packages and shims, capped at 4,096 entries, 512 MiB total and 384 MiB per file. Their
+bytes and identities must be preserved. Larger or unsafe prefixes, ARM64, shim repair, native apps
+and other installation managers remain unsupported. Unknown child lifetime or incomplete handle cleanup retains staging and
+the installation lease; do not retry by deleting its lock. Readback includes auxiliary files,
+new/absent backing roots and npm's hidden lockfile. `not_applied` means scoped installation state
+was observed unchanged, not that npm performed no I/O anywhere.
+Installation directories and staging require trusted POSIX ownership and permissions throughout their
+ancestry. Unsafe installation paths report `installation_prefix_unsupported` or
+`installation_paths_untrusted`; unsafe temporary roots report `staging_path_untrusted`. Use a private
+temporary directory below trusted ancestors (root-owned sticky temporary roots are supported).
+Owned session starts, desktop restarts and runtime/shim selection changes report busy while installation
+and readback run. An unconfirmed installer or verification child keeps admission closed. Admission
+recovers when the owned process group is proven gone, including a verification child that closes after
+its reap deadline. Worker loss before commit also restores admission; worker close after commit alone
+does not. Durable recovery records preserve this exclusion across proxy restarts.
+On Windows, recovery checks the exact installer/verifier Job and original process creation identity;
+all Job members must have exited. Access failures keep admission closed and never stop an installer.
+Missing child identity, partial records or inaccessible liveness evidence require inspection. A complete terminal write left
+before its publication rename can restore admission after restart when its exact owner and current
+parent/group absence are verified. On Windows, a complete pending child identity can also restore
+admission when it matches the armed owner and Job, the guardian's terminal proof is valid, and the
+parent, exact child lifetime and every Job member are proven gone. Missing proof, incomplete or armed
+pending writes still require inspection; guardian death alone cannot reopen admission.
+Recovery does not change an
+ambiguous job result, retry installation or reclaim an abandoned installation lease.
+Without recovery history, a symlinked `OPENCODEX_HOME` (or home ancestor) permits these ordinary
+operations. With history, admission reads the protected canonical home target; unsafe recovery
+paths still report busy. This does not relax the updater's installation or config-path eligibility.
+Shim repair, native apps and other installation managers remain unsupported.
+
+Apply exits 0 only for an `applied` job; `not_applied`, `refused`, `ambiguous` and pending duplicate jobs
+exit 1, including with `--json`. Status reads the
+same private job record without a running proxy or GUI token. Reuse the same optional request ID after
+a lost response: the same key and plan return the original job; a changed plan with that key refuses.
+The private ledger retains up to 64 jobs, including finished jobs, without automatic pruning. At that
+limit, new request IDs are refused with `store_full`; existing matching retries still return their
+original job. Capacity and operator recovery remain a separate follow-up that must preserve this
+deduplication contract. A busy admission ledger reports `job_store_busy` (HTTP 503 with `Retry-After: 1`);
+permanent admission failures have no retry-delay header. Missing or unreadable CLI
+status returns `job_unavailable` and a nonzero exit. Completion persistence failures do not rerun the
+installer or turn an uncertain job into a confirmed success.
+An ambiguous result is never automatically retried or rolled back. After an owner restart, an unfinished
+job reports unknown ownership instead of claiming the old process stopped. Inspect the job's outcome,
+child/lease state and cleanup errors; command exit status alone does not establish an installation result.
+
+The management API provides authenticated plan/status reads and confirmed trusted-loopback GUI-session
+apply admission. A published Node `ocx start` supplies the required inspection snapshot; direct Bun or
+compiled sidecar startup does not provide that proof. The Dashboard update panel is a separate follow-up.
 
 #### Explicit installation observation on Windows x64
 
@@ -1105,7 +1350,7 @@ ocx system codex-cli-update attest --candidate <absolute-path> --npm-prefix <abs
 
 Native handles hold the ancestor directories and files during bounded reads. Unsupported platforms, reparse points/junctions, conflicting writers, unsafe paths, and oversized files are refused. The fixed report contains no paths: `status` is `observed` or `refused`, with `installationIdentityObserved`; `selectionAttested`, `managed`, and `applyAllowed` remain `false`. Check `status`, not just the process exit code: a reported refusal can exit 0.
 
-An observed identity or digest describes those files during this observation. It is not a durable update permit and does not prove the selected runtime, the past installer, effective npm configuration, or tool authenticity. The supplied Node is observed only, not proven to be the Node a launcher would select. No target is executed; no registry request, installation, configuration write, or process control occurs. The existing Windows `check` command still performs no candidate/configuration filesystem I/O.
+An observed identity or digest describes those files during this observation. It is not a durable update permit and does not prove the selected runtime, the past installer, effective npm configuration, or tool authenticity. The supplied Node is observed only, not proven to be the Node a launcher would select. No target is executed; no registry request, installation, configuration write, or process control occurs. The separate Windows `check`/`plan` predicate above can establish read-only planning evidence; `attest` remains observation-only.
 
 ### `ocx config [show|get|set|unset|validate|export|import] ...`
 

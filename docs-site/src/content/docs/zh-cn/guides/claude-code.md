@@ -158,18 +158,18 @@ unknown 表示 opencodex 无法确定设置是否仍指向自己的代理。外�
 
 ### Picker 模式：在第一方 Code 标签页中显示 opencodex 模型
 
-Picker 模式是第一方模式的一部分。在 macOS 上选择第一方时默认开启；设置
+Picker 模式是第一方模式的一部分。在 macOS 和 Windows 上选择第一方时默认开启；设置
 `claudeCode.intercept.picker: false` 后会保持关闭。它会修改第一方 Desktop 的 Code 标签页模型选择器，
-按名称列出可用的 opencodex 模型。首次开启时，macOS 可能会要求你在登录钥匙串中信任本地证书颁发机构。
+按名称列出可用的 opencodex 模型。首次开启时，macOS 可能会要求你在登录钥匙串中、Windows 可能会要求你在当前用户根存储中信任本地证书颁发机构。
 该颁发机构限制为 `claude.ai` 及其子域名。可导出的签名身份由 OS 凭据存储保护，普通重启会复用同一证书和密钥。
-OpenCodex 配置目录中不保存明文 Picker 签名密钥。受限 CA 的完整验证和 OS 信任检查仍然适用。
-已批准的身份不变且凭据存储可用时，重启不会添加或删除证书信任设置。启动恢复绝不会安装信任：
+OpenCodex 配置目录中不保存明文 Picker 签名密钥。受限 CA 的完整验证和 OS 信任检查仍然适用(Windows 按精确指纹与已验证叶子验证)。
+已批准的身份不变且凭据存储可用时，重启不会添加或删除 macOS 证书信任设置。启动恢复与状态检查绝不会安装信任：
 若信任缺失、被撤销或无法确认，Picker 会保持待处理状态。请明确运行 `ocx claude desktop picker on`
-或 `ocx claude desktop picker trust` 来授予信任。
+或 `ocx claude desktop picker trust` 来授予信任(Windows 需要时含确认)。
 
 从旧身份进行一次性迁移时，清除原有信任可能需要同意。清理未完成时，Picker 不可用，已应用的配置档案
-会使用不解密的中继。macOS 还可能单独要求解锁钥匙串或批准应用访问凭据，重启或升级时也可能出现这些提示。
-Windows 和 Linux 仍不支持 Picker，不会启动 Picker CA、凭据存储或代理工作。主要 Claude 拦截功能仍可用，
+会使用不解密的中继。macOS 还可能单独要求解锁钥匙串或批准应用访问凭据，重启或升级时也可能出现这些提示。Windows 上显式 `on` 或 `trust` 可能显示添加根的确认。
+Linux 仍不支持 Picker，不会启动 Picker CA、凭据存储或代理工作。主要 Claude 拦截功能仍可用，
 其本地 CA 文件受到所有者、符号链接、文件权限及 Windows ACL 检查保护。
 
 Picker 模式开启期间，Claude Desktop 通过 OpenCodex 访问网络。如果 OpenCodex 停止，Desktop 会处于离线状态，
@@ -178,6 +178,8 @@ Picker 模式开启期间，Claude Desktop 通过 OpenCodex 访问网络。如�
 控制台 **连接 → Claude Desktop** 中也有同样的开关。选择 Picker 配置档案后，请完全退出并重新打开 Claude Desktop。
 
 Picker 模式属于第一方模式，因此[第一方账户风险](#第一方主动选择)同样适用。
+
+在上游首次响应之前，Picker 上传若连续 60 秒没有进展就会关闭。超时会中断上传，不会返回成功响应；HTTP/2 仅重置受影响的流。上游背压导致传输暂停时，空闲计时也会暂停；上传完成或上游首次响应后，计时器会被移除。此空闲保护机制不会额外限制上传总时长，现有运行时和协议限制仍然适用。响应流不受此计时器约束。
 
 ## 连接远程 hub 的 Claude Desktop
 
@@ -497,7 +499,7 @@ Search 和图像描述沿用仓库已有的 Claude Code OAuth fingerprint 先例
 | Assistant `tool_use` | `function_call`（`input` → JSON 字符串化的 `arguments`） |
 | 用户 `tool_result` | `function_call_output`（`is_error` → `[tool error]` 前缀） |
 | 重放 `thinking` / `redacted_thinking` | `reasoning` 项；签名和脱敏载荷保存在有界 `ocxr1` 信封中 |
-| Function 工具 | `{type: "function"}`（`web_search*` → `{type: "web_search"}`） |
+| Function 工具 | `{type: "function"}`（`web_search*` → `{type: "web_search"}`）. 在到 `api.anthropic.com` 的转换路由上，带类型的 `web_search_*` 和 `web_fetch_*` 声明也会发送到 Anthropic 并在服务端执行；如果网页搜索边车提供了 `web_search`，则优先使用边车。搜索和抓取结果以 `server_tool_use` 及对应的 `web_search_tool_result` / `web_fetch_tool_result` 块返回客户端 带有 `allowed_domains`、`blocked_domains` 或 `user_location` 的托管搜索会从转换后的 Responses/Chat 路由中移除；强制调用已移除的搜索返回 400。有效的 `defer_loading` 函数定义仍可作为普通函数调用。参见[转换限制](/guides/claude-code/#search-restrictions-and-deferred-tools-on-translated-routes)。 |
 | `tool_choice` | `auto`→`auto`，`none`→`none`，`any`→`required`，指定函数→`{type:"function",name}`，托管 WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
 | `stop_sequences` | `stop` |
@@ -529,7 +531,7 @@ role；`tool_result` 缺少 `tool_use_id`；`tool_use` 缺少 id/name；指定�
 **错误分类：**400 `invalid_request_error`、401 `authentication_error`、
 402 `billing_error`、403 `permission_error`、404 `not_found_error`、409 `conflict_error`、
 413 `request_too_large`、429 `rate_limit_error`、504 `timeout_error`、529 `overloaded_error`，
-其他 5xx 为 `api_error`。`Retry-After` 会保留。
+其他 5xx 为 `api_error`。`Retry-After` 以整数秒发送（HTTP 日期会换算为剩余秒数），上限为 8 天。
 
 ## 提示缓存与 token 用量
 

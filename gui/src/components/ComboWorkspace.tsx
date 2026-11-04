@@ -26,6 +26,7 @@ export default function ComboWorkspace({
   models,
   capabilityModels = models,
   cataloguedComboIds,
+  visionEnabled,
   loading,
   onRefresh,
   onSave,
@@ -52,7 +53,7 @@ export default function ComboWorkspace({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pendingSelect, setPendingSelect] = useState<string | null | undefined>(undefined);
   const [removeId, setRemoveId] = useState<string | null>(null);
-  const [localBaseline, setLocalBaseline] = useState<ComboItem | null>(null);
+  const [localBaseline, setLocalBaseline] = useState<{ source: ComboItem; item: ComboItem } | null>(null);
   const firstComboDraft = useMemo(() => emptyDraft(), []);
   const jevAutoExists = useMemo(
     () => combos.some(combo => combo.id === "jev-auto" || combo.alias === "jev-auto"),
@@ -82,7 +83,7 @@ export default function ComboWorkspace({
   );
   const activeId = selectedId && combos.some((c) => c.id === selectedId) ? selectedId : null;
   const selected = combos.find((c) => c.id === activeId) ?? null;
-  const baseline = selected && localBaseline?.id === selected.id ? localBaseline : selected;
+  const baseline = selected && localBaseline?.source === selected ? localBaseline.item : selected;
 
   const [detailDirty, setDetailDirty] = useState(false);
 
@@ -213,7 +214,7 @@ export default function ComboWorkspace({
       </aside>
 
       <div className="combos-workspace-main">
-        {baseline ? (
+        {baseline && selected ? (
           <DetailPanel
             key={baseline.id}
             apiBase={apiBase}
@@ -226,6 +227,7 @@ export default function ComboWorkspace({
             providers={providers}
             models={models}
             capabilityModels={capabilityModels}
+            visionEnabled={visionEnabled}
             onBack={() => trySelect(null)}
             onSaved={(item) => {
               setDetailDirty(false);
@@ -235,7 +237,7 @@ export default function ComboWorkspace({
                 setSelectedId(item.id);
                 setLocalBaseline(null);
               } else {
-                setLocalBaseline(item);
+                setLocalBaseline({ source: selected, item });
               }
               onRefresh();
             }}
@@ -256,10 +258,11 @@ export default function ComboWorkspace({
             providers={providers}
             models={models}
             capabilityModels={capabilityModels}
+            visionEnabled={visionEnabled}
             onSaved={(item) => {
               setDetailDirty(false);
               setSelectedId(item.id);
-              setLocalBaseline(item);
+              setLocalBaseline(null);
               onCreated(item.id);
             }}
             onSave={onSave}

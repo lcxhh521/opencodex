@@ -13,6 +13,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteFile, getConfigDir } from "../config";
+import { withConfigDirHardeningSettled } from "../config/paths";
 import type { ProviderQuota } from "./quota-types";
 import type { KiroPersistedQuota, KiroPersistedVerdict } from "./kiro-account-state-disk";
 import { ACCOUNT_QUOTA_TTL_MS } from "./quota-wire";
@@ -29,6 +30,8 @@ const FILENAME = "provider-account-quota-cache.json";
  */
 const DISK_MAX_AGE_MS = 6 * 60 * 60_000;
 const PERSIST_DEBOUNCE_MS = 250;
+/** Match the reset ledger's maximum deferral under sustained quota observations. */
+const MAX_PERSIST_DEFERRAL_MS = 1_000;
 
 type DiskFile = {
   version: 1;
@@ -38,6 +41,12 @@ type DiskFile = {
 };
 
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
+let persistStartedAt: number | null = null;
+/** Bumped by cancellation so a fired callback still waiting for ACL admission writes nothing. */
+let persistGeneration = 0;
+let persistWrite: Promise<void> = Promise.resolve();
+/** Test seam: wait for a fired persistence callback's admitted write (as settleQuotaPersistenceForTests). */
+export function settleAccountQuotaPersistForTests(): Promise<void> { return persistWrite; }
 
 /** Read the snapshot. Returns an empty map for a missing, corrupt or stale file. */
 export function readPersistedAccountQuotas(now = Date.now()): Map<string, ProviderQuota> {
@@ -86,15 +95,27 @@ export function readPersistedKiroVerdicts(now = Date.now()): Map<string, KiroPer
   return result;
 }
 
-/** Write the snapshot, debounced. Best-effort: a failed write is not an error. */
+/** Debounce snapshots without starving writes under load. Failures remain best-effort. */
 export function schedulePersistAccountQuotas(
   rows: () => Iterable<[string, ProviderQuota | KiroPersistedQuota]>,
   verdicts: () => Iterable<[string, KiroPersistedVerdict]> = () => [],
 ): void {
+  const now = performance.now();
+  persistStartedAt ??= now;
+  const delay = Math.max(0, Math.min(PERSIST_DEBOUNCE_MS,
+    MAX_PERSIST_DEFERRAL_MS - (now - persistStartedAt)));
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = setTimeout(() => {
     persistTimer = null;
-    try {
+    persistStartedAt = null;
+    // Writes under the config root wait out an overlapping optional config-root ACL flight,
+    // whose inheritance can drop the fresh file's explicit grant (#7815). Rows are read inside
+    // the admitted callback so a late admission still writes the newest snapshot; a timeout
+    // skips this best-effort write.
+    const dir = getConfigDir();
+    const generation = persistGeneration;
+    persistWrite = withConfigDirHardeningSettled(dir, () => {
+      if (generation !== persistGeneration) return;
       const out: Record<string, ProviderQuota> = {};
       for (const [key, quota] of rows()) out[key] = quota;
       const kiroVerdicts: Record<string, KiroPersistedVerdict> = {};
@@ -102,16 +123,17 @@ export function schedulePersistAccountQuotas(
         if (key.startsWith("kiro\0") && /^[a-f0-9]{64}$/.test(verdict.identity)) kiroVerdicts[key] = verdict;
       }
       const body: DiskFile = { version: 1, rows: out, kiroVerdicts };
-      atomicWriteFile(join(getConfigDir(), FILENAME), `${JSON.stringify(body)}\n`);
-    } catch {
+      atomicWriteFile(join(dir, FILENAME), `${JSON.stringify(body)}\n`);
+    }).catch(() => {
       // Best-effort persistence only.
-    }
-  }, PERSIST_DEBOUNCE_MS);
+    });
+  }, delay);
 }
 
 /** Test seam: drop any pending write so a suite cannot leak one into the next file. */
 export function cancelPendingAccountQuotaPersist(): void {
-  if (!persistTimer) return;
-  clearTimeout(persistTimer);
+  if (persistTimer) clearTimeout(persistTimer);
   persistTimer = null;
+  persistStartedAt = null;
+  persistGeneration += 1;
 }

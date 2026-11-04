@@ -11,6 +11,7 @@ import Grok from "./Grok";
 import CursorIntegrationPage from "./integrations/CursorIntegrationPage";
 import IntegrationsOverview from "./integrations/IntegrationsOverview";
 import AsideProfilesPage from "./integrations/AsideProfilesPage";
+import HermesProfilesPage from "./integrations/HermesProfilesPage";
 import LazyCodexRoleModels from "./integrations/LazyCodexRoleModels";
 import FileIntegrationPage, {
   type FileIntegrationClientId,
@@ -165,7 +166,7 @@ export default function Integrations({ apiBase, machineApiBase = apiBase, connec
             onClick={() => selectTab(definition.id, true)}
             onKeyDown={handleTabKeyDown}
           >
-            {tabMark(definition.id) && (
+            {definition.id !== "overview" && definition.id !== "keys" && (
               <ClientMark src={tabMark(definition.id)} label={t(definition.labelKey)} size={14} />
             )}
             {t(definition.labelKey)}
@@ -211,7 +212,8 @@ export default function Integrations({ apiBase, machineApiBase = apiBase, connec
             )}
             {definition.id === "cursor" && <CursorIntegrationPage apiBase={apiBase} active={active} />}
             {FILE_CLIENTS.has(definition.id as FileIntegrationClientId) && (
-              definition.id === "aside" ? <AsideProfilesPage apiBase={apiBase} active={active} /> : <FileIntegrationPage
+              definition.id === "aside" ? <AsideProfilesPage apiBase={apiBase} active={active} />
+              : definition.id === "hermes" ? <HermesProfilesPage apiBase={apiBase} active={active} /> : <FileIntegrationPage
                 apiBase={apiBase}
                 client={definition.id as FileIntegrationClientId}
                 active={active}

@@ -1,4 +1,6 @@
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
+import { assertWorkBuddyDestination } from "../providers/workbuddy";
+import { resolveDshAccountMessagesUrl } from "../providers/dsh-account-destination";
 import { redactSecretString } from "../lib/redact";
 import {
   isValidModelDiscoveryModelId,
@@ -256,10 +258,11 @@ export function autoReviewModelTargetConfigError(
   field = "autoReviewModel",
   allowClear = false,
 ): string | null {
-  if (value === undefined || (allowClear && (value === null || value === ""))) return null;
+  if (value === undefined || (allowClear && value === null)) return null;
   if (typeof value !== "string") return `${field} must be a string`;
   const trimmed = value.trim();
-  if (!trimmed) return `${field} must be nonblank`;
+  // `allowClear` callers trim then delete, so whitespace-only is a clear, not a blank selector.
+  if (!trimmed) return allowClear ? null : `${field} must be nonblank`;
   if (trimmed.length > 1024 || AUTO_REVIEW_MODEL_CONTROL_CHARS.test(trimmed)) {
     return `${field} must be a catalog selector without whitespace or control characters`;
   }
@@ -269,6 +272,26 @@ export function autoReviewModelTargetConfigError(
 /** True when the value is a valid Codex catalog auto-review selector. */
 export function isValidAutoReviewModel(value: unknown): value is string {
   return typeof value === "string" && autoReviewModelTargetConfigError(value) === null;
+}
+
+/**
+ * Validate the global auto-review override block the Models settings panel writes.
+ *
+ * `enabled` is optional so a save may carry only the model during an edit; `model` follows the
+ * same selector rules as the provider-scoped field, and an empty value clears the override.
+ */
+export function autoReviewOverrideConfigError(value: unknown, field = "autoReviewOverride"): string | null {
+  if (value === undefined || value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return `${field} must be a plain object`;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    return `${field} must be a plain object with own properties`;
+  }
+  const block = value as Record<string, unknown>;
+  if (block.enabled !== undefined && typeof block.enabled !== "boolean") {
+    return `${field}.enabled must be a boolean`;
+  }
+  return autoReviewModelTargetConfigError(block.model, `${field}.model`, true);
 }
 
 /** Canonical model key used for map matching, duplicate detection, and route tombstones. */
@@ -390,9 +413,44 @@ export function modelAdapterRecordConfigError(
 }
 
 
+/**
+ * The `dsh-account` row owns the DeepSeek Harness account token, which every helper resolves by this
+ * provider name. Keeping the row on its own adapter and DeepSeek's Anthropic host means no generic
+ * helper (Anthropic sidecars, discovery, probes) can be pointed at another destination with it.
+ */
+export function credentialPinnedProviderConfigError(
+  providerName: string,
+  provider: { adapter?: unknown; baseUrl?: unknown },
+): string | null {
+  if (providerName === "workbuddy-ai" || provider.adapter === "workbuddy-ai") {
+    if (provider.adapter !== undefined && provider.adapter !== "workbuddy-ai") return 'adapter must stay "workbuddy-ai"';
+    try { if (typeof provider.baseUrl === "string") assertWorkBuddyDestination(provider.baseUrl); }
+    catch { return "WorkBuddy AI credentials require https://www.workbuddy.ai/v2"; }
+    return null;
+  }
+  if (providerName !== "dsh-account") return null;
+  if (provider.adapter !== undefined && provider.adapter !== "dsh-account") {
+    return 'adapter must stay "dsh-account": its account token is pinned to that adapter';
+  }
+  if (typeof provider.baseUrl === "string") {
+    try { resolveDshAccountMessagesUrl(provider.baseUrl); } catch {
+      return "baseUrl must stay on https://api.deepseek.com/anthropic: its account token is pinned to that host";
+    }
+  }
+  return null;
+}
+
 function capabilityRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+}
+
+/** Provider-wide fallback; the same modality vocabulary as exact model declarations. */
+export function providerInputModalitiesConfigError(value: unknown): string | null {
+  if (value === undefined) return null;
+  return Array.isArray(value) && value.length > 0
+    && value.every(item => typeof item === "string" && ["text", "image", "audio", "video"].includes(item))
+    ? null : "inputModalities must be a nonempty array of text, image, audio or video";
 }
 
 /** Strict per-model context-tier values; PATCH accepts null to clear the entire map. */
@@ -420,7 +478,7 @@ export function modelCapabilitiesConfigError(value: unknown, allowTombstones = f
     if (allowTombstones && row === null) continue;
     if (!capabilityRecord(row)) return "modelCapabilities rows must be plain objects";
     for (const [axis, declaration] of Object.entries(row)) {
-      if (!["inputModalities", "contextTier", "video"].includes(axis)) return "modelCapabilities contains an unknown axis";
+      if (!["inputModalities", "contextTier", "video", "deepseekImageFiles", "supportsReasoning", "supportsThinkingToggle", "supportsReasoningEffort", "defaultThinkingEnabled"].includes(axis)) return "modelCapabilities contains an unknown axis";
       if (allowTombstones && declaration === null) continue;
       if (axis === "inputModalities") {
         if (!Array.isArray(declaration) || declaration.length === 0
@@ -429,6 +487,8 @@ export function modelCapabilitiesConfigError(value: unknown, allowTombstones = f
         }
       } else if (axis === "contextTier") {
         if (declaration !== "default" && declaration !== "long_context") return "modelCapabilities contextTier must be default or long_context";
+      } else if (["deepseekImageFiles", "supportsReasoning", "supportsThinkingToggle", "supportsReasoningEffort", "defaultThinkingEnabled"].includes(axis)) {
+        if (typeof declaration !== "boolean") return `modelCapabilities ${axis} must be a boolean`;
       } else {
         if (!capabilityRecord(declaration) || Object.keys(declaration).some(key => key !== "processing")) {
           return "modelCapabilities video must be a plain object containing only processing";
@@ -458,6 +518,12 @@ export function mergeModelCapabilities(
       } else if (axis === "contextTier") {
         if (value === null) delete row.contextTier;
         else row.contextTier = value as ModelCapabilities["contextTier"];
+      } else if (axis === "deepseekImageFiles") {
+        if (value === null) delete row.deepseekImageFiles;
+        else row.deepseekImageFiles = value as boolean;
+      } else if (axis === "supportsReasoning" || axis === "supportsThinkingToggle" || axis === "supportsReasoningEffort" || axis === "defaultThinkingEnabled") {
+        if (value === null) delete row[axis];
+        else row[axis] = value as boolean;
       } else if (axis === "video") {
         if (value === null) delete row.video;
         else {
@@ -485,7 +551,7 @@ export function sanitizeModelCapabilitiesForLoad(value: unknown): Record<string,
   for (const [id, raw] of Object.entries(value).slice(0, MODEL_DISCOVERY_MAX_MODELS)) {
     if (!capabilityRecord(raw) || !isValidModelDiscoveryModelId(id) || ["__proto__", "prototype", "constructor"].includes(id)) continue;
     const row: Record<string, unknown> = {};
-    for (const axis of ["inputModalities", "contextTier", "video"] as const) {
+    for (const axis of ["inputModalities", "contextTier", "video", "deepseekImageFiles", "supportsReasoning", "supportsThinkingToggle", "supportsReasoningEffort", "defaultThinkingEnabled"] as const) {
       if (!Object.hasOwn(raw, axis)) continue;
       const declaration = raw[axis];
       if (modelCapabilitiesConfigError({ [id]: { [axis]: declaration } }) === null) row[axis] = declaration;

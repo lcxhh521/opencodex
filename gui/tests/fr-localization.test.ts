@@ -27,6 +27,7 @@ function carriesTranslatableWords(value: string): boolean {
 const INTENTIONAL_ENGLISH = new Set<TKey>([
   "nav.claude", // Product name.
   "nav.codexSet", // Product name: the sidebar row reads "Codex" in every locale.
+  "kiroLogin.iam", // AWS product name, retained in the original spelling.
   // The vendor name, and the Pool 2 label that de and pt also keep: "pool" is the French UI term here.
   "sidecar.poolA",
   "sidecar.poolB",
@@ -125,6 +126,7 @@ const INTENTIONAL_ENGLISH = new Set<TKey>([
   "integrations.cursor.baseUrl",
   "integrations.tab.opencode",
   "integrations.tab.pi",
+  "integrations.tab.gentleShell", // Product name, retained in the original spelling.
   "integrations.tab.omp",
   "integrations.tab.hermes",
   "integrations.tab.openclaw",
@@ -167,6 +169,13 @@ const INTENTIONAL_ENGLISH = new Set<TKey>([
   // Qoder is a product name, identical in every locale.
   "integrations.tab.qoder",
   "api.clientConfig.clientQoder",
+  // Qoder CN and the two WorkBuddy editions are product names too.
+  "integrations.tab.qoderCn",
+  "integrations.tab.workbuddy",
+  "integrations.tab.workbuddyAi",
+  // T3 Code is a product name, identical in every locale.
+  "integrations.tab.t3code",
+  "api.clientConfig.clientT3code",
   "models.reasoningEffort.minimal",
   "models.reasoningEffort.max",
   "models.reasoningEffort.ultra",

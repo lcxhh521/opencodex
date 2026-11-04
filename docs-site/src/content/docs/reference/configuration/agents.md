@@ -56,7 +56,8 @@ still depends on upstream support for your account.
 | `subagentModelFallback?` | `string[]` | `[]` | Priority-ordered global fallback models for spawned child turns. |
 | `subagentModelFallbackByModel?` | `Record<string, string[]>` | `{}` | Per-primary-model fallback chains, keyed by the requested primary model id. This is the supported home for per-role fallback metadata; `model_fallback` inside Codex agent TOML makes Codex 0.146+ skip the role (#1190). |
 | `subagentModelFallbackPollMs?` | `number` | `60000` | Availability-probe cache interval. Values below 1000 ms fall back to the default. |
-| `codexRoleTiers?` | `{ fast?, standard?, frontier?: string[] }` | — | Capability tier of named models for [role auto-assign](/guides/integrations/#auto-assign). Listed models take that tier; other models are tiered by price, and unpriced unlisted models are never proposed. |
+| `codexRoleTiers?` | `{ fast?, standard?, frontier?: string[] }` | — | Capability tier of named models for [role auto-assign](/guides/integrations/#auto-assign). Listed models take that tier; other models are tiered by measured score in the role's domain when two or more have one, without requiring prices. Equal scores share a tier. Otherwise price tiering excludes unpriced, unlisted models. |
+| `codexRoleCapability?` | `{ artificialAnalysis?: { apiKey?: string } }` | No measured source | Measured-score source for [role auto-assign](/guides/integrations/#auto-assign). Artificial Analysis uses your API key (literal, `${ENV}` or keychain reference) once per day to read its free model list, every domain scored by its Intelligence Index; scores stay out of the response. Missing or unavailable data falls back to configured tiers and prices. A retired `huggingFace` key is ignored. |
 | `effortCap?` | `string` | — | Hard ceiling for qualifying v2 main turns and marked spawned-child turns. Accepts `low` through `ultra`. |
 | `subagentEffortCap?` | `string` | — | Additional ceiling for spawned-child turns only. When both caps apply, the lower wins. |
 | `plaintextV2AgentMessages?` | `boolean` | — (unset) | Experimental opt-in. It runs only when explicitly set to `true` and asks eligible native ChatGPT v2 parents to emit `spawn_agent`, `send_message`, and `followup_task` message arguments as plaintext. See [Plaintext v2 agent messages](#plaintext-v2-agent-messages). |
@@ -67,6 +68,12 @@ Manage the surface with the dashboard or
 Mode changes apply to new sessions. `maxConcurrentThreadsPerSession` is a `PUT /api/v2` field, not a
 `config.json` key; `ocx v2 threads <n>` writes `max_concurrent_threads_per_session` under
 `[features.multi_agent_v2]` in Codex's `$CODEX_HOME/config.toml` after v2 is enabled.
+
+The Models page's sub-agent limit counts children. A stored V2 total of 1 is root-only
+and displays 0; setting one child saves a V2 total of 2. New child limits must be at least
+1, and both the child count and converted API value must be safe integers (at most
+9,007,199,254,740,991). With global V2 disabled, including hybrid mode, no root slot is added.
+The API rejects unsafe limits with 400 before changing the feature flag or configuration.
 
 **Always proactive delegation** in Subagents → Advanced (formerly **Ultra mode**) changes the
 delegation trigger without changing reasoning effort. Its preset preserves user instructions,
@@ -107,6 +114,8 @@ adds `[features] default_mode_request_user_input = true` to Codex's
 Default-mode session and ask you questions with the `request_user_input` tool. The
 flag is under development upstream and only applies to new sessions; the toggle fails
 loudly when the installed Codex build does not know the flag yet.
+
+While a Codex CLI update owns the installation, the toggle returns retryable HTTP 503 (`codex_cli_selection_busy`) before running the feature command. Retry after the update finishes; config-write failures still return 502.
 
 ## Roster and guidance
 
@@ -378,8 +387,18 @@ Synthetic-row effort and combo defaults are preserved as the effective input bef
 Each selected destination resolves its own pin, then applicable caps and wire normalization.
 Compaction requests are exempt. `none` means effort omission and provider-default behavior,
 not guaranteed reasoning disablement.
+For canonical OpenAI forwarding, the final model's supported effort list takes precedence:
+`gpt-6.1-sol` and `gpt-6.1-terra` start at `low`, so an incoming `none` or `minimal` is sent as `low`, including
+after a compaction model switch or combo failover.
 
 `GET /api/effort-caps` includes the map. `PUT /api/effort-caps` accepts `modelPinnedEfforts`
 alongside the existing caps: omitted fields stay unchanged, `null` clears the map, and a map
 entry set to `null` or `""` deletes only that key. Invalid combined updates leave both caps
 and pins unchanged. Saving a pin does not alter the featured subagent roster.
+
+## CLI updates during v1 synchronization
+
+When an explicit `multiAgentMode: "v1"` synchronization must disable Codex's global v2
+override, an ongoing Codex CLI update can temporarily refuse the synchronization.
+Retry after the update finishes. A home already using v1 can still synchronize during
+the update because no native feature command is needed.

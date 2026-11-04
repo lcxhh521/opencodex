@@ -69,7 +69,7 @@ import {
   resetCodexRoutingForManualSelection,
 } from "../../src/codex/routing";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
-import { setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import {
   blockNativeMainStartupForUnownedServiceHome,
   completeNativeMainRecovery,
@@ -86,17 +86,19 @@ import { recordContextSessionOwner, clearContextSessionOwnersForTests } from "..
 import { handleContextHistory } from "../../src/server/context-history";
 import { resetContextRelayActivationForTests } from "../../src/codex/context-compat";
 import { hasForwardableCodexBearer } from "../../src/server/auth-cors";
-import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { drainAndRemoveFixtureRoots } from "../helpers/fixture-teardown";
 
 let testDir: string;
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
 
 beforeEach(() => {
-  // This suite validates refresh admission and auth-context outcomes. Real icacls
-  // processes are covered elsewhere and can retain temp-dir handles long enough
-  // to obscure those assertions under Windows isolated-test load.
+  // This suite validates refresh admission and auth-context outcomes; real icacls is
+  // covered by tests/windows. Both runners are stubbed: the native-main claim lock is
+  // hardened through the ASYNC runner, and with only the sync one stubbed, real icacls
+  // still rewrote that lock's DACL under the home this teardown removes (#7515).
   setIcaclsRunnerForTests(() => ({ success: true, exitCode: 0, timedOut: false, stdout: "" }));
+  setAsyncIcaclsRunnerForTests(async () => ({ success: true, exitCode: 0, timedOut: false, stdout: "" }));
   testDir = mkdtempSync(join(tmpdir(), "ocx-auth-ctx-"));
   previousOpencodexHome = process.env.OPENCODEX_HOME;
   process.env.OPENCODEX_HOME = testDir;
@@ -113,21 +115,28 @@ beforeEach(() => {
   clearAccountNeedsReauth("pool-b");
 });
 
-afterEach(() => {
+afterEach(async () => {
   resetContextRelayActivationForTests();
-  setIcaclsRunnerForTests(null);
-  removeTreeWithRetry(testDir);
-  clearThreadAccountMap();
-  clearCodexUpstreamHealth();
-  clearAccountQuota();
-  setMainAccountPlan(null);
-  __resetGuardianState();
-  clearAccountNeedsReauth("pool-a");
-  clearAccountNeedsReauth("pool-b");
-  if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
-  else process.env.OPENCODEX_HOME = previousOpencodexHome;
-  if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
-  else process.env.CODEX_HOME = previousCodexHome;
+  // Settle producers, config flights and ACL work, and refuse a home whose native-main
+  // owner is still open, before removal; the stubs stay installed until removal ends.
+  await drainAndRemoveFixtureRoots({
+    roots: [{ path: testDir }],
+    restoreEnvironment: () => {
+      setIcaclsRunnerForTests(null);
+      setAsyncIcaclsRunnerForTests(null);
+      clearThreadAccountMap();
+      clearCodexUpstreamHealth();
+      clearAccountQuota();
+      setMainAccountPlan(null);
+      __resetGuardianState();
+      clearAccountNeedsReauth("pool-a");
+      clearAccountNeedsReauth("pool-b");
+      if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousOpencodexHome;
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+    },
+  });
 });
 
 function config(): OcxConfig {
@@ -684,6 +693,32 @@ describe("Codex auth context", () => {
     })).resolves.toMatchObject({
       kind: "pool",
       accountId: "pool-a",
+    });
+  });
+
+  test("main-pool selection carries the same affinity decision as a stored-pool selection (#7799)", async () => {
+    const cfg = config();
+    cfg.activeCodexAccountId = MAIN_CODEX_ACCOUNT_ID;
+    writeFileSync(join(testDir, "auth.json"), JSON.stringify({
+      tokens: { access_token: "main-token", account_id: "main-account" },
+    }));
+    // Thread and session ids give the request a bindable conversation identity.
+    const headers = { "thread-id": "affinity-7799", "session-id": "affinity-7799" };
+    const resolve = () => resolveCodexAuthContext(new Headers(headers), cfg, "pool", {
+      isMainAccountTokenLive: () => true,
+      getMainAccountToken: () => ({ accessToken: "main-token", chatgptAccountId: "main-account" }),
+      primeCodexPoolQuotas: async () => {},
+    });
+
+    await expect(resolve()).resolves.toMatchObject({
+      kind: "main-pool",
+      accountId: MAIN_CODEX_ACCOUNT_ID,
+      affinityDecision: { move: "new_bind", reason: "healthy" },
+    });
+    await expect(resolve()).resolves.toMatchObject({
+      kind: "main-pool",
+      accountId: MAIN_CODEX_ACCOUNT_ID,
+      affinityDecision: { move: "reused", reason: "healthy" },
     });
   });
 
@@ -2251,6 +2286,7 @@ describe("cooldown error surface", () => {
 
     expect(response.status).toBe(503);
     expect(response.headers.get("Retry-After")).toBe("1");
+    expect(response.headers.get("x-opencodex-native-main-fence-reason")).toBeNull();
     const body = await response.json() as { error?: { message?: string; code?: string } };
     expect(body.error).toMatchObject({
       message: CODEX_MAIN_PROFILE_MAINTENANCE_MESSAGE,
@@ -2430,4 +2466,21 @@ test("context Direct bearer admission uses real stored-main materialization and 
     clearContextSessionOwnersForTests();
     globalThis.fetch = originalFetch;
   }
+});
+
+test("pool exhaustion never falls back to an observed paused main caller", async () => {
+  const cfg = config();
+  cfg.codexAccounts = [];
+  cfg.pausedCodexAccountIds = [MAIN_CODEX_ACCOUNT_ID];
+  cfg.codexMainAccountHardLock = false;
+  observeMainQuotaIdentity("paused-main-account");
+  observeMainQuotaCredential("paused-main-bearer", "paused-main-account");
+  const headers = new Headers({ authorization: "Bearer paused-main-bearer", "chatgpt-account-id": "paused-main-account" });
+  await expect(resolveCodexAuthContext(headers, cfg, "pool", {
+    requestScopedMainCredential: true,
+  })).rejects.toBeInstanceOf(CodexMainProfileDrainingError);
+  // Direct remains caller-owned; the pause applies to Pool fallback, not unrelated callers.
+  expect(await resolveCodexAuthContext(headers, cfg, "direct", {
+    requestScopedMainCredential: true,
+  })).toMatchObject({ kind: "main", accountId: null });
 });

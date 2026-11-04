@@ -1,4 +1,5 @@
 import type { UpstreamHttpVersion, ReasoningSummaryDelivery, CodexAccountMode } from "./wire";
+import type { AccountAutoPausePolicy, AccountPauseDetails } from "./account-auto-pause";
 import type { AnthropicAccountPoolConfig } from "./anthropic-account-pool";
 
 /**
@@ -14,6 +15,8 @@ export interface ProviderApiKeySelection {
   entryId?: string;
   reference?: string;
   revision?: string;
+  /** Request-local allocation; does not replace the saved active key. */
+  distributed?: boolean;
 }
 
 export interface OpenRouterProviderRouting {
@@ -164,16 +167,25 @@ export interface ProviderWebSearchBridgeConfig {
   endpoint?: string;
 }
 
-/**
- * User-configured display price for one model (USD per 1M tokens).
- * Mirrors the `Cost4` shape used by the usage cost estimator; structurally
- * compatible so config rows can be lifted directly into price overlays.
- */
+/** Optional user-owned prompt-length policy; rates are USD per 1M tokens. */
+export type PromptLengthPricing =
+  | { mode: "automatic" }
+  | { mode: "flat" }
+  | {
+    mode: "custom";
+    thresholdTokens: number;
+    comparison: "gt" | "gte";
+    rates: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  };
+
+/** Complete base rates for one model, with automatic pricing when policy is absent. */
 export interface ProviderCostOverlay {
   input: number;
   output: number;
   cacheRead: number;
   cacheWrite: number;
+  /** Absent means automatic vendor prompt-length pricing. */
+  promptLengthPricing?: PromptLengthPricing;
 }
 
 export interface RequestPacingRule {
@@ -190,6 +202,10 @@ export interface ProviderRequestPacingConfig extends RequestPacingRule {
   enabled: boolean;
   /** Exact upstream model-id overrides; other models inherit the provider rule. */
   models?: Record<string, RequestPacingRule>;
+  /** Normal request allocation, separate from cooldown recovery ordering. */
+  keySelection?: "active" | "round-robin";
+  /** Additional uniform limits per pool credential, across all models. */
+  keys?: RequestPacingRule;
 }
 
 export interface FastWire {
@@ -262,18 +278,28 @@ export type TierDecision =
   | { readonly kind: "drop" }
   | { readonly kind: "set"; readonly value: string };
 
-/**
- * One configured provider entry. `authMode` (default `"key"`) decides whether same-target 429
- * retries are allowed; OAuth/forward credentials and local runtimes are never replayed.
- */
+/** Independent reasoning axes. Absence means unknown, not an explicit denial. */
+export interface ReasoningCapabilities {
+  supportsReasoning?: boolean;
+  supportsThinkingToggle?: boolean;
+  supportsReasoningEffort?: boolean;
+  defaultThinkingEnabled?: boolean;
+}
+
 /** Explicit per-model operator declarations; absent axes keep legacy behavior. */
-export interface ModelCapabilities {
+export interface ModelCapabilities extends ReasoningCapabilities {
   inputModalities?: Array<"text" | "image" | "audio" | "video">;
   /** Requested tier only; does not imply an upstream window or activate an unverified wire. */
   contextTier?: "default" | "long_context";
   video?: { processing?: "static" | "agentic" };
+  /** Opt in exact first-party DeepSeek models to one-hour image file persistence. */
+  deepseekImageFiles?: boolean;
 }
 
+/**
+ * One configured provider entry. `authMode` (default `"key"`) decides whether same-target 429
+ * retries are allowed; OAuth/forward credentials and local runtimes are never replayed.
+ */
 export interface OcxProviderConfig {
   /** Explicit builtin Pool 2 provenance; endpoints never imply ownership. */
   anthropicOAuthInstance?: "anthropic2";
@@ -409,6 +435,14 @@ export interface OcxProviderConfig {
   /** Exact upstream model ids that override the provider-level service-tier capability. */
   modelSupportsServiceTier?: Record<string, boolean>;
   /**
+   * Whether to promote Codex Desktop's `additional_tools` input items into top-level `tools`
+   * and strip the wrapper from `input`. Enabled automatically for OpenCode Go and xAI
+   * (`api.x.ai` and `cli-chat-proxy.grok.com`) except on forward-auth routes, which need an
+   * explicit `true`; other strict gateways that return HTTP 422 for unknown item types in
+   * `input` can opt in here.
+   */
+  promoteAdditionalTools?: boolean;
+  /**
    * Responses upstream whose native contract accepts plaintext reasoning replay
    * (DeepSeek documents reasoning items with plaintext content). When set, the
    * passthrough serializer keeps `reasoning_text` content on replayed reasoning
@@ -433,6 +467,12 @@ export interface OcxProviderConfig {
    */
   preserveResponsesMessageMetadata?: boolean;
   /**
+   * Opt in to lossy hosted-search history notes on canonical Codex Lite ordinary turns and
+   * native v2 compaction triggers, even when search is declared. Default off; only literal true
+   * enables it. History without a search declaration is always projected, independent of this.
+   */
+  projectResponsesLiteHostedSearchHistory?: boolean;
+  /**
    * Treat this provider's `modelReasoningEfforts` as authoritative at the wire, not only in the
    * catalog. Adapters that ship their own per-model effort table (currently `command-code`)
    * otherwise let that table win for models it knows, so a widened row is advertised in the
@@ -453,6 +493,10 @@ export interface OcxProviderConfig {
    * compaction blobs. Absent or false degrades foreign blobs to an opaque note.
    */
   decodesNativeCompactionBlobs?: boolean;
+  /** Accept native Responses v2 `input` compaction_trigger items. Responses adapter only. */
+  supportsNativeCompactionTrigger?: boolean;
+  /** Serve native Responses v1 /responses/compact. Responses adapter only; no auth authority. */
+  supportsNativeCompactEndpoint?: boolean;
   /**
    * Trust this direct key-auth Responses provider to consume or relay opaque encrypted
    * V2 agent tasks. OpenCodex does not decrypt, translate, or recover an eligible task.
@@ -543,7 +587,9 @@ export interface OcxProviderConfig {
    * entry so routing stays single-key; managed via /api/providers/keys. A legacy bare
    * `apiKey` seeds a one-entry pool on first management touch.
    */
-  apiKeyPool?: Array<{ id: string; key: string; label?: string; addedAt?: number }>;
+  apiKeyPool?: Array<{ id: string; key: string; label?: string; addedAt?: number; disabled?: boolean; pauseDetails?: AccountPauseDetails; pauseRevision?: string }>;
+  /** Explicit opt-in permanent account refusal policy; default off. */
+  accountAutoPause?: AccountAutoPausePolicy;
   /**
    * Optional proactive ordering for `apiKeyPool` when the committed key is already
    * cooling. Deliberately NOT named like the OAuth `accountPoolStrategy`: an API key
@@ -631,6 +677,12 @@ export interface OcxProviderConfig {
   modelContextTiers?: Record<string, "default" | "long_context">;
   /** Model-specific Codex catalog input modalities, e.g. ["text"] or ["text", "image"]. */
   modelInputModalities?: Record<string, string[]>;
+  /**
+   * Provider-wide input modalities, applied to models `modelInputModalities` does not enumerate
+   * (a live-discovered id, for example). The registry's value is applied at runtime only, for the
+   * preset's own destination, and never persisted; a per-model declaration still wins.
+   */
+  inputModalities?: string[];
   modelCapabilities?: Record<string, ModelCapabilities>;
   /** Model-specific max input token limits. Values cap auto_compact_token_limit. */
   modelMaxInputTokens?: Record<string, number>;
@@ -712,12 +764,14 @@ export interface OcxProviderConfig {
     /** Kiro OAuth only: active serving requests per account, 1..100. */
     maxConcurrentPerAccount?: number;
     enabled?: boolean;
+    /** Opt-in process-local conversation ownership; requires proactive enablement. */
+    sessionAffinity?: "conversation" | "none";
     /**
      * Generic OAuth pool selection strategy (#695). Persisted through the pool-settings
      * contract. Consumed by the selector only while `pool.kernel` is on; with the flag off
      * it is still merely persisted, so omitted and set behave the same.
      */
-    strategy?: "quota" | "round-robin" | "fill-first" | "least-loaded";
+    strategy?: "quota" | "round-robin" | "fill-first" | "reset-first" | "least-loaded";
     /**
      * 0-100 usage percent at which fill-first advances off the active account (#695).
      * Read only under `pool.kernel` with `strategy: "fill-first"`; 80 when unset, matching
@@ -840,6 +894,14 @@ export interface OcxProviderConfig {
    */
   responsesSnapshotRepair?: boolean;
   /**
+   * Infer the commentary/final_answer phase on assistant messages for Responses passthrough
+   * providers whose upstream omits it (e.g. third-party gateways). Codex desktop collapses
+   * commentary into progress rows; without this every narration renders fully expanded.
+   * Disabled by default. Applies in the client-facing SSE rewrite chain, including
+   * buffered JSON reconstructed from upstream SSE; ordinary upstream JSON is unchanged.
+   */
+  messagePhaseInference?: boolean;
+  /**
    * Opt-in hosted-web-search bridge for this KEY-auth Responses passthrough provider (#3761).
    * Absent or disabled leaves the passthrough byte-identical to today.
    */
@@ -860,7 +922,7 @@ export interface OcxProviderConfig {
    * `reasoningEffortMap`, resolved per model first.
    */
   modelReasoningEffortMap?: Record<string, Record<string, string>>;
-  /** OpenAI-compatible gateway reasoning wire shape. Default sends `reasoning_effort`. */
+  /** Chat gateway reasoning object; also opts custom Responses wires into `reasoning.enabled`. */
   reasoningWireFormat?: "gateway-object";
   /**
    * Model ids that do NOT support a reasoning/thinking parameter. The openai-chat adapter drops
@@ -957,6 +1019,8 @@ export interface OcxProviderConfig {
    * keeps its slot in the conversation.
    */
   foldDeveloperRoleToSystem?: boolean;
+  /** Merge text-only Chat instruction messages into one leading system message. LM Studio seeds true. */
+  singleLeadingSystemMessage?: boolean;
   /**
    * Opt-in: forward `prompt_cache_key` to the upstream `/chat/completions` body.
    * OpenAI-specific extension; strict backends (Groq, Cerebras, etc.) reject unknown
@@ -1084,9 +1148,9 @@ export interface OcxProviderConfig {
   googleMode?: "ai-studio" | "vertex" | "cloud-code-assist";
   /** Google tool-schema compatibility policy. Omitted preserves compatible report-only behavior. */
   googleToolSchemaPolicy?: "compatible" | "reject-lossy";
-  /** Vertex AI GCP project id (or GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT env). */
+  /** Vertex AI GCP project id. API keys use it to select the project endpoint; "auto" resolves each API key's own project. ADC falls back to GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT env. */
   project?: string;
-  /** Vertex AI location, e.g. "us-central1" or "global" (or GOOGLE_CLOUD_LOCATION env). */
+  /** Vertex AI location, e.g. "us-central1" or "global". API-key project endpoints default to "global"; ADC falls back to GOOGLE_CLOUD_LOCATION env. */
   location?: string;
   /**
    * Cursor adapter only: MCP servers opencodex starts/connects and exposes to the Cursor agent

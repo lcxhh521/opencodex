@@ -1,3 +1,4 @@
+import { markProxyError, isProxyError } from "../../lib/client-error-body";
 /**
  * AdapterEvent -> client wire, without the internal Responses SSE (PF-09).
  *
@@ -28,7 +29,7 @@
  * completed-response effects belong to the caller, which folds the same events with
  * `buildResponseJSON` at the terminal through `beforeTerminal`.
  */
-import type { AdapterEvent, OcxMessagePhase, OcxProviderContinuationState, OcxUsage } from "../../types";
+import type { AdapterEvent, AnthropicServerBlocks, OcxMessagePhase, OcxProviderContinuationState, OcxUsage } from "../../types";
 import { normalizeDeclaredToolName } from "../../types";
 import { coerceIntegerToolArguments } from "../../lib/tool-argument-integers";
 import { classifyError, isCyberPolicyCode, type OcxErrorPayload } from "../../lib/errors";
@@ -61,6 +62,7 @@ export interface ClientWebSearch {
   status: "completed" | "failed";
   queries: string[];
   sources: { url: string; title?: string }[];
+  anthropic?: AnthropicServerBlocks;
 }
 
 /**
@@ -87,14 +89,25 @@ export interface EncodedTerminal {
   durable: boolean;
 }
 
+const encoderTransportFailures = new WeakSet<object>();
+const originalErrorEvidence = new WeakMap<object, { status?: number; type?: string; code?: string; message: string }>();
+/** Original adapter fields for a client writer; terminal classification stays independent. */
+export function encoderOriginalErrorEvidence(terminal: EncodedTerminal) {
+  return originalErrorEvidence.get(terminal);
+}
+
+export function isEncoderTransportFailure(terminal: EncodedTerminal): boolean {
+  return encoderTransportFailures.has(terminal);
+}
+
 /** Frame output owned by the driver: budget reservation, delivery release and relay counts. */
 export interface ClientFrameSink {
   readonly budget: TranslatorBudget;
-  emit(text: string, observation?: RelayedEventObservation): void;
+  emit(text: string, observation?: RelayedEventObservation, onAdmitted?: () => void, admissionText?: string): void;
   /** Admit every frame before exposing any of them. */
   emitBatch(frames: { text: string; observation?: RelayedEventObservation }[]): void;
   /** A fixed, bounded frame that must reach the client even when the budget is exhausted. */
-  emitBounded(text: string): void;
+  emitBounded(text: string, onAdmitted?: () => void): void;
   /** A transport keepalive; it counts as neither wire activity nor a relayed event. */
   emitKeepalive(text: string): void;
   desiredSize(): number;
@@ -108,7 +121,13 @@ export interface ClientWireWriter {
   text(delta: string): void;
   messageDone(): void;
   reasoning(delta: string, itemId: string, channel: "summary" | "raw"): void;
-  reasoningDone(item: { itemId: string; signature?: string; redacted?: string[] }): void;
+  /** `hidden`: the signature covers thinking text the client was not shown (the bridge's `txt`). */
+  reasoningDone(item: { itemId: string; signature?: string; redacted?: string[]; hidden?: true }): void;
+  /**
+   * An Anthropic progress update: `text` is shown as content and is also the signed thinking
+   * block's text. Optional — a writer without it renders the update as ordinary text.
+   */
+  progressThinking?(text: string, signature: string): void;
   toolStart(call: ClientToolCall): void;
   toolArgsDelta(itemId: string, delta: string): void;
   toolArgsDone(itemId: string, args: string): void;
@@ -136,6 +155,8 @@ export interface ClientEncodeHooks {
 export interface AdapterEventEncodeOptions {
   translatorBudget: TranslatorBudget;
   hideThinkingSummary?: boolean;
+  /** Chat client delivery only, independent of upstream thinking/summary configuration. */
+  chatRawReasoningVisible?: boolean;
   /** Provider policy: suppress raw content-channel reasoning, keep provider-authored summaries. */
   hideRawReasoning?: boolean;
   toolNsMap?: ReadonlyMap<string, { namespace: string; name: string; freeform?: true }>;
@@ -172,9 +193,7 @@ export function encodeAdapterEventStream(
   const heartbeatMs = options.heartbeatMs ?? 2_000;
   const setTimer = options.timers?.setInterval ?? ((handler: () => void, ms: number) => setInterval(handler, ms));
   const clearTimer = options.timers?.clearInterval ?? ((id: unknown) => clearInterval(id as ReturnType<typeof setInterval>));
-  const maxStallTicks = Math.ceil(
-    (resolveStallTimeoutSec(options.stallTimeoutSec, { localUpstream: options.localUpstream }) * 1000) / heartbeatMs,
-  );
+  let localUpstream = options.localUpstream;
   const textEncoder = new TextEncoder();
 
   let controller!: ReadableStreamDefaultController<Uint8Array>;
@@ -195,10 +214,11 @@ export function encodeAdapterEventStream(
   const relayed = (observation?: RelayedEventObservation) => {
     try { hooks.onRelayed?.(observation ?? {}); } catch { /* counters never break the stream */ }
   };
-  const enqueueCharged = (text: string, observation?: RelayedEventObservation, activity = true): void => {
+  const enqueueCharged = (text: string, observation?: RelayedEventObservation, activity = true, onAdmitted?: () => void, admissionText: string = text): void => {
     if (closed) return;
     const frame = textEncoder.encode(text);
-    const reservation = budget.reserveTransient(frame.byteLength, { kind: "live_transient" });
+    const admittedBytes = admissionText === text ? frame.byteLength : Buffer.byteLength(admissionText);
+    const reservation = budget.reserveTransient(admittedBytes, { kind: "live_transient" });
     try {
       controller.enqueue(frame);
     } catch {
@@ -207,16 +227,17 @@ export function encodeAdapterEventStream(
       return;
     }
     reservation.commitRetained();
-    queuedFrameBytes.push(frame.byteLength);
+    queuedFrameBytes.push(admittedBytes);
     emittedFrames++;
     if (activity) wireActivity = true;
     // A keepalive is transport liveness, not a relayed event: the bridge enqueues its heartbeat
     // outside the relay counter, and the converters' keepalives never reach it either.
     if (activity) relayed(observation);
+    onAdmitted?.();
   };
   const sink: ClientFrameSink = {
     budget,
-    emit: (text, observation) => enqueueCharged(text, observation),
+    emit: (text, observation, onAdmitted, admissionText) => enqueueCharged(text, observation, true, onAdmitted, admissionText),
     emitBatch: frames => {
       if (closed) return;
       const staged: { frame: Uint8Array; reservation: ReturnType<TranslatorBudget["reserveTransient"]>; observation?: RelayedEventObservation }[] = [];
@@ -245,12 +266,13 @@ export function encodeAdapterEventStream(
       }
       wireActivity = true;
     },
-    emitBounded: text => {
+    emitBounded: (text, onAdmitted) => {
       if (closed) return;
       try {
         controller.enqueue(textEncoder.encode(text));
         emittedFrames++;
         relayed({ terminal: true });
+        onAdmitted?.();
       } catch {
         closed = true;
       }
@@ -330,6 +352,8 @@ export function encodeAdapterEventStream(
   let currentRawReasoning: { itemId: string } | null = null;
   let pendingSignature: string | undefined;
   let pendingRedacted: string[] = [];
+  // The bridge's hiddenThinking: non-empty thinking text suppressed by hideThinkingSummary.
+  let hiddenThinkingSeen = false;
   let hiddenRawBytes = 0;
   let pendingKiroRedacted: string | undefined;
   let currentToolCall: OpenToolCall | null = null;
@@ -366,9 +390,11 @@ export function encodeAdapterEventStream(
   };
   // hideThinkingSummary: a signed or redacted block still round-trips as an envelope-only item.
   const flushHiddenReasoningEnvelope = () => {
+    const hidden = hiddenThinkingSeen;
+    hiddenThinkingSeen = false;
     const envelope = takeReasoningEnvelope();
     if (!envelope) return;
-    writer.reasoningDone({ itemId: `rs_${uuid()}`, ...envelope });
+    writer.reasoningDone({ itemId: `rs_${uuid()}`, ...envelope, ...(hidden ? { hidden: true as const } : {}) });
   };
   const flushHiddenRawReasoning = () => {
     if (hiddenRawBytes === 0) return;
@@ -411,9 +437,9 @@ export function encodeAdapterEventStream(
     budget.closeCall(call.callId);
     currentToolCall = null;
   };
-  const closeCurrentWebSearch = (status: "completed" | "failed", queries: string[], sources?: { url: string; title?: string }[]) => {
+  const closeCurrentWebSearch = (status: "completed" | "failed", queries: string[], sources?: { url: string; title?: string }[], anthropic?: AnthropicServerBlocks) => {
     if (!currentWebSearch) return;
-    writer.webSearchDone({ itemId: currentWebSearch.itemId, status, queries, sources: sources ?? [] });
+    writer.webSearchDone({ itemId: currentWebSearch.itemId, status, queries, sources: sources ?? [], ...(anthropic ? { anthropic } : {}) });
     currentWebSearch = null;
   };
   const appendToolArgs = (call: OpenToolCall, fragment: string) => {
@@ -514,6 +540,7 @@ export function encodeAdapterEventStream(
       reportUsage: false,
       durable: false,
     };
+    markProxyError(terminal);
     runBeforeTerminalSync(terminal);
     try {
       writer.terminal(terminal);
@@ -533,10 +560,13 @@ export function encodeAdapterEventStream(
     stepping = true;
     gated = false;
     const emittedAtStart = emittedFrames;
+    let readingUpstream = false;
     try {
       while (!terminated && !closed && emittedFrames === emittedAtStart) {
         iteratorStarted = true;
+        readingUpstream = true;
         const next = await it.next();
+        readingUpstream = false;
         // A cancel during the await must not process or charge a late event.
         if (closed || clientCancelled) {
           gated = true;
@@ -569,6 +599,19 @@ export function encodeAdapterEventStream(
             break;
           }
           case "text_delta": {
+            if (event.anthropicThinkingSignature && writer.progressThinking) {
+              // The bridge's progress items: close everything, the carrier, then the visible copy.
+              if (currentMsg) closeCurrentMessage();
+              if (currentReasoning) closeCurrentReasoning();
+              if (currentRawReasoning) closeCurrentRawReasoning();
+              flushHiddenRawReasoning();
+              flushHiddenReasoningEnvelope();
+              if (currentToolCall) closeCurrentToolCall();
+              writer.progressThinking(event.text, event.anthropicThinkingSignature);
+              writer.text(event.text);
+              writer.messageDone();
+              break;
+            }
             if (currentReasoning) closeCurrentReasoning();
             if (currentRawReasoning) closeCurrentRawReasoning();
             flushHiddenRawReasoning();
@@ -584,6 +627,7 @@ export function encodeAdapterEventStream(
           }
           case "thinking_delta": {
             if (options.hideThinkingSummary) {
+              if (event.thinking.length > 0) hiddenThinkingSeen = true;
               flushHiddenRawReasoning();
               break;
             }
@@ -615,7 +659,7 @@ export function encodeAdapterEventStream(
             break;
           }
           case "reasoning_raw_delta": {
-            if (options.hideThinkingSummary || options.hideRawReasoning) {
+            if (!(options.chatRawReasoningVisible ?? !options.hideThinkingSummary) || options.hideRawReasoning) {
               hiddenRawBytes += Buffer.byteLength(event.text);
               break;
             }
@@ -657,6 +701,7 @@ export function encodeAdapterEventStream(
             break;
           }
           case "tool_call_end": {
+            if (event.incomplete) { failCurrentToolCall(); break; }
             // Streamed fragments cannot be repaired: unusable arguments fail the turn.
             if (currentToolCall && currentToolCall.kind === "function" && !toolCallArgumentsUsable(currentToolCall.args)) {
               failCurrentToolCall();
@@ -688,7 +733,7 @@ export function encodeAdapterEventStream(
               if (currentWebSearch) closeCurrentWebSearch("completed", []);
               currentWebSearch = { itemId: `ws_${uuid()}`, eventId: event.id };
             }
-            closeCurrentWebSearch(event.status ?? "completed", event.queries, safeWebSearchSources(event.sources));
+            closeCurrentWebSearch(event.status ?? "completed", event.queries, safeWebSearchSources(event.sources), event.anthropic);
             break;
           }
           case "done": {
@@ -729,7 +774,7 @@ export function encodeAdapterEventStream(
             terminal = {
               status: "incomplete",
               incomplete: {
-                reason: event.reason,
+                reason: truncationReasonFor(event.reason) ?? event.reason,
                 ...(event.message ? { message: event.message } : {}),
                 ...(event.retryable !== undefined ? { retryable: event.retryable } : {}),
               },
@@ -740,6 +785,7 @@ export function encodeAdapterEventStream(
               reportUsage: true,
               durable: true,
             };
+            if (isProxyError(event)) markProxyError(terminal);
             break;
           }
           case "error": {
@@ -765,6 +811,7 @@ export function encodeAdapterEventStream(
               reportUsage: event.usage !== undefined,
               durable: true,
             };
+            originalErrorEvidence.set(terminal, { status: event.status, type: event.errorType, code: event.code, message: event.message });
             break;
           }
           default:
@@ -794,6 +841,7 @@ export function encodeAdapterEventStream(
           reportUsage: false,
           durable: false,
         };
+        if (readingUpstream) encoderTransportFailures.add(terminal);
         try {
           if (!await deliverTerminalGuarded(terminal)) return;
         } catch { /* a failing hook on the failure path must not throw into the pull */ }
@@ -819,6 +867,7 @@ export function encodeAdapterEventStream(
         reportUsage: true,
         durable: true,
       };
+      markProxyError(terminal);
       try {
         if (!await deliverTerminalGuarded(terminal)) return;
       } catch { /* see the catch path above */ }
@@ -842,6 +891,8 @@ export function encodeAdapterEventStream(
       gated = true;
       beat = setTimer(() => {
         if (closed || gated) return;
+        if (localUpstream !== options.localUpstream) { localUpstream = options.localUpstream; stallTicks = 0; }
+        const maxStallTicks = Math.ceil((resolveStallTimeoutSec(options.stallTimeoutSec, { localUpstream }) * 1000) / heartbeatMs);
         if (upstreamActivity) {
           upstreamActivity = false;
           stallTicks = 0;

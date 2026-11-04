@@ -280,6 +280,24 @@ describe("stripNonOpenAiIncludeFields", () => {
 });
 
 describe("Responses buildRequest include stripping", () => {
+  // Serialization only: no provider request or credential lookup is needed.
+  for (const compaction of [false, true]) test(`custom gateway strips private output include (compaction=${compaction})`, () => {
+    const raw = {
+      model: "test-model", input: "ping",
+      include: ["output.encrypted_content", "reasoning.encrypted_content", "custom.future_field", "output.encrypted_content"],
+    };
+    const before = structuredClone(raw);
+    const request = createResponsesPassthroughAdapter({
+      adapter: "openai-responses", baseUrl: "https://gateway.example.test/v1",
+      authMode: "key", apiKey: "synthetic-gateway-key",
+    }).buildRequest({
+      modelId: "test-model", context: { messages: [] }, stream: true, options: {},
+      ...(compaction ? { _compactionRequest: true } : {}), _rawBody: raw,
+    }, { headers: new Headers() });
+    expect(JSON.parse(request.body).include).toEqual(["reasoning.encrypted_content", "custom.future_field"]);
+    expect(raw).toEqual(before);
+  });
+
   test("registry xAI traffic drops output.encrypted_content but keeps reasoning.encrypted_content", () => {
     const entry = getProviderRegistryEntry("xai");
     if (!entry) throw new Error("xAI registry entry missing");

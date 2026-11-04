@@ -200,8 +200,9 @@ Les échecs d’un combo se répartissent entre ceux qui entraînent un **bascul
 | --- | --- |
 | HTTP 401, 403, 404, 408, 429, ou n'importe quel 5xx | Refroidissez la cible et passez à la prochaine cible éligible. |
 | Erreur classée comme erreur d’authentification, d’abonnement, de quota, de limitation de débit, de surcharge ou de serveur en amont | Place la cible en période de refroidissement et bascule, même si le statut seul ne suffit pas. |
-| Annulation client (499), `origin_rejected`, refus de cyber-politique, débordement de contexte ou autre demande invalide | Arrêtez et renvoyez l'erreur ; une autre cible ne rendrait pas la demande valide. |
-| Rejet structuré de `user`, valeur non prise en charge pour `reasoning.effort`/`reasoning_effort`, ou rejet d'entrée d'image propre à un modèle (`param: input`) | Bascule vers la cible admissible suivante avant le début de la sortie, sans délai de refroidissement ; voir Compatibilité des paramètres facultatifs ci-dessous. |
+| Annulation client (499), `origin_rejected`, refus de cyber-politique ou autre demande invalide | Arrêtez et renvoyez l'erreur ; une autre cible ne rendrait pas la demande valide. |
+| Dépassement de contexte confirmé avant la sortie, y compris HTTP 400 | Essaie la prochaine cible admissible non tentée sans refroidissement ; à épuisement, renvoie la première erreur de contexte HTTP 400 confirmée (un refus de contexte avec un autre statut fait aussi passer à la cible suivante, sans être conservé). |
+| Rejet structuré de `user`, valeur non prise en charge pour `reasoning.effort`/`reasoning_effort`, rejet d'entrée d'image propre à un modèle (`param: input`), ou refus d'un média d'entrée que la route ne peut pas lire (`unsupported_input_modality`) | Bascule vers la cible admissible suivante avant le début de la sortie, sans délai de refroidissement ; voir Compatibilité des paramètres facultatifs ci-dessous. |
 | Premier appel d'outil d'un tour Responses exécuté par un adaptateur interne (`runTurn`) que la requête courante n'a pas déclaré, avant toute sortie et tout effet de bord non rejouable | Met la cible en refroidissement et bascule avec le même catalogue d'outils. Après une sortie visible ou un effet de bord non rejouable, le refus est définitif. Les requêtes Chat Completions et Anthropic Messages ne changent pas. |
 | Toute autre erreur non classifiée | Arrêtez et renvoyez l'erreur. |
 
@@ -210,8 +211,14 @@ valeur `Retry-After` valide, opencodex l’utilise à la place ; les en-têtes d
 acceptées, et un délai explicite `Retry-After` est plafonné à 24 heures ; les autres temps de recharge restent plafonnés à 10 minutes.
 
 La requête actuelle ne réessaye jamais la même cible tentée. Les demandes ultérieures l'ignorent jusqu'à ce qu'il soit
-le temps de recharge expire. S’il ne reste aucune cible éligible, le proxy renvoie HTTP 503 avec
+le temps de recharge expire. Si aucune cible n’a été tentée et qu’aucune n’est éligible, le proxy renvoie HTTP 503 avec
 `error.code = "combo_unavailable"`.
+
+Après un refus de contexte HTTP 400 confirmé, l’épuisement des cibles ou du budget d’envoi renvoie
+le premier refus sous `context_length_exceeded`, avant toute erreur ultérieure réessayable, même de quota.
+Cela inclut les cibles restantes incompatibles avec la relecture du raisonnement ou sans consentement
+de dépense. L’annulation, un refus fatal ultérieur ou un refus explicite de la politique de repli reste
+prioritaire ; aucune cible facturée sans consentement ne reçoit la requête.
 
 :::note
 Le basculement est intentionnellement limité. Il facilite la disponibilité, l'authentification et l'authentification spécifiques à la cible.
@@ -277,7 +284,7 @@ flux de travail des tâches.
 ### Tableau de bord
 
 Ouvrez le tableau de bord local et choisissez **Modèles → Combos**. L'espace de travail crée, modifie, renomme et supprime
-combos, et son sélecteur de cible exclut les modèles désactivés et les combos imbriqués.
+les combos. Les sélecteurs de modèles incluent les modèles masqués : la visibilité ne concerne que les listes externes, pas la sélection interne des combos. Sélectionner un modèle masqué ne le rend pas visible. Le sélecteur de cible exclut toujours les fournisseurs désactivés, les combos imbriqués et les fournisseurs JEV réservés au service de décision.
 
 Chaque cible affiche aussi un badge de quota en direct : **Disponible**, **Quota épuisé** ou **Quota inconnu**.
 L’éditeur bloque Enregistrer et Créer pour une raison de quota uniquement lorsque chaque cible utilisable dispose d’une confirmation serveur encore valide indiquant que la limite d’inférence liée à ses identifiants configurés est épuisée. Les quotas de compte, de modèle, de recherche et de MCP fournis uniquement à titre d’affichage, ainsi que les informations de routage absentes ou expirées, ne déclenchent pas ce blocage. Le blocage expire à la réinitialisation applicable ou à l’expiration de la validité des données et fait l’objet d’une nouvelle vérification lorsque la page devient active ou visible ; Actualiser recharge à la fois les données des combos et les quotas.
@@ -294,8 +301,8 @@ ocx combo remove <id> --yes
 ```
 
 `set` accepte également `--strategy`, `--sticky`, `--effort`, `--alias`, `--native-alias`,
-`--display-name` et `--rename-from`. Utilisez `-` comme valeur de `--effort`, `--alias` ou
-`--display-name` pour effacer ce champ. `--native-alias` exige un alias de modèle natif non qualifié actuellement
+`--display-name`, `--description` et `--rename-from`. Utilisez `-` comme valeur de `--effort`, `--alias`,
+`--display-name` ou `--description` pour effacer ce champ. `--native-alias` exige un alias de modèle natif non qualifié actuellement
 pris en charge et un nom d’affichage non vide. `create` et `update` sont des alias pour `set` ; `delete` est un alias pour
 `remove` ; et les mêmes sous-commandes sont disponibles sous `ocx route combo`.
 
@@ -341,6 +348,7 @@ Les combos sont stockés dans l'objet `combos` de niveau supérieur, saisi par l
 | `alias` | Non | aucun | Identifiant de modèle public tronqué facultatif ; utilisez les règles d'alias ci-dessus. Une valeur vide est stockée sans alias. |
 | `nativeAlias` | Non | `false` | Autoriser explicitement un `alias` natif nu actuellement pris en charge à avoir la priorité sur le routage et le catalogue. Jamais déduit de l'alias. |
 | `displayName` | Non | aucun | Étiquette de catalogue délimitée en affichage uniquement. Obligatoire et non vide lorsque `nativeAlias` est vrai. |
+| `description` | Non | aucun | Description de ligne de catalogue en affichage uniquement, avec les mêmes limites que `displayName`. Sans valeur, le texte généré `Routed via opencodex → combo (combo).` est conservé. |
 
 ## Dépannage
 
@@ -365,11 +373,15 @@ message de validation.
 
 ### Pourquoi le basculement s'est-il arrêté après la première erreur ?
 
-L’erreur était terminale plutôt que spécifique à la cible. Corriger une entrée invalide, réduire un contexte surdimensionné,
+L’erreur était terminale plutôt que spécifique à la cible. Corriger une entrée invalide,
 gérer un refus de politique ou corriger l’origine de la demande rejetée. Les combos ne sautent pas dans ces cas-là.
 
 ## Compatibilité des paramètres facultatifs
 
-Exception aux erreurs 400 terminales : un rejet structuré de `user`, une valeur non prise en charge pour `reasoning.effort`/`reasoning_effort`, ou un rejet d’entrée d’image propre à un modèle (`param: input`) peut faire passer le combo à la cible admissible suivante avant le début de la sortie, sans délai de refroidissement. Le refus de sécurité, l’annulation et une sortie déjà commencée restent non rejouables.
+Exception aux erreurs 400 terminales : un rejet structuré de `user`, une valeur non prise en charge pour `reasoning.effort`/`reasoning_effort`, un rejet d’entrée d’image propre à un modèle (`param: input`), ou le refus d’un média d’entrée que la route ne peut pas lire (`unsupported_input_modality`) peut faire passer le combo à la cible admissible suivante avant le début de la sortie, sans délai de refroidissement. Le refus de sécurité, l’annulation et une sortie déjà commencée restent non rejouables.
 
 [Canonical compatibility details](/guides/combos/#request-local-target-compatibility).
+
+## Réservation d’une tentative de récupération
+
+Une tentative de récupération activée par `cooldownReprobe: { enabled: true }` appartient uniquement à la requête qui l’a réservée ; les autres requêtes restent soumises aux délais de refroidissement enregistrés. La réservation est conservée pendant l’attente et la sélection JEV. Une cible redevenue utilisable pendant l’attente peut être réessayée si son délai enregistré n’a pas changé. Un nouvel enregistrement annule la réservation de cette cible. Un succès ne supprime que le délai inchangé de la cible ayant répondu ; les cibles non essayées et les nouveaux échecs conservent leurs délais. La désactivation du fournisseur, les quotas, l’admissibilité de la requête et l’annulation restent vérifiés. Voir les [réglages et limites](/guides/combos/#retry-all-cooled-targets-opt-in).

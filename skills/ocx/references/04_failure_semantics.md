@@ -14,6 +14,8 @@ exit contract. Its common mappings and the main exceptions are:
 | 64 | usage validation in `capabilities`, `ready`, `resolve` | fix arguments; no discovery/request for invalid input |
 | 4 | HTTP 404 — the named account, provider, key, or route does not exist | no |
 | 5 | HTTP 409 — conflict; a lock is held or state moved under you | inspect first; stale baselines require review |
+| 6 | `ocx sync` completed the Home step but a Child failed or timed out, or the link store was unreadable | inspect the fan-out result |
+| 7 | reserved for an update in flight during sync | wait for the update, then retry |
 | 1 | everything else: transport failure, 5xx, unexpected errors | depends on `reason` |
 
 Two consequences worth internalizing:
@@ -130,6 +132,19 @@ conflict — there is nothing to retry. Either enable the listener and restart t
 (`ocx service restart` on a service install), or
 report that this hub leaves its own clients native. Details:
 [05_remote_hub.md](05_remote_hub.md#the-hub-gate-on-the-hubs-own-clients).
+
+## A pinned sync that refuses (exit 5)
+
+`ocx sync --expect-link <linkId>` and `ocx sync --expect-hub-key <apiKeyId>` sync only when, under
+the lock that chooses the sync path, the machine is still connected to that link or with that hub
+key. Otherwise they write nothing, never fall back to the local providers, exit 5, and end stderr
+with one JSON line: `{"phase":"child_link_mismatch"|"hub_client_mismatch","reason":"..."}`. Read
+the `phase`, not the exit code alone. `reason` is `disconnected`, `invalid_state`,
+`disconnect_pending`, `pending_operation` (a key rotation, connect or other sync in progress), `hub_client`,
+`link_client`, `other_link` or `other_key`. Do not retry unchanged: re-read
+`ocx connect status --json` and decide whether this machine should follow that Home at all. A
+malformed, repeated or doubled flag exits 2 before anything is read. Older versions ignore the
+flags, so check `ocx --version` before relying on them.
 
 ## Destructive verbs fail closed
 
