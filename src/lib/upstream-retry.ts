@@ -382,7 +382,73 @@ export function isConnectionResetError(err: unknown): boolean {
   if (code === "ECONNRESET" || code === "EPIPE") return true;
   const msg = err.message.toLowerCase();
   return msg.includes("socket connection was closed unexpectedly")
-    || msg.includes("connection reset by peer");
+    || msg.includes("connection reset by peer")
+    // Bun's fetch reports a closed idle/reused connection as this bare sentence — observed on
+    // the chatgpt.com desktop relay, whose outbound CONNECT tunnels through an HTTP proxy get
+    // retired while pooled. The retry boundaries above decide replay safety; this only admits
+    // the shape as a transport failure so a fresh-connection retry can happen.
+    || msg.includes("the connection was closed");
+}
+
+/**
+ * A transport failure that ended the request before any response head: the local proxy
+ * refused the dial, reset it, or closed the connection. Bun wraps the underlying dial error
+ * (top-level "fetch failed" with the connect error as `cause`), so the cause chain is walked.
+ * Aborts and timeouts are caller decisions, never blips.
+ */
+export function isPreHeaderConnectFailure(err: unknown, seen: Set<Error> = new Set()): boolean {
+  if (!(err instanceof Error) || seen.has(err)) return false;
+  seen.add(err);
+  if (err.name === "AbortError" || err.name === "TimeoutError") return false;
+  // Reset-shaped failures belong to the immediate reset retry above them, not to the delayed
+  // blip backoff: a fresh dial answers a stale pooled entry without waiting, and composing
+  // both would multiply the send count a persistent reset is bounded by.
+  if (isConnectionResetError(err)) return false;
+  const code = (err as { code?: unknown }).code;
+  if (code === "ECONNREFUSED") return true;
+  const msg = err.message.toLowerCase();
+  if (msg.includes("econnrefused") || msg.includes("unable to connect")) return true;
+  const cause = (err as { cause?: unknown }).cause;
+  if (cause instanceof Error) return isPreHeaderConnectFailure(cause, seen);
+  // A bare "fetch failed" with no cause is Bun's dial-phase failure shape.
+  return msg === "fetch failed";
+}
+
+export interface ProxyBlipRetryOptions {
+  /** Delay before each retry, one entry per retry; the final attempt has no successor. */
+  delaysMs: readonly number[];
+  abortSignal?: AbortSignal;
+  /** Short host/path label for the retry warn log (no secrets/query strings). */
+  label?: string;
+}
+
+/**
+ * Retry a fetch whose transport died in the dial phase through short proxy-outage blips.
+ *
+ * The desktop relay's reads ride the operator's local HTTP proxy, and consumer VPN cores
+ * retire and reconnect their tunnels: for one or two seconds every dial through the proxy
+ * fails at once, then recovers on its own. The reset retry above retries immediately, which
+ * a blip longer than milliseconds cannot benefit from, so this wrapper spaces its attempts
+ * out and only for failures that ended before any response head — a GET/HEAD read cannot
+ * have run twice.
+ */
+export async function fetchWithProxyBlipRetry(
+  doFetch: () => Promise<Response>,
+  opts: ProxyBlipRetryOptions,
+): Promise<Response> {
+  const label = opts.label
+    ? " (" + redactSecretString(opts.label).replace(/[\r\n\u0000-\u001f\u007f]/g, "").slice(0, 128) + ")"
+    : "";
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await doFetch();
+    } catch (err) {
+      if (opts.abortSignal?.aborted || attempt >= opts.delaysMs.length || !isPreHeaderConnectFailure(err)) throw err;
+      const delayMs = opts.delaysMs[attempt] ?? 0;
+      console.warn(`[upstream-retry] proxy blip${label} — retrying in ${delayMs}ms (${attempt + 1}/${opts.delaysMs.length})`);
+      await sleepWithAbort(delayMs, opts.abortSignal);
+    }
+  }
 }
 
 function retryAfterDelayMs(headers: Headers): number | undefined {

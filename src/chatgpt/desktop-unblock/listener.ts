@@ -1,6 +1,7 @@
 import type { Server } from "bun";
 import type { PemKeyPair } from "../../claude/intercept/local-ca";
 import { forwardHeadersForUpstream } from "../../claude/intercept/listener";
+import { applyUpstreamRecoveryInit, fetchWithProxyBlipRetry, fetchWithResetRetry, type UpstreamSendRecovery } from "../../lib/upstream-retry";
 import { rewriteSurfaceFor, stripSendBlocksFromJson, stripSendBlocksFromSseLine } from "./rewrite";
 import type { PreservedSendBlock, RewriteSurface } from "./rewrite";
 import { handleWebSocketUpgrade, isRelayableUpgrade } from "./ws-relay";
@@ -192,15 +193,25 @@ export async function relayWithSendUnblock(
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
   let upstream: Response;
   try {
-    upstream = await fetchImpl(target, {
-      method: req.method,
-      headers: forwardHeadersForUpstream(req.headers),
-      body: hasBody ? req.body : undefined,
-      signal: req.signal,
-      redirect: "manual",
+    const doFetch = (recovery?: UpstreamSendRecovery) => fetchImpl(target, {
+      ...applyUpstreamRecoveryInit({
+        method: req.method,
+        headers: forwardHeadersForUpstream(req.headers),
+        body: hasBody ? req.body : undefined,
+        signal: req.signal,
+        redirect: "manual",
+      }, recovery),
       // @ts-expect-error -- streaming request bodies require half duplex under the fetch spec.
       duplex: "half",
     });
+    // Only GET/HEAD can recover a pre-header reset. A message send may already have run.
+    // The blip wrapper spaces its retries out for the seconds-long outage of a consumer VPN
+    // core reconnecting its tunnel; the reset retry inside stays immediate for dead pool
+    // entries, which a fresh dial answers without waiting.
+    upstream = hasBody ? await doFetch() : await fetchWithProxyBlipRetry(
+      () => fetchWithResetRetry(doFetch, { attempts: 2, replaySafe: true, abortSignal: req.signal, label: "chatgpt-unblock-read" }),
+      { delaysMs: [400, 1200], abortSignal: req.signal, label: "chatgpt-unblock-read" },
+    );
   } catch (error) {
     return Response.json(
       { error: { message: `chatgpt unblock relay failed: ${error instanceof Error ? error.message : String(error)}` } },
