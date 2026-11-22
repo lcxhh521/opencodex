@@ -1,4 +1,7 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { rewriteAppServerLine } from "./app-server-rewrite";
+import { getConfigDir } from "../../config/paths";
 
 /** Byte-preserving stdout filter; unexpected rewrite machinery failures disable filtering. */
 const NEWLINE = 0x0a;
@@ -122,6 +125,18 @@ export function createRpcLineFilter(
   };
 }
 
+/** Whether the operator opted into letting the desktop draw on credits
+ *  (`chatgptDesktop.spendCredits`). The filter is a hot stdio pipe, so it reads the one boolean
+ *  from the config file once at startup instead of running the full config loader. */
+function spendCreditsEnabled(): boolean {
+  try {
+    const raw = JSON.parse(readFileSync(join(getConfigDir(), "config.json"), "utf8")) as {
+      chatgptDesktop?: { spendCredits?: boolean };
+    };
+    return raw.chatgptDesktop?.spendCredits === true;
+  } catch { return false; }
+}
+
 /** Copy `input` to `write`, rewriting gate lines on the way. Resolves when `input` ends. */
 export async function runStdoutFilter(
   input: AsyncIterable<Uint8Array>,
@@ -152,6 +167,7 @@ export async function runChatgptAppServerFilter({ selfTest = false }: { selfTest
         && result.rateLimits.primary.usedPercent === 100 ? 0 : 1;
     } catch { return 1; }
   }
-  await runStdoutFilter(Bun.stdin.stream(), bytes => Bun.write(Bun.stdout, bytes));
+  const liftCredits = spendCreditsEnabled();
+  await runStdoutFilter(Bun.stdin.stream(), bytes => Bun.write(Bun.stdout, bytes), line => rewriteAppServerLine(line, liftCredits));
   return 0;
 }

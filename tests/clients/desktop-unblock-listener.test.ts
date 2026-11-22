@@ -263,11 +263,13 @@ describe("chatgpt unblock read recovery", () => {
   });
 
   for (const method of ["POST", "PATCH", "DELETE"]) {
-    test(`${method} is never replayed after a reset`, async () => {
+    test(`${method} opts out of keep-alive pool and is never replayed after a reset`, async () => {
       let sends = 0;
       const bodies: string[] = [];
+      const inits: RequestInit[] = [];
       const fetchImpl = (async (_: RequestInfo | URL, init?: RequestInit) => {
         sends++;
+        inits.push(init!);
         bodies.push(await new Response(init?.body).text());
         throw reset();
       }) as typeof fetch;
@@ -275,8 +277,64 @@ describe("chatgpt unblock read recovery", () => {
       expect(res.status).toBe(502);
       expect(sends).toBe(1);
       expect(bodies).toEqual(["fixture"]);
+      expect(inits[0]!.keepalive).toBe(false);
+      expect(new Headers(inits[0]!.headers).get("connection")).toBe("close");
     });
   }
+
+  for (const path of [
+    "https://chatgpt.com/backend-api/messaging/rooms/fixture",
+    "https://chatgpt.com/backend-api/messaging/rooms/fixture/messages?limit=20",
+    "https://chatgpt.com/backend-api/tbo?limit=25&include_room_preview=false",
+  ]) {
+    test(`a Dot/TBO GET 404 on ${new URL(path).pathname} retries on a fresh connection and recovers`, async () => {
+      const attempts: RequestInit[] = [];
+      const fetchImpl = (async (_: RequestInfo | URL, init?: RequestInit) => {
+        attempts.push(init!);
+        if (attempts.length === 1) return json({ detail: "Not Found" }, { status: 404 });
+        return json({ ok: true });
+      }) as typeof fetch;
+      const res = await relayWithSendUnblock(new Request(path), UPSTREAM, fetchImpl);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true });
+      expect(attempts).toHaveLength(2);
+      expect(attempts[0]!.keepalive).toBeUndefined();
+      expect(attempts[1]!.keepalive).toBe(false);
+      expect(new Headers(attempts[1]!.headers).get("connection")).toBe("close");
+    });
+  }
+
+  test("a persistent Dot GET 404 stops after two fresh retries and returns 404 verbatim", async () => {
+    let sends = 0;
+    const fetchImpl = (async () => {
+      sends++;
+      return json({ detail: "Not Found" }, { status: 404 });
+    }) as unknown as typeof fetch;
+    const res = await relayWithSendUnblock(new Request(messagesUrl), UPSTREAM, fetchImpl);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ detail: "Not Found" });
+    expect(sends).toBe(3);
+  });
+
+  test("a 404 on an unrelated GET path or on a Dot POST is never retried", async () => {
+    let unrelatedSends = 0;
+    const unrelatedFetch = (async () => {
+      unrelatedSends++;
+      return json({ detail: "Not Found" }, { status: 404 });
+    }) as unknown as typeof fetch;
+    const res1 = await relayWithSendUnblock(new Request("https://chatgpt.com/backend-api/settings/user"), UPSTREAM, unrelatedFetch);
+    expect(res1.status).toBe(404);
+    expect(unrelatedSends).toBe(1);
+
+    let postSends = 0;
+    const postFetch = (async () => {
+      postSends++;
+      return json({ detail: "Not Found" }, { status: 404 });
+    }) as unknown as typeof fetch;
+    const res2 = await relayWithSendUnblock(new Request(messagesUrl, { method: "POST", body: "{}" }), UPSTREAM, postFetch);
+    expect(res2.status).toBe(404);
+    expect(postSends).toBe(1);
+  });
 
   test("canceling a failed read during backoff prevents another send", async () => {
     const abort = new AbortController();
