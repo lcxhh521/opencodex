@@ -11,9 +11,9 @@
  * sample for the full history.
  */
 
-import type { PersistedUsageEntry } from "../usage/log";
-import { estimateRequestCost, serviceTierContext } from "../usage/cost";
-import { openRequestHistoryIndex, requestHistoryDb } from "./history/indexer";
+import { normalizePersistedUsageRow, type PersistedUsageEntry } from "../usage/log";
+import { computeEntryCost } from "../usage/summary";
+import { withRequestHistoryRead } from "./history/indexer";
 
 export const ANALYTICS_MAX_ROWS = 50_000;
 /** Default row cap for the management API (full cap remains available via `limit`). */
@@ -122,6 +122,7 @@ const COOLDOWN_RECOVERY_KINDS = new Set([
   "oauth-account-403",
   "anthropic-oauth-429",
   "oauth-account-429",
+  "oauth-account-402",
 ]);
 
 function percentile(sorted: number[], p: number): number | undefined {
@@ -140,8 +141,7 @@ function classifyRow(row: ScannedRow): "success" | "failure" | "cancelled" {
 
 function parseEntry(rowJson: string): PersistedUsageEntry | null {
   try {
-    const parsed = JSON.parse(rowJson) as PersistedUsageEntry;
-    return parsed && typeof parsed === "object" && typeof parsed.requestId === "string" ? parsed : null;
+    return normalizePersistedUsageRow(JSON.parse(rowJson)) ?? null;
   } catch {
     return null;
   }
@@ -158,27 +158,16 @@ function cooldownTriggering(entry: PersistedUsageEntry | null, status: number): 
   });
 }
 
-function successCostUsd(
-  row: Pick<ScannedRow, "provider" | "model">,
-  entry: PersistedUsageEntry,
-): number | null {
-  if (!entry.usage) return null;
-  const estimate = estimateRequestCost({
-    provider: row.provider,
-    model: row.model,
-    usage: entry.usage,
-    usageStatus: entry.usageStatus,
-    serviceTier: serviceTierContext(entry),
-  });
-  return estimate ? estimate.cost.total : null;
+/** Same attempt-aware pricing as /api/usage, so a refused retry before a measured send is priced. */
+function successCostUsd(entry: PersistedUsageEntry): number | null {
+  const { isPriced, costTotal } = computeEntryCost(entry);
+  return isPriced ? costTotal : null;
 }
 
 export async function computeRoutingAnalytics(
   filters: RoutingAnalyticsFilters,
   options: { maxRows?: number } = {},
 ): Promise<RoutingAnalyticsResult> {
-  await openRequestHistoryIndex();
-  const handle = requestHistoryDb();
   const maxRows = Math.min(
     Math.max(1, Math.trunc(options.maxRows ?? ANALYTICS_MAX_ROWS)),
     ANALYTICS_MAX_ROWS,
@@ -198,7 +187,7 @@ export async function computeRoutingAnalytics(
   if (filters.to !== undefined) add("timestamp <= ?", filters.to);
   const whereSql = where.length > 0 ? ` WHERE ${where.join(" AND ")}` : "";
 
-  const rows = handle.query(
+  const rows = await withRequestHistoryRead(handle => handle.query(
     `SELECT provider, model, api_key_id AS apiKeyId, profile_id AS profileId,
             profile_revision AS profileRevision, status,
             duration_ms AS durationMs, first_output_ms AS firstOutputMs,
@@ -206,7 +195,7 @@ export async function computeRoutingAnalytics(
             usage_status AS usageStatus, usage_json AS usageJson,
             attempt_count AS attemptCount, fallback, row_json AS rowJson
      FROM requests${whereSql} ORDER BY timestamp DESC LIMIT ?`,
-  ).all(...values, maxRows + 1) as ScannedRow[];
+  ).all(...values, maxRows + 1) as ScannedRow[]);
 
   const scanned = rows.slice(0, maxRows);
   const historyTruncated = rows.length > maxRows;
@@ -245,7 +234,7 @@ export async function computeRoutingAnalytics(
     if (kind === "success") {
       const entry = parseEntry(row.rowJson);
       if (entry) {
-        rowCostUsd = successCostUsd(row, entry);
+        rowCostUsd = successCostUsd(entry);
         if (rowCostUsd !== null) {
           costTotalUsd += rowCostUsd;
           costCount += 1;

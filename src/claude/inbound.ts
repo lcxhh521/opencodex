@@ -1,3 +1,5 @@
+import { messagesRolePresentation } from "../lib/messages-error-body";
+import { CLAUDE_CONTEXT_OVERFLOW_MESSAGE, markProxyError } from "../lib/client-error-body";
 /**
  * Claude Code inbound: Anthropic Messages API request -> internal /v1/responses body.
  *
@@ -21,6 +23,7 @@ import { stabilizeClaudeInstructionsForPromptCache } from "./inbound-cache-stabi
 import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../responses/reasoning-envelope";
 import { inlineDocumentMarker } from "../responses/inline-document";
 import { createTranslatorBudget, type TranslatorBudget } from "../lib/translator-budget";
+import { collectAnthropicCacheTtls } from "../adapters/anthropic/cache-retention";
 
 
 
@@ -33,9 +36,9 @@ export function anthropicImageBlockUrl(block: Rec): string | null {
   const source = block.source;
   if (!isRec(source)) return null;
   if (source.type === "file") {
-    throw new AnthropicRequestError(
+    throw markProxyError(new AnthropicRequestError(
       "File-backed images require native Anthropic passthrough; use base64 or URL images on translated routes.",
-    );
+    ));
   }
   if (source.type === "base64" && typeof source.data === "string") {
     const media = typeof source.media_type === "string" ? source.media_type : "image/png";
@@ -273,7 +276,7 @@ function userMessageToItems(content: unknown, input: Rec[], elide: SkillElisionC
         pushUserMessage(input, pending);
         pending = [];
         if (typeof raw.tool_use_id !== "string" || raw.tool_use_id.length === 0) {
-          throw new AnthropicRequestError("tool_result requires tool_use_id");
+          throw markProxyError(new AnthropicRequestError("tool_result requires tool_use_id"));
         }
         input.push({
           type: "function_call_output",
@@ -318,7 +321,7 @@ function assistantMessageToItems(content: unknown, input: Rec[], budget: Transla
       case "tool_use": {
         flush();
         if (typeof raw.id !== "string" || raw.id.length === 0 || typeof raw.name !== "string" || raw.name.length === 0) {
-          throw new AnthropicRequestError("tool_use requires id and name");
+          throw markProxyError(new AnthropicRequestError("tool_use requires id and name"));
         }
         input.push({ type: "function_call", call_id: raw.id, name: raw.name, arguments: JSON.stringify(raw.input ?? {}) });
         break;
@@ -329,8 +332,8 @@ function assistantMessageToItems(content: unknown, input: Rec[], budget: Transla
         const signature = typeof raw.signature === "string" ? raw.signature : "";
         if (signature.startsWith(OCX_REASONING_PREFIX)) {
           const owned = decodeReasoningEnvelope(signature, budget);
-          if (!owned) throw new AnthropicRequestError("malformed ocxr1 reasoning signature");
-          if (Object.hasOwn(owned, "sig")) throw new AnthropicRequestError("OpenCodex reasoning continuity cannot be replayed as an Anthropic signature");
+          if (!owned) throw markProxyError(new AnthropicRequestError("malformed ocxr1 reasoning signature"));
+          if (Object.hasOwn(owned, "sig")) throw markProxyError(new AnthropicRequestError("OpenCodex reasoning continuity cannot be replayed as an Anthropic signature"));
           if (owned.nat) {
             // The provider's own blob goes back only to the model that minted it; any other
             // model gets the visible text alone, as before this envelope field existed.
@@ -387,6 +390,24 @@ function canonicalJson(value: unknown): string {
 /** Provenance of the generated prompt_cache_key (never serialized into the wire body). */
 export type ClaudeCacheKeySource = "metadata" | "system" | null;
 
+/**
+ * The translated lane places its own prompt-cache breakpoints, so the caller's are dropped;
+ * their TTL is the one thing worth keeping. When every caller breakpoint asks for `ttl: "1h"`
+ * (Claude Code on a subscription marks them so) this maps to `cacheRetention: "long"`. A caller
+ * that pins any breakpoint to an explicit non-1h TTL ("5m") maps to "short": "long" would also
+ * make the moving per-turn breakpoint 1h and bill writes the caller asked to keep at 5m at the
+ * 1h rate. Breakpoints without a TTL express no preference, so they fall through to the
+ * destination default (1h on first-party Anthropic). Read out of body: the Responses body has
+ * no field for it.
+ */
+export function callerCacheRetention(raw: unknown): "long" | "short" | undefined {
+  // Top-level automatic caching is a breakpoint too, and content blocks nest (tool_result,
+  // search_result, document sources), so every block container is walked.
+  const ttls = collectAnthropicCacheTtls(raw);
+  if (ttls.some(ttl => ttl !== undefined && ttl !== "1h")) return "short";
+  return ttls.length > 0 && ttls.every(ttl => ttl === "1h") ? "long" : undefined;
+}
+
 export interface ClaudeInboundTranslation {
   body: Rec;
   cacheKeySource: ClaudeCacheKeySource;
@@ -437,7 +458,7 @@ function translateAnthropicRequest(
     names: blockedNames,
   };
   for (const msg of raw.messages) {
-    if (!isRec(msg)) throw new AnthropicRequestError("each message must be an object");
+    if (!isRec(msg)) throw markProxyError(new AnthropicRequestError("each message must be an object"));
     if (msg.role === "user") userMessageToItems(msg.content, input, elide);
     else if (msg.role === "assistant") assistantMessageToItems(msg.content, input, budget, raw.model, nativeReasoningReplay);
     else if (msg.role === "system") {
@@ -449,7 +470,11 @@ function translateAnthropicRequest(
         input.push({ type: "message", role: "developer", content: [{ type: "input_text", text }] });
       }
     }
-    else throw new AnthropicRequestError(`unsupported message role: ${String(msg.role)}`);
+    else {
+      const role = messagesRolePresentation(msg.role);
+      if (role.coercionFailed) throw markProxyError(new TypeError("unsupported message role: unsupported"));
+      throw markProxyError(new AnthropicRequestError(role.overflow ? CLAUDE_CONTEXT_OVERFLOW_MESSAGE : "unsupported message role: unsupported"));
+    }
   }
 
   const body: Rec = {
@@ -476,12 +501,12 @@ function translateAnthropicRequest(
 }
 
 function assertAnthropicRequestShape(raw: unknown): asserts raw is Rec & { model: string; messages: unknown[] } {
-  if (!isRec(raw)) throw new AnthropicRequestError("request body must be a JSON object");
+  if (!isRec(raw)) throw markProxyError(new AnthropicRequestError("request body must be a JSON object"));
   if (typeof raw.model !== "string" || raw.model.length === 0) {
-    throw new AnthropicRequestError("model is required");
+    throw markProxyError(new AnthropicRequestError("model is required"));
   }
   if (!Array.isArray(raw.messages) || raw.messages.length === 0) {
-    throw new AnthropicRequestError("messages must be a non-empty array");
+    throw markProxyError(new AnthropicRequestError("messages must be a non-empty array"));
   }
 }
 
@@ -612,9 +637,10 @@ function applyAnthropicSettings(
     // think by default, omission means thinking is ON, sharing the caller's max_tokens (#545).
     // `none` is the effort disable sentinel. It is not a valid OpenAI summary
     // value, so do not attach the similarly named internal catalog sentinel.
-    body.reasoning = { effort: "none" };
+    body.reasoning = { effort: "none", enabled: false };
   } else if (isRec(thinking) || outputConfigEffort !== undefined) {
     const reasoning: Rec = { summary: isRec(thinking) && thinking.display === "omitted" ? "none" : "auto" };
+    if (isRec(thinking) && thinking.type === "enabled") reasoning.enabled = true;
     if (outputConfigEffort !== undefined) {
       // Adaptive wire: /effort arrives as output_config.effort (devlog 080).
       reasoning.effort = outputConfigEffort;

@@ -25,7 +25,7 @@ import { modelRecordValue } from "../reasoning-effort";
 import { getModelMetadataCaseInsensitive, resolveMetadataProvider } from "../generated/model-metadata";
 import { nativeInputModalities } from "../codex/catalog/metadata";
 import { SUPPORTED_NATIVE_OPENAI_SLUGS } from "../codex/catalog/native-models";
-import { enrichProviderFromRegistry } from "../providers/derive";
+import { enrichProviderFromRegistry, registryInputModalitiesForDestination } from "../providers/derive";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers-destination";
 
 /**
@@ -131,17 +131,19 @@ type EnrichedProviderCache = Map<string, OcxProviderConfig>;
  *
  * `noVisionModels` is an explicit override. A modality declaration is only evidence for this
  * path when it describes a text model that excludes image input: an audio-only declaration is
- * not a text-only model and must not be widened to image through the vision sidecar.
+ * not a text-only model and must not be widened to image through the vision sidecar. The
+ * provider-wide `inputModalities` covers ids the per-model map does not list, such as a model
+ * that arrived through live discovery; a per-model declaration still wins.
  */
 export function isModelVisionSidecarConsumer(
-  provider: Pick<OcxProviderConfig, "noVisionModels" | "modelInputModalities" | "modelCapabilities">,
+  provider: Pick<OcxProviderConfig, "noVisionModels" | "modelInputModalities" | "inputModalities" | "modelCapabilities">,
   modelId: string,
 ): boolean {
   const declared = Object.hasOwn(provider.modelCapabilities ?? {}, modelId)
     ? provider.modelCapabilities?.[modelId]?.inputModalities : undefined;
   if (declared !== undefined) return declared.includes("text") && !declared.includes("image");
   if (modelInList(provider.noVisionModels, modelId)) return true;
-  const modalities = modelRecordValue(provider.modelInputModalities, modelId);
+  const modalities = modelRecordValue(provider.modelInputModalities, modelId) ?? provider.inputModalities;
   return Array.isArray(modalities) && modalities.includes("text") && !modalities.includes("image");
 }
 
@@ -177,6 +179,7 @@ function enrichedProviderForVision(
   const enriched: OcxProviderConfig = {
     ...configured,
     ...(configured.noVisionModels ? { noVisionModels: [...configured.noVisionModels] } : {}),
+    ...(configured.inputModalities ? { inputModalities: [...configured.inputModalities] } : {}),
     ...(configured.modelInputModalities ? {
       modelInputModalities: Object.fromEntries(
         Object.entries(configured.modelInputModalities).map(([id, modalities]) => [id, [...modalities]]),
@@ -193,6 +196,11 @@ function enrichedProviderForVision(
     } : {}),
   };
   enrichProviderFromRegistry(providerName, enriched);
+  // Registry-only and runtime-only: applied to this private copy, never to saved config.
+  if (!enriched.inputModalities) {
+    const providerWide = registryInputModalitiesForDestination(providerName, configured);
+    if (providerWide) enriched.inputModalities = providerWide;
+  }
   cache.set(providerName, enriched);
   return enriched;
 }
@@ -224,6 +232,19 @@ function isVisionSidecarConsumerWithCache(
  */
 export function isVisionSidecarConsumer(config: VisionCapabilityConfig, providerName: string, modelId: string): boolean {
   return isVisionSidecarConsumerWithCache(config, providerName, modelId, new Map());
+}
+
+/**
+ * `isVisionSidecarConsumer` for many rows of one config. Rows of the same provider share one
+ * registry enrichment instead of rebuilding it per row, which matters for `/api/models`
+ * listings with thousands of rows. Bind it to a single config snapshot; it does not observe
+ * provider changes made after the first lookup.
+ */
+export function visionSidecarConsumerClassifier(
+  config: VisionCapabilityConfig,
+): (providerName: string, modelId: string) => boolean {
+  const cache: EnrichedProviderCache = new Map();
+  return (providerName, modelId) => isVisionSidecarConsumerWithCache(config, providerName, modelId, cache);
 }
 
 /**
@@ -268,7 +289,9 @@ function modelAcceptsImageInputWithCache(
   // capability axis the CLI `--text-only` writes.
   const fromCustomRow = customRowAcceptsImageInput(config, candidate.provider, candidate.id);
   if (fromCustomRow !== undefined) return fromCustomRow;
-  const configuredModalities = provider ? modelRecordValue(provider.modelInputModalities, candidate.id) : undefined;
+  const configuredModalities = provider
+    ? modelRecordValue(provider.modelInputModalities, candidate.id) ?? provider.inputModalities
+    : undefined;
   const fromConfiguredModalities = advertisesImageInput(configuredModalities);
   if (fromConfiguredModalities !== undefined) return fromConfiguredModalities;
   const canonicalCodex = candidate.provider === "openai"

@@ -67,7 +67,7 @@ const KNOWN_UPSTREAM_ERROR_TYPES: ReadonlySet<string> = new Set([
   "RESOURCE_EXHAUSTED", "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED",
 ]);
 
-/** Bare top-level error codes worth keeping: the classes recognizedUpstreamError maps, plus server_error. */
+/** Bare top-level error codes worth keeping: the rate-limit and overload classes recognizedUpstreamError maps, plus server_error. */
 const KNOWN_BARE_ERROR_CODES: ReadonlySet<string> = new Set([
   "rate_limit_exceeded", "rate_limit_error", "server_is_overloaded", "overloaded_error", "server_error",
 ]);
@@ -84,8 +84,10 @@ function noteBoundedDiagnostic(
   logCtx[field] = value;
   const status = logCtx.terminalHttpStatus;
   if (status === undefined || status >= 500) {
-    const { upstreamErrorCode: code, upstreamRequestId: requestId } = upstreamDiagnosticLogFields(logCtx);
-    console.warn(`[opencodex] upstream failure${status ? ` status=${status}` : ""}${code ? ` code=${code}` : ""}${requestId ? ` request_id=${requestId}` : ""}`);
+    // Service logs persist too: print only closed-vocabulary values, never an upstream id or code.
+    const { upstreamErrorCode: rawCode, upstreamErrorType: type } = upstreamDiagnosticLogFields(logCtx);
+    const code = rawCode !== undefined && KNOWN_BARE_ERROR_CODES.has(rawCode) ? rawCode : undefined;
+    console.warn(`[opencodex] upstream failure${status ? ` status=${status}` : ""}${type ? ` type=${type}` : ""}${code ? ` code=${code}` : ""}`);
   }
 }
 

@@ -135,7 +135,7 @@ for the command, disable-key semantics, and safety constraints.
 
 ### What this means for a disabled native model
 
-Without a native alias configured, disabling a bare native GPT slug does not remove it from the
+By default, without a native alias configured, disabling a bare native GPT slug does not remove it from the
 catalog. The row stays with `visibility: "hide"`, which `/v1/models` and the dashboard both honour
 — they stop listing the model — while Desktop, under the policy above, can keep showing it. So the
 model can still be picked in Desktop after you disabled it, and the surfaces disagree about whether
@@ -147,9 +147,13 @@ runs on the model you disabled, or fails on whatever path that id resolves to. E
 outcome is not the one the toggle implies.
 
 The row is retained deliberately. It holds the real upstream metadata, so re-enabling the model
-restores that metadata instead of a synthesized guess. When you need the row gone outright rather
-than hidden, configure a `nativeAlias` combo: while one exists, disabled bare native rows are
-omitted from the effective catalog entirely.
+restores that metadata instead of a synthesized guess. To omit disabled native rows without a
+native alias, set `"omitDisabledNativeModels": true` in `config.json` and run `ocx sync`.
+The option defaults off. Sync, the generated cache, and Codex-shaped HTTP discovery omit the
+disabled rows while retaining a separately validated native inheritance template, so routed
+rows keep their input and tool metadata even when the only template row was disabled.
+Direct requests to a disabled native id still route normally. A `nativeAlias` combo also keeps
+its existing omission behavior independently of this flag.
 
 If Codex's `config.toml` pins a root `model` that this proxy does not expose — a disabled model
 among them — every new session starts on a model opencodex does not serve. `ocx doctor` reports
@@ -221,11 +225,12 @@ metadata instead of an older-template approximation.
 
 | Route | Picker ids and catalog metadata |
 | --- | --- |
-| Codex login (account-qualified rows disabled) | Bare native ids such as `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`; Pool or Direct is selected through `codexAccountMode`. GPT-5.6 rows use a 922,000-token catalog window. |
+| Codex login (account-qualified rows disabled) | Bare native ids such as `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`; Pool or Direct is selected through `codexAccountMode`. GPT-5.6 rows use a 922,000-token catalog window. `gpt-6.1-terra`: 500,000 default / 872,000 long context. |
 | Codex login (account-qualified rows enabled with eligible selectors) | One `<selector>/<native-openai-model>` row per eligible selector and supported native model; each row uses only its mapped account, and bare native rows are hidden from the picker. Native metadata and context windows are preserved. |
 | Codex login (explicit Daybreak forward row) | `openai/gpt-daybreak-blue-latest` only when the exact `customModels` row is configured on the canonical `openai` provider. It keeps the Daybreak wire id and uses the pinned Sol capability snapshot (922,000 context; 829,800 automatic compaction). |
-| OpenAI (API key) | Exactly ten namespaced rows: `gpt-5.5`, `gpt-5.6`, Sol/Terra/Luna, the three `*-pro` virtual ids, and the two Daybreak aliases (1,050,000 context; 922,000 max input for all ten) |
+| OpenAI (API key) | Namespaced models include `gpt-5.5`, `gpt-5.6`, Sol/Terra/Luna, the `*-pro` virtual ids and the Daybreak aliases (1,050,000 context; 922,000 max input). `openai-apikey/gpt-6.1-terra` adds 1,050,000 context and 128,000 max output. |
 | OpenRouter | `openrouter/openai/gpt-5.6-sol`, `openrouter/openai/gpt-5.6-terra`, `openrouter/openai/gpt-5.6-luna` (922,000) |
+| OpenRouter | `openrouter/openai/gpt-6.1-terra` (1,050,000) |
 | Cursor | Static fallback includes `cursor/gpt-5.6-sol`, `cursor/gpt-5.6-terra`, and `cursor/gpt-5.6-luna` (1,000,000), plus regular/Fast rows for Grok 4.5, 4.6, and 4.7 (500,000); 4.6 and 4.7 add `xhigh`, and live account discovery decides which rows remain visible. |
 | xAI | Live discovery is authoritative. The fallback catalog includes `xai/grok-4.6` and `xai/grok-4.7` and defaults to `xai/grok-4.5`; all three have 500,000-token windows. Grok 4.6 and 4.7 expose `low` / `medium` / `high` / `xhigh` (upstream default: `high`), while Grok 4.5 stops at `high`. |
 
@@ -278,6 +283,12 @@ preserved, so Luna has `max` but no `ultra`.
 On the wire, routed adapters map or clamp unsupported tiers. For older native models whose real
 ladder stops at `xhigh`, `nativeEffortClamp` maps a direct `max` or an `ultra` selection to `xhigh`
 (for example, GPT-5.5). Sol, Terra, and Luna have a real `max` rung.
+The ChatGPT backend itself accepts `none` through `max`, so a native ChatGPT request never forwards `ultra` as-is:
+native models with a real `max` rung receive `max`, including Astra, GPT-6.1 Sol and GPT-6.1 Terra whose ladders
+list `ultra`, while older models such as GPT-5.5 receive `xhigh` as above. This applies to
+`/v1/responses` and `/v1/chat/completions` alike. The native clamp does not apply to routed model IDs: a routed
+OpenAI Chat passthrough can copy a declared `reasoning_effort: "ultra"` to its provider unchanged,
+while the ordinary translated adapter maps `ultra` to `max`.
 
 Catalog advertisement of the two top tiers is unconditional: `ocx sync` no longer removes `max` or
 `ultra` when the installed Codex binary is too old to offer them — Codex versions without those
@@ -314,6 +325,45 @@ advertised where it cannot be honored. An `openai-chat` destination can authoriz
 eligible model with `chatServiceTier: true`, or authorize only exact models with
 `modelSupportsServiceTier`; Responses routes do not need that extra Chat wire authorization.
 
+### Selecting Flex in Codex
+
+For a routed provider and model verified to accept `service_tier: "flex"`, explicitly
+declare Flex support alongside the existing Fast wire. Merge these fields into the
+**existing** `providers.nanogpt` entry (do not replace its URL or credentials):
+
+```json
+{
+  "modelSupportsServiceTier": { "openai/gpt-6-luna": true },
+  "fastWire": {
+    "kind": "service-tier",
+    "canonicalToWire": { "priority": "priority", "flex": "flex" },
+    "foreignCallerTiers": "verbatim"
+  }
+}
+```
+
+With an eligible `openai-responses` route, the Luna row advertises Standard,
+Fast and Flex in Codex's speed selector. For an `openai-chat` route, also set
+`chatServiceTier: true` **only if** the upstream Chat Completions endpoint supports
+caller-provided service tiers. The `fastWire` mapping is **provider-wide**:
+other service-tier-eligible routed models in the same `providers.nanogpt`
+entry can also advertise Flex when the catalog publishes them as ordinary routed
+rows, even when they are not listed in `modelSupportsServiceTier`. That map is not
+an allowlist excluding other eligible models. Combo-namespace and native-alias
+rows are **not** published with Flex. Verify Flex support for **every** eligible
+ordinary routed model;
+if only Luna supports Flex, configure it in a separate provider entry with
+no other Fast-eligible models. Do not infer Flex support from Fast alone.
+
+Keep OpenCodex's global Fast mode on **Auto** (`fastMode` unset), as forcing
+Fast or Default overrides the caller's Flex choice. After `ocx sync`, refresh the
+Codex model list. Select **Flex** from the speed selector, or use
+`/model <routed-id> --speed=flex` in Codex CLI. This is a **selectable tier**,
+not a per-model forced default: switching models does not force Flex automatically.
+The tier is forwarded as `service_tier: "flex"` and can still be declined by
+the upstream; availability, cost and latency depend on the provider. Neither
+the menu nor a request alone proves which tier was billed.
+
 ### Selecting Ultra Fast in Codex Desktop
 
 For a provider that supports `service_tier: "ultrafast"`, declare that wire mapping once.
@@ -341,10 +391,18 @@ Desktop if it still has the old list, select the routed model, then choose **Ult
 in its speed menu. Standard remains the default.
 
 Only an eligible `service-tier` wire with an explicit `ultrafast → ultrafast` mapping adds
-this choice. Ordinary Fast support, a GPT-like name, native/account rows and combo aliases
-do not enable it. Removing the mapping or disabling that model's service-tier support
-removes the generated choice from both the catalog and cache on the next successful sync.
-The separate `ultraFastTier` setting still only retains hand-supplied catalog tiers.
+this choice to routed rows; ordinary Fast support or a GPT-like name is insufficient.
+That routed mapping does not apply to native/account rows or combo aliases. Removing the
+mapping or disabling that model's service-tier support removes the generated routed choice
+from both the catalog and cache on the next successful sync.
+The active declaration also controls the Ultra Fast choice when Codex loads its model list over HTTP.
+
+For routed rows, `ultraFastTier` retains independently supplied Ultra Fast tiers from the
+same exact persisted row; generated routed tiers are not treated as operator-supplied.
+For bare native `gpt-6-astra` / `gpt-6.1-sol` rows and their trusted account-bound clones,
+enabling `ultraFastTier` also generates a missing Ultrafast choice without changing the
+native default tier. Disabling it withdraws only native tier metadata tracked as generated;
+independently supplied or edited native tier descriptors are preserved.
 
 [OpenAI's API guide](https://developers.openai.com/api/docs/guides/ultrafast-mode) documents
 Ultrafast for GPT-6 Astra and GPT-6.1 Sol. API access and

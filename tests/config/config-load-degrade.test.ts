@@ -12,6 +12,7 @@ import {
   validateConfigCandidate,
 } from "../../src/config";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { mergeModelCapabilities, modelCapabilitiesConfigError } from "../../src/config/provider-validation";
 
 let home = "";
 let previousHome: string | undefined;
@@ -186,6 +187,24 @@ test("load preserves valid auto-review selectors and trims boundary whitespace",
   expect(loaded.providers.xai.autoReviewModelOverrides).toEqual({ "glm-5.2": "gpt-test" });
 });
 
+test("load drops a malformed global auto-review override and keeps a valid one", () => {
+  const defaults = getDefaultConfig();
+  const write = (autoReviewOverride: unknown) => writeFileSync(getConfigPath(), JSON.stringify({
+    ...defaults,
+    defaultProvider: "xai",
+    providers: { xai: { adapter: "openai-responses", baseUrl: "https://api.x.ai/v1", note: "keep me" } },
+    autoReviewOverride,
+  }), "utf8");
+
+  write({ enabled: "yes", model: "bad selector" });
+  const dropped = loadConfig();
+  expect(dropped.autoReviewOverride).toBeUndefined();
+  expect(dropped.providers.xai.note).toBe("keep me");
+
+  write({ enabled: true, model: "9router/ocg-muse-spark-1.3-contributor" });
+  expect(loadConfig().autoReviewOverride).toEqual({ enabled: true, model: "9router/ocg-muse-spark-1.3-contributor" });
+});
+
 test("Fast rows default on for fresh and omitted config; explicit false and malformed values disable", () => {
   expect(getDefaultConfig().fastRows).toBe(true);
   for (const [value, expected] of [[undefined, true], [true, true], [false, false], ["invalid", false]] as const) {
@@ -204,7 +223,7 @@ test("model capability writes stay strict while load preserves independent restr
     apiKey: "fixture-key", modelCapabilities: {
       ModelA: { inputModalities: ["text"] },
       modela: { contextTier: "long_context" },
-      broken: { inputModalities: "image", contextTier: "typo" },
+      broken: { inputModalities: "image", contextTier: "typo", supportsReasoning: true, supportsThinkingToggle: "true", supportsReasoningEffort: false, defaultThinkingEnabled: false },
     },
   } } };
   expect(validateConfigCandidate(raw).ok).toBe(false);
@@ -212,7 +231,7 @@ test("model capability writes stay strict while load preserves independent restr
   const loaded = loadConfig();
   expect(loaded.providers.xai.modelCapabilities).toEqual({
     ModelA: { inputModalities: ["text"] }, modela: { contextTier: "long_context" },
-    broken: { inputModalities: ["text"] },
+    broken: { inputModalities: ["text"], supportsReasoning: true, supportsReasoningEffort: false, defaultThinkingEnabled: false },
   });
   expect(loaded.providers.xai.apiKey).toBe("fixture-key");
   expect(validateConfigCandidate(loaded).ok).toBe(true);
@@ -221,7 +240,7 @@ test("model capability writes stay strict while load preserves independent restr
 test("model capabilities round-trip all explicit axes without expanding inference", () => {
   const raw = { ...candidate(undefined), providers: { xai: {
     ...candidate(undefined).providers.xai,
-    modelCapabilities: { ModelA: { inputModalities: ["text", "image"], contextTier: "long_context", video: { processing: "agentic" } } },
+    modelCapabilities: { ModelA: { inputModalities: ["text", "image"], contextTier: "long_context", video: { processing: "agentic" }, supportsReasoning: true, supportsThinkingToggle: true, supportsReasoningEffort: false, defaultThinkingEnabled: false } },
   } } };
   const validated = validateConfigCandidate(raw);
   expect(validated.ok).toBe(true);
@@ -229,6 +248,21 @@ test("model capabilities round-trip all explicit axes without expanding inferenc
   saveConfig(validated.config);
   expect(loadConfig().providers.xai.modelCapabilities).toEqual(raw.providers.xai.modelCapabilities);
   expect(loadConfig().providers.xai.modelContextWindows).toBeUndefined();
+});
+
+test("reasoning capability patches preserve false and independently delete or validate axes", () => {
+  const original = { ModelA: { supportsReasoning: true, supportsThinkingToggle: true, supportsReasoningEffort: false, defaultThinkingEnabled: true } };
+  const patch = { ModelA: { supportsThinkingToggle: false, defaultThinkingEnabled: null } };
+  expect(modelCapabilitiesConfigError(patch, true)).toBeNull();
+  expect(mergeModelCapabilities(original, patch)).toEqual({ ModelA: {
+    supportsReasoning: true, supportsThinkingToggle: false, supportsReasoningEffort: false,
+  } });
+  expect(original.ModelA.defaultThinkingEnabled).toBe(true);
+  for (const field of ["supportsReasoning", "supportsThinkingToggle", "supportsReasoningEffort", "defaultThinkingEnabled"]) {
+    expect(modelCapabilitiesConfigError({ ModelA: { [field]: "false" } })).not.toBeNull();
+    expect(modelCapabilitiesConfigError({ ModelA: { [field]: false } })).toBeNull();
+    expect(modelCapabilitiesConfigError({ ModelA: { [field]: null } })).not.toBeNull();
+  }
 });
 
 test.each([

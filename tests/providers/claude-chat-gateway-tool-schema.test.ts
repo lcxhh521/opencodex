@@ -215,6 +215,24 @@ describe("Claude behind a Chat Completions gateway: tool schema root", () => {
     }
   });
 
+  test("an unread later branch restores the whole root instead of partially merged properties", () => {
+    const schema = { anyOf: [
+      { properties: { first: { type: "string" } } },
+      { allOf: [{ properties: { later: { type: "number" } } }] },
+    ] };
+    const before = structuredClone(schema);
+    expect(toolFor("claude-sonnet-5-5", gateway, undefined, schema).parameters).toEqual({ ...schema, type: "object" });
+    expect(schema).toEqual(before);
+  });
+
+  test("the inline inspection budget is shared across different root composition keys", () => {
+    const variants = (count: number) => Array.from({ length: count }, () => ({ required: ["payload"] }));
+    const boundary = { anyOf: [{ allOf: variants(128) }], allOf: [{ oneOf: variants(128) }] };
+    expect(toolFor("claude-sonnet-5-5", gateway, undefined, boundary).parameters).toEqual({ type: "object" });
+    const overBudget = { ...boundary, allOf: [{ oneOf: variants(129) }] };
+    expect(toolFor("claude-sonnet-5-5", gateway, undefined, overBudget).parameters).toEqual({ ...overBudget, type: "object" });
+  });
+
   test("a non-Claude wire override excludes a Claude request alias", () => {
     const fn = toolFor("claude-alias", gateway, "gpt-5.6-terra");
     expect(fn.parameters).toEqual({ ...unionRoot, type: "object" });

@@ -1,4 +1,15 @@
+import { clientFacingModelText } from "../../lib/error-destination";
+import { projectLocalModelRefusalLog } from "../request-log-failure-detail";
+import { markProxyError, rememberProxyErrorMessage, carryProxyError } from "../../lib/client-error-body";
+import { releaseRequestOwnedMainOnOutcome, isKeyedRequestOwnedMain } from "../../codex/request-owned-affinity";
+import { wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
+import { hasResponseMediaType } from "../../lib/http-response-semantics";
+import { routeKnownModels } from "../../usage/log";
+import type { OcxProviderConfig } from "../../types";
 import { isNativeControlResponse } from "./native-response-control";
+import { guardBufferedComboRequiredTool } from "./combo-required-tool-contract";
+import { createComboRequiredToolStreamGuard } from "./combo-required-tool-stream";
+import { attachResponseToolOwnership } from "./response-tool-ownership";
 import { createOutboundCredentialMask, createTerminalErrorRedactionBlockRewrite } from "./terminal-error-redaction";
 import type { ResponsesRequestContext, ResponsesAdmissionState } from "./core-options";
 import type { PreparedResponsesRequest } from "./request-prepare";
@@ -29,6 +40,7 @@ import {
   codexDenialOutcomeMeta,
   isFixedCodexAccount,
   shouldDeferCodexResetDerivedCooldown,
+  shouldRetryCodexPoolAccountQuota,
 } from "./core-codex-account";
 import { isMainQuotaDispatchLive, isMainQuotaDispatchWsClaimed } from "../../codex/main-account-cache";
 import { MAIN_CODEX_ACCOUNT_ID } from "../../codex/account-id";
@@ -36,6 +48,7 @@ import type { ResponsesTerminalStatus } from "../../bridge";
 import { isCodexWsQuotaObservedResponse, isCodexWsUpstreamResponse, isCodexWsPreludeProjection } from "./ws-upstream";
 import { recordSubagentQuotaFailureForThreadSpawn } from "../../codex/subagent-model-fallback";
 import { recordCodexUpstreamOutcome } from "../../codex/routing";
+import { codexFailureWindowOutcomeMeta } from "../../codex/routing/failure-window";
 import { codexProbeLeaseId, codexProbeQuotaScope, codexTransientProbeGrant, releaseCodexAuthContextProbeLease } from "../../codex/auth-context";
 import { consumeComboFailure } from "./core-combo-failure";
 import { clientCancelledResponse, readDisplaySafeErrorText } from "./core-errors";
@@ -58,25 +71,30 @@ import {
   hasResponsesSnapshotRepair,
   createResponsesSnapshotBlockRewrite,
 } from "../responses-snapshot-repair";
+import { rewriteResponsesIncompleteReasonJson } from "../../responses/incomplete-reason";
 import { createResponsesModelPayloadRewrite, rewriteResponsesModelJson } from "../responses-model-rewrite";
-import { createImageGenCallRestoreRewrite, restoreImageGenCallsInJson } from "../responses-image-gen-repair";
+import { createImageGenCallRestoreRewrite, restoreImageGenCallsInJson, restoreImageGenCalls } from "../responses-image-gen-repair";
 import {
   createSelfNamedToolCallNamespaceScrubRewrite,
   scrubSelfNamedToolCallNamespaceInJson,
+  scrubSelfNamedToolCallNamespace,
 } from "../responses-self-named-namespace-scrub";
 import {
   createMuseToolNameRestoreRewrite,
   restoreMuseToolNamesInJson,
+  restoreMuseToolNames,
 } from "../../responses/muse-tool-name-alias";
 import {
   createRoutedNamespaceCallRestoreRewrite,
   restoreRoutedNamespaceCallsInJson,
+  restoreRoutedNamespaceCalls,
 } from "../../responses/namespace-tool-compat";
 import {
   hasResponsesItemIdRepair,
   createResponsesItemIdPayloadRewrite,
   repairResponsesJsonItemIds,
 } from "../responses-item-id-repair";
+import { createResponsesPhaseInferenceBlockRewrite } from "../responses-phase-inference";
 import {
   payloadRewriteAsBlockRewrite,
   composeSsePayloadRewrites,
@@ -112,6 +130,7 @@ import {
   undeclaredToolCallNameInResponse,
   undeclaredToolCallMessage,
   normalizeDefaultNamespaceInJson,
+  normalizeDefaultNamespaceInItem,
 } from "../responses-undeclared-tool-guard";
 import { isWin32EagerRewrite, selectEagerPath } from "../../lib/bun-stream-caps";
 
@@ -144,6 +163,8 @@ import {
   inspectResponseLogJson,
   inspectResponseLogSsePayloadParsed,
   noteUpstreamRequestId,
+  recordKeyWireAttemptUsage,
+  usageFromResponsesPayload,
 } from "../request-log";
 import { restoreRoutedCustomCallsInJson } from "../../responses/custom-tool-compat";
 import { restoreRoutedToolSearchCallsInJson } from "../../responses/tool-search-compat";
@@ -443,14 +464,23 @@ export async function deliverPassthroughResponse(
   const { requestBindings } = transportState;
 
   let upstreamResponse = nativeExchange.upstreamResponse;
+  // Judge the restored native payload before display projection can erase hosted-call evidence.
+  const requiredToolFailure = async (text: string): Promise<Response | undefined> => {
+    if (!options.comboAttempt || clientRequestedStream === true || isNonReplayableResponse(upstreamResponse)) return;
+    const candidate = attachResponseToolOwnership(new Response(text, {
+      status: upstreamResponse.status, headers: { "content-type": "application/json" },
+    }), providerExecutedCallTypes);
+    const verdict = await guardBufferedComboRequiredTool(candidate, parsed._rawBody, route.provider.adapter);
+    return verdict.ok ? undefined : verdict;
+  };
   const canonicalBufferedJson = clientRequestedStream !== true
     && isCanonicalOpenAiForwardProvider(route.provider);
   const originalContentType = upstreamResponse.headers.get("content-type");
   if (isUsageDebugEnabled() && originalContentType) logCtx.usageDebugContentType = originalContentType;
   if (responseEffects.plaintextV2AgentMessageToolNames.size > 0
     && upstreamResponse.ok && upstreamResponse.body && (parsed.stream || canonicalBufferedJson)
-    && !originalContentType?.toLowerCase().includes("text/event-stream")
-    && !originalContentType?.toLowerCase().includes("application/json")
+    && !hasResponseMediaType(upstreamResponse.headers, "text/event-stream")
+    && !hasResponseMediaType(upstreamResponse.headers, "application/json")
     && !isCodexWsUpstreamResponse(upstreamResponse)
     && !(options.nativeControl && isNativeControlResponse(upstreamResponse))) {
     upstreamResponse = await classifyPlaintextV2SseResponse(upstreamResponse, {
@@ -459,17 +489,24 @@ export async function deliverPassthroughResponse(
     });
   }
 
-    const headers = sanitizePassthroughHeaders(upstreamResponse.headers, codexSafetyBufferingOptions);
+    // Every relayed header set below goes through this filter with the route's known models, so a
+    // reported model (row and header) is only ever a model id this route or a catalog already names.
+    const passthroughHeaderOptions = {
+      ...codexSafetyBufferingOptions,
+      knownModels: [...routeKnownModels(logCtx), ...providerKnownModels(route.provider)],
+      provider: logCtx.provider,
+    };
+    const headers = sanitizePassthroughHeaders(upstreamResponse.headers, passthroughHeaderOptions);
     if (!upstreamResponse.ok) noteUpstreamRequestId(logCtx, headers);
-    const resolvedModel = headers.get("openai-model")?.trim();
+    const resolvedModel = headers.get("openai-model") ?? undefined;
     if (resolvedModel) {
       logCtx.servedModel = resolvedModel;
       if (!logCtx.preserveResolvedModelFromRoute) logCtx.resolvedModel = resolvedModel;
     }
     // ChatGPT may omit Content-Type on SSE responses. Plaintext V2 responses
     // reach this fallback only after their first Responses event is confirmed.
-    const passthroughCt = headers.get("content-type")?.toLowerCase();
-    const isEventStream = passthroughCt?.includes("text/event-stream")
+    const passthroughCt = headers.get("content-type");
+    const isEventStream = hasResponseMediaType(headers, "text/event-stream")
       || (responseEffects.plaintextV2AgentMessageToolNames.size === 0
         && upstreamResponse.ok
         && !!upstreamResponse.body
@@ -526,13 +563,14 @@ export async function deliverPassthroughResponse(
       } else if (!shouldDeferCodexResetDerivedCooldown(
         upstreamResponse,
         options.deferCodexResetDerivedCooldown,
-      ) && !isReplayRefusalResponse(upstreamResponse)) {
+      ) && !isReplayRefusalResponse(upstreamResponse) && !wasPermanentAccountRefusal(upstreamResponse)) {
         // A refusal this proxy made is not evidence about the account. Recording it would
         // classify the synthetic 429 as quota exhaustion and write a default cooldown against
         // a credential the request may never have reached, and that false signal outlives the
         // request. The sibling recorders on this path already decline: the terminal recorder
         // needs an ok streaming body, and the quota-header snapshot finds no quota headers.
         recordCodexUpstreamOutcome(config, admissionState.authCtx.accountId, upstreamResponse.status, {
+          ...codexFailureWindowOutcomeMeta(admissionState.authCtx),
           ...quotaMeta,
           threadId: admissionState.authCtx.affinityKey,
           fixedAccount: admissionState.authCtx.fixedAccount,
@@ -547,6 +585,18 @@ export async function deliverPassthroughResponse(
         });
       }
     } else {
+      if (terminalBodyWillRecord) {
+        options.setTerminalOutcomeRecorder?.((status, httpStatusOverride) => {
+          terminalRecorder?.(status, httpStatusOverride);
+          options.onNativePassthroughTerminal?.(status);
+        });
+      }
+      if (isKeyedRequestOwnedMain(admissionState.authCtx) && !terminalBodyWillRecord && !upstreamResponse.ok && !isNonReplayableResponse(upstreamResponse)
+        && !isReplayRefusalResponse(upstreamResponse) && !wasPermanentAccountRefusal(upstreamResponse) && isCanonicalOpenAiForwardProvider(route.provider)) {
+        const outcome = upstreamResponse.status >= 500 && await shouldRetryCodexPoolAccountQuota(upstreamResponse, options.abortSignal)
+          ? 429 : upstreamResponse.status;
+        releaseRequestOwnedMainOnOutcome(admissionState.authCtx, outcome, route.modelId);
+      }
       // The WS observer is the only plain-main publisher for a WebSocket exchange;
       // a prelude projection carries the prelude snapshot, not fresh evidence.
       // The dispatch claim is authoritative because downstream wrappers can replace the Response.
@@ -571,14 +621,14 @@ export async function deliverPassthroughResponse(
     // through sanitizePassthroughHeaders) so a redirect to a dead host can never
     // masquerade as a pre-connection failure after the credential was seen.
     // The numeric outcome above already classified it neutral — no streak.
-    if (isNonReplayableResponse(upstreamResponse) && !isReplayRefusalResponse(upstreamResponse)) {
+    if (isNonReplayableResponse(upstreamResponse) && !isReplayRefusalResponse(upstreamResponse) && !wasPermanentAccountRefusal(upstreamResponse)) {
       return await sanitizeNonReplayableUpstreamError(upstreamResponse, upstream.signal);
     }
     if (upstreamResponse.status >= 300 && upstreamResponse.status < 400) {
       return new Response(upstreamResponse.body, {
         status: upstreamResponse.status,
         statusText: upstreamResponse.statusText,
-        headers: sanitizePassthroughHeaders(upstreamResponse.headers, codexSafetyBufferingOptions),
+        headers: sanitizePassthroughHeaders(upstreamResponse.headers, passthroughHeaderOptions),
       });
     }
     if (!upstreamResponse.ok) {
@@ -597,27 +647,28 @@ export async function deliverPassthroughResponse(
       // Unsafe partial data falls back to #452's non-empty status-only JSON.
       const errorText = await readDisplaySafeErrorText(upstreamResponse, upstream.signal, "");
       if (upstreamResponse.status === 413) {
+        if (options.clientModelLabel) projectLocalModelRefusalLog(logCtx, options.clientModelLabel);
         return clientRequestedStream
-          ? streamingContextOverflowResponse(parsed._responseModelId ?? parsed.modelId, translatorBudget)
+          ? streamingContextOverflowResponse(clientFacingModelText(options.clientModelLabel), translatorBudget)
           : jsonContextOverflowResponse();
       }
       const policyRefusal = rewriteUpstreamPolicyRefusal({
         status: upstreamResponse.status,
         errorText,
         stream: clientRequestedStream,
-        modelId: parsed._responseModelId ?? parsed.modelId,
+        modelId: clientFacingModelText(options.clientModelLabel),
         destinationIsXai: isXaiResponsesDestination(route.provider),
         translatorBudget,
         turnAdmissionLease: options.turnAdmissionLease,
       });
       if (policyRefusal) return policyRefusal;
-      return formatPassthroughUpstreamError(upstreamResponse.status, errorText, {
+      return carryProxyError(upstreamResponse, formatPassthroughUpstreamError(upstreamResponse.status, errorText, {
         statusText: upstreamResponse.statusText,
         headers,
         // Provenance, not inference: `errorText` is empty when the bounded read finds nothing
         // display-safe, and an empty body is exactly what the retryable-429 default fires on.
         replayRefusal: isReplayRefusalResponse(upstreamResponse),
-      });
+      }));
     }
 
     if (options.nativeControl && isNativeControlResponse(upstreamResponse) && upstreamResponse.body) {
@@ -683,7 +734,7 @@ export async function deliverPassthroughResponse(
           upstream,
           terminalRepairPolicy,
           translatorBudget,
-          options.responsesTerminalRepairScheduler,
+          options.responsesTerminalRepairScheduler, logCtx,
         )
         : upstreamResponse.body;
       passthroughSseBody = webSearchBridgePlan
@@ -725,7 +776,7 @@ export async function deliverPassthroughResponse(
                 upstream,
                 terminalRepairPolicy,
                 translatorBudget,
-                options.responsesTerminalRepairScheduler,
+                options.responsesTerminalRepairScheduler, logCtx,
               ),
               continuation,
             );
@@ -768,6 +819,7 @@ export async function deliverPassthroughResponse(
         : undefined;
       // Compose opt-in payload rewrites into one parse/stringify pass (image-gen restore first).
       const payloadRewrites = [
+        rewriteResponsesIncompleteReasonJson,
         createImageGenCallRestoreRewrite(imageGenCallAliases),
         // #3217: a call whose namespace repeats its own name is unroutable in codex-rs.
         createSelfNamedToolCallNamespaceScrubRewrite(selfNamedNamespaceScrubAuthorization),
@@ -804,6 +856,23 @@ export async function deliverPassthroughResponse(
         }, { dispose: () => plaintextInspector.dispose() })
         : undefined;
       const maskCredential = createOutboundCredentialMask(nativeExchange.request.headers);
+      const requiredStreamEvidence = { replayUnsafe: !!webSearchBridgePlan };
+      const normalizeRequiredToolItem = (item: unknown) => {
+        item = restoreImageGenCalls(item, imageGenCallAliases).value;
+        item = scrubSelfNamedToolCallNamespace(item, selfNamedNamespaceScrubAuthorization).value;
+        item = restoreMuseToolNames(item, responseEffects.routedMuseToolNameAliases).value;
+        item = restoreRoutedNamespaceCalls(item, responseEffects.routedNamespaceToolAliases).value;
+        item = restoreRoutedNamespaceCalls(item, authorizedBareNamespaceToolAliases).value;
+        return normalizeDefaultNamespaceInItem(item, declaredWireToolNames, declaredBareWireToolNames).value;
+      };
+      const requiredStreamGuard = options.comboAttempt && clientRequestedStream === true
+        && (options.inboundWire === undefined || options.inboundWire === "responses")
+        && route.provider.adapter === "openai-responses" && !isNonReplayableResponse(upstreamResponse)
+        ? createComboRequiredToolStreamGuard(parsed._rawBody, providerExecutedCallTypes,
+          requiredStreamEvidence, normalizeRequiredToolItem, nativeExchange.request)
+        : undefined;
+      // The factory creates independent raw/client state with one tool identity resolver.
+      const requiredStreamInspector = requiredStreamGuard;
       const blockRewrites = [
         payloadRewrites.length > 0
           ? payloadRewriteAsBlockRewrite(composeSsePayloadRewrites(...payloadRewrites))
@@ -846,6 +915,9 @@ export async function deliverPassthroughResponse(
         snapshotRepairEnabled
           ? createResponsesSnapshotBlockRewrite(nativeExchange.outboundRequestBody, translatorBudget)
           : undefined,
+        route.provider.messagePhaseInference === true
+          ? createResponsesPhaseInferenceBlockRewrite(translatorBudget)
+          : undefined,
         responseEffects.plaintextV2AgentMessageToolNames.size > 0
           ? payloadRewriteAsBlockRewrite(createPlaintextV2AgentMessageCallRestoreRewrite(
             responseEffects.plaintextV2AgentMessageToolNames, responseEffects.plaintextV2AgentMessageAliasedToolNames,
@@ -867,18 +939,23 @@ export async function deliverPassthroughResponse(
             providerExecutedCallTypes,
             declaredBareWireToolNames,
             recoverableBareCustomWireToolNames,
-            { refuseUndeclared: nativeExchange.undeclaredToolGuardActive },
+            { refuseUndeclared: nativeExchange.undeclaredToolGuardActive,
+              onRefusal: message => rememberProxyErrorMessage(logCtx, message, { status: 502, type: "upstream_error", code: UNDECLARED_TOOL_CALL_ERROR_CODE }) },
           )
           : undefined,
         grokUpstreamEchoEnabled
           ? createGrokUpstreamEnvelopeEchoBlockRewrite(
-            rememberPassthroughResponse ? rememberPassthroughResponseChecked : undefined,
+            rememberPassthroughResponse ? (response) => {
+              if (requiredStreamGuard) requiredStreamGuard.rememberCompleted(response, rememberPassthroughResponseChecked);
+              else rememberPassthroughResponseChecked(response);
+            } : undefined,
           )
           : undefined,
+        requiredStreamGuard?.blockRewrite,
         createTerminalErrorRedactionBlockRewrite(nativeExchange.request.headers, maskCredential),
         rememberPlaintextBlock,
         // Display-only projection must follow every continuation-cache observer.
-        isLocalCodexImageClient(req.headers, options.admission?.kind, options.inboundWire)
+        (!canonicalBufferedJson || !options.comboAttempt) && isLocalCodexImageClient(req.headers, options.admission?.kind, options.inboundWire)
           ? createHostedImageDisplayRewrite()
           : undefined,
       ].filter((rewrite): rewrite is NonNullable<typeof rewrite> => rewrite !== undefined);
@@ -1021,6 +1098,29 @@ export async function deliverPassthroughResponse(
         };
         if (signal.aborted) return cancelAfterValidation();
 
+        const requiredFailure = await requiredToolFailure(JSON.stringify(client.terminal.response));
+        if (requiredFailure) {
+          const usage = usageFromResponsesPayload(client.terminal.response.usage);
+          if (usage && !logCtx.usageFromBridge) {
+            if (!recordKeyWireAttemptUsage(logCtx, usage)) {
+              logCtx.usage = usage;
+              if (logCtx.activeAttempt) logCtx.activeAttempt.usage = usage;
+            }
+            logCtx.usageWireParsed = true;
+          }
+          return requiredFailure;
+        }
+        if (signal.aborted) return cancelAfterValidation();
+        let clientJson = JSON.stringify(client.terminal.response);
+        if (options.comboAttempt && isLocalCodexImageClient(req.headers, options.admission?.kind, options.inboundWire)) {
+          const display = createHostedImageDisplayRewrite();
+          try { clientJson = display.json(clientJson); }
+          catch (error) {
+            if (error instanceof RangeError) return formatErrorResponse(502, "upstream_error", "hosted image result exceeds local display limits");
+            throw error;
+          } finally { display.dispose?.(); }
+        }
+
         // Effects intentionally run only after both bounded validations. They inspect the same
         // upstream-facing transcript as the streaming relay and fire once; continuation storage
         // receives the final client-visible response once after all restorations succeeded.
@@ -1075,9 +1175,9 @@ export async function deliverPassthroughResponse(
           rememberPassthroughResponseChecked(client.terminal.response);
         }
 
-        const jsonHeaders = sanitizePassthroughHeaders(headers, codexSafetyBufferingOptions);
+        const jsonHeaders = sanitizePassthroughHeaders(headers, passthroughHeaderOptions);
         jsonHeaders.set("content-type", "application/json");
-        return markPreinspectedJsonResponse(new Response(JSON.stringify(client.terminal.response), {
+        return markPreinspectedJsonResponse(new Response(clientJson, {
           status: upstreamResponse.status,
           statusText: upstreamResponse.statusText,
           headers: jsonHeaders,
@@ -1124,7 +1224,7 @@ export async function deliverPassthroughResponse(
             options.onNativePassthroughTerminal?.(status);
           }
           : undefined;
-        const inspector = createSseInspector({
+        const inspector = (requiredStreamInspector?.inspectorFactory ?? createSseInspector)({
           onTerminal: reportNativeTerminal,
           logCtx,
           onCompletedResponse: rememberPassthroughResponse && !grokUpstreamEchoEnabled && responseEffects.plaintextV2AgentMessageToolNames.size === 0 ? rememberPassthroughResponseChecked : undefined,
@@ -1191,6 +1291,7 @@ export async function deliverPassthroughResponse(
       linkAbortSignal(upstream, turnAc.signal);
       registerTurn(turnAc, options.turnAdmissionLease);
       const inspectionConsumerOptions = {
+        ...(requiredStreamInspector ? { inspectorFactory: requiredStreamInspector.inspectorFactory } : {}),
         // Request abort can reject the fetch body before the response cancel hook runs.
         clientGoneSignal,
         drainBounds: { ms: 15_000, bytes: 32 * 1024 * 1024 },
@@ -1266,7 +1367,7 @@ export async function deliverPassthroughResponse(
         headers,
       }));
     }
-    if (headers.get("content-type")?.toLowerCase().includes("application/json")) {
+    if (hasResponseMediaType(headers, "application/json")) {
       // Bounded whole-body read: a non-streaming upstream JSON body is fully materialized
       // here (and again by the request-log finalizer and the WebSocket bridge's reframing),
       // so an unbounded .text() would let a hostile or stuck upstream grow proxy memory
@@ -1317,7 +1418,7 @@ export async function deliverPassthroughResponse(
         const modelRewritten = parsed._responseModelId !== undefined && parsed._responseModelId !== parsed.modelId
           ? rewriteResponsesModelJson(repaired, parsed._responseModelId)
           : repaired;
-        return modelRewritten;
+        return rewriteResponsesIncompleteReasonJson(modelRewritten);
       })();
       if (plaintextV2RestoreFailed) {
         return formatErrorResponse(502, "upstream_error", PLAINTEXT_V2_AGENT_MESSAGE_RESTORE_OVERFLOW_MESSAGE);
@@ -1342,9 +1443,9 @@ export async function deliverPassthroughResponse(
           }
         })();
         if (undeclared !== undefined) {
-          return formatErrorResponse(502, "upstream_error", undeclaredToolCallMessage(undeclared), {
+          return markProxyError(formatErrorResponse(502, "upstream_error", undeclaredToolCallMessage(), {
             code: UNDECLARED_TOOL_CALL_ERROR_CODE,
-          });
+          }));
         }
       }
       // Same split as the SSE rewrite: normalization applies whenever a declared name exists,
@@ -1356,6 +1457,8 @@ export async function deliverPassthroughResponse(
           declaredBareWireToolNames,
         );
       }
+      const requiredFailure = await requiredToolFailure(clientJson);
+      if (requiredFailure) return requiredFailure;
       commitReasoningReplayServingRoute(nativeExchange.request.headers);
       try {
         rememberPassthroughResponseChecked(
@@ -1414,7 +1517,7 @@ export async function deliverPassthroughResponse(
             }
             throw error;
           }
-          const sseHeaders = sanitizePassthroughHeaders(headers, codexSafetyBufferingOptions);
+          const sseHeaders = sanitizePassthroughHeaders(headers, passthroughHeaderOptions);
           sseHeaders.set("content-type", "text/event-stream");
           sseHeaders.set("cache-control", "no-store");
           return new Response(stream, {
@@ -1461,4 +1564,17 @@ export async function deliverPassthroughResponse(
       status: upstreamResponse.status,
       headers,
     });
+}
+
+/**
+ * Model ids the user configured for the selected provider: its models and retention lists and
+ * default. A provider-owned model hint that names one of them is relayed as the proxy's copy.
+ * Live-discovered ids are not trusted here, because the upstream's own /models answer chose them;
+ * neither is the selection list, which a model preset fills from that same discovered catalog.
+ */
+function providerKnownModels(provider: OcxProviderConfig): string[] {
+  return [
+    ...(provider.models ?? []), ...(provider.retainModels ?? []),
+    ...(provider.defaultModel ? [provider.defaultModel] : []),
+  ];
 }

@@ -1,6 +1,9 @@
+import { decisionQuotaSinkActive, invalidateDecisionKeyQuotas, replaceCollectedDecisionQuotas, type AntigravityQuotaObservation, type AntigravityQuotaReceipt, type DecisionKeyObservation } from "../../lib/decision-quota-sink";
+import { providerDecisionWindows } from "../quota-decision-publication";
+import type { DecisionQuotaWindow } from "../quota-decision-snapshot";
 import { createHash } from "node:crypto";
 import { effectiveCodexAuthAccountId, listCodexAuthAccountsSnapshot } from "../../codex/auth-api";
-import { withoutRetiredCodexQuota, type StoredAccountQuota } from "../../codex/quota";
+import { CODEX_EXHAUSTED_USAGE_PERCENT, withoutRetiredCodexQuota, type StoredAccountQuota } from "../../codex/quota";
 import { isMainAccountIdentityGenerationLive } from "../../codex/main-account-cache";
 import { codexPlanKey } from "../../codex/plan";
 import { resolveProviderApiKey } from "../key-store";
@@ -19,6 +22,8 @@ export const LAST_GOOD_MAX_AGE_MS = CODEX_CAPACITY_MAX_QUOTA_AGE_MS;
 const nativeMainReportGenerations = new WeakMap<ProviderQuotaReport, number>();
 export const accountReportCurrent = new WeakMap<ProviderQuotaReport, () => boolean>();
 export const routingEvidence = new WeakMap<ProviderQuotaReport, ProviderQuotaRoutingEvidence>();
+/** Only the live Antigravity probe binds this projection; display/last-good rows cannot create it. */
+export const antigravityEvidence = new WeakMap<ProviderQuotaReport, { receipt: AntigravityQuotaReceipt; windows: readonly DecisionQuotaWindow[] }>();
 export let providerQuotaBeforePublishForTests: (() => void | Promise<void>) | null = null;
 
 /** Test-only seam for identity/config invalidation after probes but before publication. */
@@ -98,6 +103,7 @@ export function clearProviderQuotaCache(): void {
   cache = null;
   clearCachedProviderQuotas();
   clearProviderApiKeyQuotaCache();
+  invalidateDecisionKeyQuotas();
   invalidationEpoch += 1;
 }
 
@@ -148,16 +154,28 @@ export function hasCodexPoolProvider(config: OcxConfig): boolean {
   ));
 }
 
-function quotaSignatureValue(quota: CodexCapacityQuota | null): unknown {
+/**
+ * Signature of one pool account's presentation state. Every proxied Codex response restamps the
+ * observation, so a raw `updatedAt` in the key stopped the report cache from ever committing
+ * while traffic flowed (#7956). The key carries the fresh/stale verdict aggregation derives
+ * from it instead; value changes and freshness transitions still miss the cache. A displayed
+ * window `updatedAt` can therefore lag a restamp by up to the report cache TTL. The exception is
+ * an exhausted short window without a reset: its `shortObservedAt` alone decides whether it
+ * still blocks, over a window as short as that TTL, so that clock stays in the key.
+ */
+function quotaSignatureValue(quota: CodexCapacityQuota | null, now: number): unknown {
   if (!quota) return null;
+  const resetless = !(typeof quota.fiveHourResetAt === "number" && quota.fiveHourResetAt > 0);
+  const observationDecides = resetless && (quota.fiveHourPercent ?? 0) >= CODEX_EXHAUSTED_USAGE_PERCENT;
   return {
     fiveHourPercent: quota.fiveHourPercent,
     fiveHourResetAt: quota.fiveHourResetAt,
+    ...(observationDecides ? { shortObservedAt: quota.shortObservedAt } : {}),
     weeklyPercent: quota.weeklyPercent,
     weeklyResetAt: quota.weeklyResetAt,
     monthlyPercent: quota.monthlyPercent,
     monthlyResetAt: quota.monthlyResetAt,
-    updatedAt: quota.updatedAt,
+    fresh: Number.isFinite(quota.updatedAt) && now - quota.updatedAt <= CODEX_CAPACITY_MAX_QUOTA_AGE_MS,
     customWindows: [...(quota.customWindows ?? [])]
       .map(window => ({ label: window.label, percent: window.percent, resetAt: window.resetAt }))
       .sort((a, b) => a.label.localeCompare(b.label)),
@@ -198,13 +216,14 @@ export function cacheKeyWithAggregationState(
     try {
       const activeId = effectiveCodexAuthAccountId(config);
       const snapshot = await (prefetchedSnapshot ?? listCodexAuthAccountsSnapshot(config, false));
+      const now = Date.now();
       const rows = snapshot.accounts.map(account => ({
         isMain: account.isMain,
         active: account.id === activeId,
         plan: codexPlanKey(account.plan) ?? null,
         paused: account.paused,
         needsReauth: account.needsReauth === true,
-        quota: quotaSignatureValue(providerQuotaFromCodexQuota(account.quota)),
+        quota: quotaSignatureValue(providerQuotaFromCodexQuota(account.quota), now),
       }));
       const canonicalRows = rows.map(row => JSON.stringify(row)).sort();
       const digest = createHash("sha256").update(JSON.stringify(canonicalRows)).digest("hex").slice(0, 24);
@@ -343,6 +362,23 @@ export function isProviderQuotaReportCurrent(value: ProviderQuotaReport): boolea
   const generation = nativeMainReportGenerations.get(value);
   return (generation === undefined || isMainAccountIdentityGenerationLive(generation))
     && (accountReportCurrent.get(value)?.() ?? true);
+}
+
+/** Called only by an accepted collector/cache publication, never the JEV read path. */
+export function publishCollectedDecisionQuota(reports: ProviderQuotaReport[], config: OcxConfig): void {
+  if (!decisionQuotaSinkActive()) return;
+  const keys: DecisionKeyObservation[] = [];
+  const oauth: AntigravityQuotaObservation[] = [];
+  for (const report of reports) {
+    const provider = config.providers[report.provider];
+    if (!provider || !isProviderQuotaReportCurrent(report)) continue;
+    const observation = antigravityEvidence.get(report);
+    if (observation) oauth.push({ name: report.provider, provider, ...observation });
+    const evidence = routingEvidence.get(report);
+    if (evidence && evidence.binding === providerQuotaRoutingBinding(report.provider, provider))
+      keys.push({ name: report.provider, provider, windows: providerDecisionWindows(evidence.quota) });
+  }
+  replaceCollectedDecisionQuotas(keys, oauth);
 }
 
 /**

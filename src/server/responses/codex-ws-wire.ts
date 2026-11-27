@@ -1,3 +1,4 @@
+import { normalizeResponsesIncompleteReason } from "../../responses/incomplete-reason";
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
 import {
   isTransientUpstreamStatus,
@@ -8,6 +9,7 @@ import {
 import { isRateLimitOrQuotaFailureMessage, recognizedUpstreamError } from "../../lib/errors";
 import type { RequestFailureCause, RequestFailureStage } from "../../lib/request-failure-model";
 import { packageVersion } from "../../lib/package-version";
+import { registerProviderResponseProvenance } from "../../providers/request-pacing";
 // If the 101 never arrives (network black hole), give SSE a chance well before
 // the caller's connect timeout (default 200s) would fire.
 export const UPGRADE_DEADLINE_MS = 10_000;
@@ -23,6 +25,11 @@ export const UPGRADE_DEADLINE_MS = 10_000;
 // keeps exactly the previous 90 s bound; a peer that does can never trip it while alive.
 export const CODEX_WS_LIVENESS_PING_INTERVAL_MS = 15_000;
 export const CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS = 90_000;
+// The pinger keeps running after the commit: a tunnel restart or Wi-Fi rejoin can drop the path
+// without a FIN or RST, and codex-rs would wait out its 300 s idle timeout. A peer that has ponged
+// and then sends no frame and no pong for this many intervals is gone, and the stream fails so the
+// client retries. One missed pong is not a verdict.
+export const CODEX_WS_COMMITTED_SILENT_INTERVALS = 2;
 // Keep the push-based WS transport inside the same memory envelope as the
 // bounded SSE relays that consume this response. Unlike fetch response bodies,
 // a WebSocket cannot be paused when a ReadableStream applies backpressure, so
@@ -49,9 +56,12 @@ export const CODEX_WS_CREATE_FRAME_LIMIT_BYTES =
 /** Close code the backend uses for an oversized message (RFC 6455 "message too big"). */
 const WS_CLOSE_MESSAGE_TOO_BIG = 1009;
 
-const codexWsUpstreamResponses = new WeakSet<Response>();
-const quotaObservedResponses = new WeakSet<Response>();
-const codexWsPreludeProjections = new WeakSet<Response>();
+const codexWsUpstreamResponses = new WeakMap<Response, true>();
+const quotaObservedResponses = new WeakMap<Response, true>();
+const codexWsPreludeProjections = new WeakMap<Response, true>();
+registerProviderResponseProvenance(codexWsUpstreamResponses);
+registerProviderResponseProvenance(quotaObservedResponses);
+registerProviderResponseProvenance(codexWsPreludeProjections);
 
 /** Quota arrived directly at its captured account; do not replay old HTTP prelude headers. */
 export function isCodexWsQuotaObservedResponse(response: Response): boolean {
@@ -65,7 +75,7 @@ export function isCodexWsUpstreamResponse(response: Response): boolean {
 
 /** Pre-response projection; its headers retain the exchange's prelude snapshot. */
 export function markCodexWsPreludeProjection(response: Response): void {
-  codexWsPreludeProjections.add(response);
+  codexWsPreludeProjections.set(response, true);
 }
 
 export function isCodexWsPreludeProjection(response: Response): boolean {
@@ -73,8 +83,8 @@ export function isCodexWsPreludeProjection(response: Response): boolean {
 }
 
 export function markCodexWsResponse(response: Response, observed: boolean): void {
-  codexWsUpstreamResponses.add(response);
-  if (observed) quotaObservedResponses.add(response);
+  codexWsUpstreamResponses.set(response, true);
+  if (observed) quotaObservedResponses.set(response, true);
 }
 
 /**
@@ -313,6 +323,7 @@ export function restoreCodexWsPreOutputRefusal(response: Response): Response {
 }
 
 const codexWsStageByResponse = new WeakMap<Response, CodexWsStageRecord>();
+registerProviderResponseProvenance(codexWsStageByResponse);
 
 export function markCodexWsStage(response: Response, record: CodexWsStageRecord): void {
   const current = codexWsStageByResponse.get(response);
@@ -398,7 +409,7 @@ export type CodexWsFailureStage = {
   firstResponseMs: number | null;
   /** Milliseconds from send to this failure; null when the failure predates the send. */
   elapsedMs: number | null;
-  /** Liveness pings the exchange sent while waiting for the first response event. */
+  /** Liveness pings the exchange sent, before and after the first response event. */
   pings: number;
   /** Pongs the peer answered with; zero on a peer that never answers pings. */
   pongs: number;
@@ -457,6 +468,7 @@ export function projectCodexWsFailure(
 }
 
 const socketDeathStages = new WeakMap<Response, RequestFailureStage>();
+registerProviderResponseProvenance(socketDeathStages);
 
 /**
  * Record that a pre-response settle came from the socket closing or failing under the send (#4191),
@@ -517,12 +529,12 @@ export function normalizeResponsesWsRelayEvent(text: string): ResponsesWsRelayEv
     return null;
   }
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
-  const record = payload as Record<string, unknown>;
+  const record = normalizeResponsesIncompleteReason(payload as Record<string, unknown>);
   if (typeof record.type !== "string") return null;
   // A native error may be pretty-printed JSON. SSE prefixes one data line;
   // embedded physical newlines would otherwise truncate the JSON for readers.
   if (record.type !== "response.done") return {
-    type: record.type, text: /[\r\n]/.test(text) ? JSON.stringify(record) : text, payload: record,
+    type: record.type, text: record !== payload || /[\r\n]/.test(text) ? JSON.stringify(record) : text, payload: record,
   };
 
   const response = record.response;

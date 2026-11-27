@@ -17,9 +17,11 @@ terminal on drift; see [continuation binding contract](../providers-and-adapters
 
 Shared parsing and streaming follow the [request-copy](byte-accounting.md#request-copy-accounting) and [stream-buffer accounting](byte-accounting.md#stream-buffer-accounting) contracts. Response-attached WebSocket telemetry follows the [stage record identity contract](responses-wire-shapes.md#passthrough-sse-stream-shapes-314).
 
+Responses WebSocket terminal frames normalize known `incomplete_details.reason` aliases under the [incomplete reason contract](responses-wire-shapes.md#adapter-incomplete-reasons), including native control chains.
+
 ## Heartbeat and stall deadline
 
-RunTurn search interception forwards adapter heartbeats immediately and emits progress for buffered semantic events. Its bridge uses the search plan's stall deadline so a bounded sidecar search fits the watchdog budget.
+Header and JSON policy follow [local deadlines](timeouts.md). Responses and direct-client watchdogs read live serving locality across refreshed continuation legs and reset silence ticks on locality changes. RunTurn search interception forwards adapter heartbeats immediately and emits progress for buffered semantic events. Its bridge uses the search plan's stall deadline so a bounded sidecar search fits the watchdog budget.
 
 Native Chat uses the same resolved `stallTimeoutSec` with a pending-upstream-read allowance that
 pauses under downstream backpressure. Its Chat error and cancellation contract is documented in
@@ -55,7 +57,7 @@ cancellation decisions.
 
 > Decision record: [ADR-5805](../decisions/ADR-5805-chat-completions-heartbeat-relay.md)
 
-Top-level `emptyCompletionRetry: true` opts Responses turns into one identical replay when an
+Top-level `emptyCompletionRetry: true` opts translated Responses turns into one identical replay when an
 upstream turn produces neither output text nor a tool call, including a stream that ends before a
 terminal event. A terminal-less stream is replayed only before actionable output; post-output EOF
 remains incomplete so text or tool calls cannot be duplicated. The default is off because the replay
@@ -64,7 +66,7 @@ buffered HTTP adapters plus `runTurn` transports share the same guard, while com
 routed compaction stay excluded. Pre-content reasoning is retained under named event-count and byte
 caps and emits liveness heartbeats while held. A second empty result or retry failure becomes typed
 502 `empty_completion_retry_failed`; usage is merged across sends, and the Logs attempt records
-recovery kind `empty-completion`.
+recovery kind `empty-completion`. Native OpenGateway passthrough follows its [separate completion contract](../providers/opengateway.md), with destination-specific default recovery and terminal-only replay.
 
 The fetch and runTurn web-search loops honor `streamRoutedModelOutput`: leading text and reasoning
 stream live until the first tool boundary, and final replay omits already delivered events.
@@ -244,7 +246,7 @@ returns the same downstream SSE contract. The canonical `openai` provider uses
 upstream WebSocket by default; `providers.openai.upstreamWebsocket: false` sends
 its streaming turns over HTTP/SSE instead. This explicit choice also makes
 native mid-turn steering and injection unavailable on that provider. It does
-not change the endpoint, credential, or downstream event format.
+not change the endpoint, credential, or downstream event format. The [upstream connection-signal contract](responses-wire-shapes.md#passthrough-sse-stream-shapes-314) preserves an actual reasoning-inclusion header for HTTP/SSE clients; it cannot modify a client-facing WebSocket upgrade that already completed.
 Its WSS route checks NO_PROXY first, then selects the
 first non-empty HTTPS_PROXY, https_proxy, ALL_PROXY, or all_proxy value. HTTP_PROXY alone does not
 route WSS. Unsupported or malformed selected proxy values skip the WebSocket attempt and use the
@@ -253,6 +255,38 @@ egress. HTTP/SSE fallback retains Bun fetch's own proxy rules, which do not cons
 
 The endpoint handles `response.create`, ignores `response.processed`, supports warmup
 `generate: false`, and feeds the same request pipeline as HTTP/SSE.
+
+Incoming Responses connections share a 128-socket admission limit. Only when a new upgrade
+finds that limit full, the handler reclaims the least recently used eligible idle connection.
+Message handling and turn completion refresh a monotonic use order; connection age alone
+does not choose the victim. Eligibility requires an open socket, no active turn, no pending
+client tool or approval result, no retained native steering/injection owner, and no buffered
+outbound bytes. A superseded turn remains active until its own cleanup finishes.
+
+Tool and approval identities are tracked across output items and terminal snapshots. Function argument
+and custom-tool input completion also establish waits, correlated through `response.output_item.added`,
+even if EOF precedes the completed item or terminal. An added item with unfinished arguments alone
+establishes no wait. Only matching client or upstream results retire waits, suppressing completion echoes.
+Tracking retains bounded identity hashes; overflow or ambiguous completion identities protect the
+connection until close. A terminal does not make a connection idle while its client tool runs.
+
+The tracker reuses the final route's provider-executed tool classification, including declarations
+injected into the outbound request. `src/server/responses/response-tool-ownership.ts` carries that
+classification with the selected Response through body wrappers; failed combo attempts cannot
+authorize the winning response's calls. Hosted xAI search therefore creates no client-result wait.
+Each admitted ordinary turn starts a fresh returned-result deduplication scope after settling prior
+results, even if its upstream omits `response.created`. Native control keeps same-response echo
+suppression. `tests/responses/ws-capacity-tool-ownership.test.ts` covers these ownership boundaries.
+
+The victim is marked closing before sending close code 1001 with reason
+`Idle Responses connection reclaimed`. Only its ordinary close callback releases the
+admission lease. After requesting closure, the current upgrade immediately attempts reservation once.
+If every socket is protected, the close fails, or the callback has not yet released the lease,
+that upgrade receives the existing HTTP 503 `Codex WebSockets capacity reached` response.
+A later upgrade can acquire the released slot; admission never exceeds the limit. Reclamation
+does not delete saved continuation state; a client can reconnect through the existing upgrade
+and replay path. This policy adds no idle timer or configuration and does not change the
+separate Live/Realtime sockets or upstream connection reuse. Client disconnect releases socket admission independently of upstream cleanup: the eager relay may continue its existing bounded post-cancel drain for up to 15 seconds to observe a real terminal while a replacement socket already completes new work.
 
 Registry-declared per-model compatibility hints (`modelResponsesUpstreamStreaming`) may ask the
 upstream Responses endpoint for bounded JSON on ANY client transport — WebSocket or ordinary
@@ -324,7 +358,7 @@ Pool quota producers and account commands follow the [bounded raw-observation co
 
 Account quota surfaces use [safe probe diagnostics](inventory.md#account-quota-failure-diagnostics) separately from quota validity, credential health and routing authority.
 
-Combo child requests normalize effort and thinking controls against the selected target while retaining reasoning summaries; strict unknown targets preserve caller controls. The [Responses transport owner](responses.md) documents this boundary, and native Chat capability stripping applies only for an explicit empty declaration or no-reasoning model; an initial JEV null choice separately strips caller effort.
+Combo child requests normalize effort and thinking controls against the selected target while retaining reasoning summaries; strict unknown targets preserve caller controls. The [Responses transport owner](responses.md) documents this boundary, and native Chat also honors explicit per-axis capability declarations; an initial JEV null choice separately strips caller effort.
 
 Live sideband admission and its bounded upstream handshake follow the [runtime contract](../runtime.md#live-sideband-handshake); the ordinary Responses WebSocket exchange remains separate.
 
@@ -516,9 +550,9 @@ charged against the unchanged 32 MiB serialized history budget. The existing
 body-persistence eligibility and accepted-only steering commit rules still apply.
 `tests/responses/ws-steering-stability.test.ts` binds these deadline and replay
 contracts to deterministic clocks and a synthetic real-handler continuation test.
-`src/server/responses/native-response-json.ts` owns content comparison without
-importing either control owner, keeping the replay dependency graph acyclic.
-Injection retains its existing helper export names and comparison semantics.
+`src/server/responses/native-response-json.ts` owns content comparison and
+[bounded output identity](inventory.md#native-output-identity) without importing either control owner.
+Injection retains its existing helper export names and SHA-256 comparison semantics.
 
 ## Steering settings, public API and diagnostic probe
 

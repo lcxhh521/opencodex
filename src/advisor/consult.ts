@@ -18,7 +18,7 @@
  * unavailable context or with nothing, depending on the trigger.
  */
 import type { OcxConfig } from "../types";
-import { localAdmissionToken, localInferenceDestination } from "../lib/local-destinations";
+import { localInferenceDestination, selfFetchAdmissionToken, type LocalInferenceDestination } from "../lib/local-destinations";
 import { signalWithTimeout, cancelBodyOnAbort } from "../lib/abort";
 import { redactSecretString } from "../lib/redact";
 import { sidecarEnter } from "../lib/sidecar-tracker";
@@ -27,7 +27,18 @@ import {
   internalCallCapability,
 } from "../lib/local-internal-call-capability";
 import { configuredPort } from "../server/auth-cors";
+import { readAdvisorReasoning } from "../server/inference/advisor-diagnostics";
 import { ADVISOR_SYSTEM_INSTRUCTION, buildAdvisorUserPrompt, type AdvisorContextInput } from "./context";
+import {
+  ADVISOR_ADMISSION_SCOPE_HEADER,
+  AdvisorAdmissionScopeEncodedBoundExceeded,
+  encodeAdvisorAdmissionScope,
+  ADVISOR_ADMISSION_POLICY_HEADER,
+  registerAdvisorAdmissionPolicy,
+} from "../server/advisor-admission-scope";
+import type { AdmissionModelScope } from "../server/admission-model-scope";
+import type { CapturedAdmissionPolicy } from "../types/admission-policy";
+import { captureAdmissionPolicy } from "../server/capture-admission-policy";
 
 /**
  * The header the advisor presents on its own loopback request. Its VALUE is this process's
@@ -53,17 +64,24 @@ export interface AdvisorConsultationResult {
   durationMs: number;
   /** Token usage reported by the chat completion, when the adapter surfaced it. */
   usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+  effectiveEffort?: string | null;
 }
 
 export function advisorDestinationOrigin(
   config: Pick<OcxConfig, "port" | "hostname" | "unauthenticatedLoopbackListener">,
 ): string {
+  return advisorDestination(config).origin;
+}
+
+function advisorDestination(
+  config: Pick<OcxConfig, "port" | "hostname" | "unauthenticatedLoopbackListener">,
+): LocalInferenceDestination {
   // Same port resolution rule as the vision sidecar: config.port can be 0 (ephemeral bind, tests)
   // or stale after a live port override, so prefer the recorded actual bind port when present.
   const port = config.port && config.port > 0
     ? config.port
     : Number(configuredPort()) || 10_100;
-  return localInferenceDestination(config, port).origin;
+  return localInferenceDestination(config, port);
 }
 
 function extractContent(payload: unknown): string | undefined {
@@ -89,7 +107,7 @@ function extractUsage(payload: unknown): AdvisorConsultationResult["usage"] {
   if (!payload || typeof payload !== "object") return undefined;
   const usage = (payload as { usage?: unknown }).usage;
   if (!usage || typeof usage !== "object") return undefined;
-  const num = (value: unknown): number | undefined => typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  const num = (value: unknown): number | undefined => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
   const inputTokens = num((usage as { prompt_tokens?: unknown }).prompt_tokens);
   const outputTokens = num((usage as { completion_tokens?: unknown }).completion_tokens);
   const totalTokens = num((usage as { total_tokens?: unknown }).total_tokens);
@@ -114,6 +132,8 @@ export async function consultAdvisor(
   timeoutMs: number,
   abortSignal?: AbortSignal,
   baseUrlOverride?: string,
+  admissionScope?: AdmissionModelScope,
+  admissionPolicy?: CapturedAdmissionPolicy,
 ): Promise<AdvisorConsultationResult> {
   const t0 = Date.now();
   const headers: Record<string, string> = {
@@ -121,10 +141,22 @@ export async function consultAdvisor(
     [ADVISOR_INTERNAL_CAPABILITY_HEADER]: internalCallCapability(),
   };
   // Admission ladder identical to the vision sidecar: env token || service token file || first
-  // configured API key, sent as `x-opencodex-api-key` — never Authorization. Loopback binds that
-  // require no token simply omit it.
-  const admission = localAdmissionToken(config);
+  // configured API key, sent as `x-opencodex-api-key` — never Authorization. A destination that
+  // requires no admission gets only a credential this data plane recognizes (#7894).
+  const admission = selfFetchAdmissionToken(config, advisorDestination(config));
   if (admission) headers["x-opencodex-api-key"] = admission;
+  // Keep the bounded scope envelope for transport validation; the process-local policy
+  // registration below owns the complete snapshot. The receiver also enforces host limits.
+  try {
+    headers[ADVISOR_ADMISSION_SCOPE_HEADER] = encodeAdvisorAdmissionScope(admissionScope ?? { providers: [], models: [] });
+  } catch (error) {
+    if (error instanceof AdvisorAdmissionScopeEncodedBoundExceeded) {
+      // Controlled failure before fetch: an over-bound scope must never reach the peer —
+      // it would be rejected mid-request — and must never be narrowed silently either.
+      return { ok: false, advice: "", advisorModel: input.advisorModel, error: error.message, durationMs: Date.now() - t0 };
+    }
+    throw error;
+  }
 
   const requestBody = {
     model: input.advisorModel,
@@ -143,7 +175,10 @@ export async function consultAdvisor(
     linkedSignal.cleanup();
     return { ok: false, cancelled: true, advice: "", advisorModel: input.advisorModel, error: "advisor cancelled before dispatch", durationMs: Date.now() - t0 };
   }
+  let policyRegistration: ReturnType<typeof registerAdvisorAdmissionPolicy> | undefined;
   try {
+    policyRegistration = registerAdvisorAdmissionPolicy(admissionPolicy ?? captureAdmissionPolicy(config, undefined, admissionScope), linkedSignal.signal);
+    headers[ADVISOR_ADMISSION_POLICY_HEADER] = policyRegistration.token;
     const res = await fetch(`${baseUrlOverride ?? advisorBaseUrl(config)}/v1/chat/completions`, {
       method: "POST",
       headers,
@@ -195,6 +230,7 @@ export async function consultAdvisor(
         advice: content.length > MAX_ADVICE_CHARS ? `${content.slice(0, MAX_ADVICE_CHARS)}… [truncated]` : content,
         advisorModel: input.advisorModel,
         durationMs,
+        effectiveEffort: readAdvisorReasoning(res.headers),
         ...(extractUsage(payload) ? { usage: extractUsage(payload) } : {}),
       };
     } finally {
@@ -214,6 +250,7 @@ export async function consultAdvisor(
       durationMs,
     };
   } finally {
+    policyRegistration?.release();
     sidecarExit();
     linkedSignal.cleanup();
   }

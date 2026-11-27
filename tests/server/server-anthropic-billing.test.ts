@@ -12,6 +12,8 @@ import { createRequestExecutionBudget, CODEX_TEXT_GUARDED_BUDGET_POLICY } from "
 import type { OcxConfig } from "../../src/types";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
+import { setSyntheticWindowsPrincipalForTests } from "../../src/lib/windows-user-principal";
 
 const creditMessage = "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.";
 const refusal = (status = 400, message = creditMessage, type = "invalid_request_error") => Response.json({ type: "error", error: { type, message } }, { status });
@@ -34,8 +36,15 @@ let home = "";
 let releaseSpend: (() => void) | undefined;
 let upstream: ReturnType<typeof Bun.serve> | undefined;
 let seen: { key: string | null; authorization: string | null; apiKey: string | null; body: unknown }[];
+const aclSuccess = () => ({ success: true, exitCode: 0, timedOut: false, stdout: "" });
 
 beforeEach(() => {
+  // Each case's fresh home hardens its spend journal on first write, which lands inside the
+  // request's 2s signal. On Windows that was a PowerShell SID lookup plus real icacls, and a cold
+  // runner spent the signal on it: the handler then saw the caller abort and answered 499.
+  setSyntheticWindowsPrincipalForTests("*S-1-5-21-1-2-3-1001");
+  setIcaclsRunnerForTests(aclSuccess);
+  setAsyncIcaclsRunnerForTests(async () => aclSuccess());
   previousHome = process.env.OPENCODEX_HOME;
   home = mkdtempSync(join(tmpdir(), "ocx-billing-fixture-"));
   process.env.OPENCODEX_HOME = home;
@@ -54,6 +63,9 @@ afterEach(async () => {
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
   removeTreeWithRetry(home);
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  setSyntheticWindowsPrincipalForTests(null);
 });
 
 function fixture(reply: (index: number, stream: boolean) => Response, keys = 2): OcxConfig {
@@ -304,7 +316,7 @@ for (const lane of ["native", "translated"] as const) describe(`${lane} Anthropi
       ? { Authorization: "Bearer fixture-key-C" } : { "x-api-key": "fixture-key-C" };
     const response = await send(lane, config);
     expect(response.status).toBe(400);
-    expect(await response.text()).toContain(creditMessage);
+    expect(await response.text()).toContain(lane === "native" ? "The provider account has no remaining quota or credits." : creditMessage);
     expect(seen).toHaveLength(1);
     expect(seen[0]!.authorization).toBe(kind === "override" ? "Bearer fixture-key-C" : "Bearer fixture-key-0");
     expect(seen[0]!.apiKey).toBe(kind === "conflict" ? "fixture-key-C" : null);
@@ -332,7 +344,7 @@ for (const lane of ["native", "translated"] as const) describe(`${lane} Anthropi
     config.providers.anth!.headers = { "x-api-key": "fixture-key-C" };
     const response = await send(lane, config);
     expect(response.status).toBe(400);
-    expect(await response.text()).toContain(creditMessage);
+    expect(await response.text()).toContain(lane === "native" ? "The provider account has no remaining quota or credits." : creditMessage);
     expect(seen.map(entry => entry.key)).toEqual(["fixture-key-C"]);
     expect(loadConfig().providers.anth!.apiKey).toBe("fixture-key-0");
     expect(getKeyCooldownUntil("anth", "k0")).toBeNull();
@@ -362,11 +374,11 @@ for (const lane of ["native", "translated"] as const) describe(`${lane} Anthropi
     expect(loadConfig().providers.anth!.apiKey).toBe("fixture-key-0");
   });
 
-  test("exhaustion preserves the last upstream billing body", async () => {
+  test("exhaustion preserves the last billing refusal", async () => {
     const config = fixture(() => refusal());
     const response = await send(lane, config);
     expect(response.status).toBe(400);
-    expect(await response.text()).toContain(creditMessage);
+    expect(await response.text()).toContain(lane === "native" ? "The provider account has no remaining quota or credits." : creditMessage);
     expect(seen.map(entry => entry.key)).toEqual(["fixture-key-0", "fixture-key-1"]);
     expect(getKeyCooldownUntil("anth", "k0")).not.toBeNull();
     expect(getKeyCooldownUntil("anth", "k1")).not.toBeNull();
@@ -376,7 +388,7 @@ for (const lane of ["native", "translated"] as const) describe(`${lane} Anthropi
     const config = fixture(() => refusal(), keys);
     const response = await send(lane, config);
     expect(response.status).toBe(400);
-    expect(await response.text()).toContain(creditMessage);
+    expect(await response.text()).toContain(lane === "native" ? "The provider account has no remaining quota or credits." : creditMessage);
     expect(seen).toHaveLength(1);
     expect(seen[0]!.key).toBe("fixture-key-0");
     expect(loadConfig().providers.anth!.apiKey).toBe("fixture-key-0");
@@ -389,7 +401,7 @@ for (const lane of ["native", "translated"] as const) describe(`${lane} Anthropi
       maxTotalModelSends: 2, baseSendAllowance: 2, finalRecoveryAllowance: 0 }) : undefined;
     const response = await send(lane, config, undefined, budget);
     expect(response.status).toBe(400);
-    expect(await response.text()).toContain(creditMessage);
+    expect(await response.text()).toContain(lane === "native" ? "The provider account has no remaining quota or credits." : creditMessage);
     expect(seen).toHaveLength(lane === "native" ? 4 : 2);
   });
 
@@ -402,7 +414,14 @@ for (const lane of ["native", "translated"] as const) describe(`${lane} Anthropi
       headers: { "content-type": "text/event-stream" },
     }));
     const response = await send(lane, config, undefined, undefined, true);
-    expect(await response.text()).toContain(kind === "text" ? "billing recovered" : "billing_tool");
+    const text = await response.text();
+    if (lane === "translated" && kind === "tool") {
+      expect(response.status).toBe(200);
+      const failed = text.split("\n").filter(line => line.startsWith("data: {")).map(line => JSON.parse(line.slice(6))).find(frame => frame.type === "response.failed");
+      expect(failed).toBeDefined();
+      expect(failed.response.error).toMatchObject({ type: "server_error", code: "upstream_server_error", message: expect.stringContaining("undeclared client tool") });
+      expect(text).not.toContain("billing_tool");
+    } else expect(text).toContain(kind === "text" ? "billing recovered" : "billing_tool");
     expect(seen).toHaveLength(1);
     expect(getKeyCooldownUntil("anth", "k0")).toBeNull();
   });
@@ -417,6 +436,28 @@ for (const lane of ["native", "translated"] as const) describe(`${lane} Anthropi
     expect(response.status).toBe(200);
     expect(await response.text()).toContain("billing recovered");
     expect(seen).toHaveLength(statuses.length + 1);
+  });
+
+  for (const statuses of [[401, 400], [400, 429], [429, 402]]) test(`distributed ${statuses.join("→")} preserves billing and key recovery`, async () => {
+    const { forgetApiKeyRotationCursor, ANTHROPIC_BILLING_COOLDOWN_MS } = await import("../../src/providers/key-failover");
+    forgetApiKeyRotationCursor("anth");
+    const config = fixture((index, stream) => index < statuses.length
+      ? refusal(statuses[index]!, [400, 402].includes(statuses[index]!) ? creditMessage : "fixture refusal",
+        statuses[index] === 401 ? "authentication_error" : statuses[index] === 429 ? "rate_limit_error" : "invalid_request_error")
+      : success(stream), 3);
+    config.providers.anth!.requestPacing = { enabled: true, keySelection: "round-robin", keys: { maxConcurrentRequests: 1 } };
+    saveConfig(config);
+    const startedAt = Date.now();
+    try {
+      const response = await send(lane, config);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("billing recovered");
+      expect(seen.map(entry => entry.key)).toEqual(["fixture-key-0", "fixture-key-1", "fixture-key-2"]);
+      expect(loadConfig().providers.anth!.apiKey).toBe("fixture-key-0");
+      const billingKey = `k${statuses.findIndex(status => status === 400 || status === 402)}`;
+      expect(getKeyCooldownUntil("anth", billingKey)).toBeGreaterThanOrEqual(startedAt + ANTHROPIC_BILLING_COOLDOWN_MS);
+      expect(providerRequestPacingStatus("anth", config.providers.anth!).inFlight).toBe(0);
+    } finally { forgetApiKeyRotationCursor("anth"); }
   });
 
   if (lane === "translated") for (const status of [401, 429]) test(`mixed billing→${status} keeps B's terminal body at an exact two-send budget`, async () => {

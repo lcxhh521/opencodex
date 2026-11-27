@@ -13,14 +13,15 @@
  * 1. It must be INERT in production. Guessing "am I a test?" from ecosystem variables
  *    like NODE_ENV would brick `NODE_ENV=test ocx ...` for a user who did nothing
  *    wrong — worse than the bug it prevents. Arming requires OCX_TEST_HOME_GUARD=1,
- *    which only this repository's test preload sets.
+ *    which this repository's test preload sets, or a process whose entry module is a
+ *    Bun test file (see {@link isBunTestFileProcess}); no production entrypoint is one.
  * 2. It must fail CLOSED for code nobody has written yet. So it denies ONE path — the
  *    captured production home — instead of allow-listing known-good test directories.
  *    An allowlist would have to be opted into, and the test that forgets is exactly
  *    how this incident happened.
  */
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -109,8 +110,71 @@ export function protectedClaudeConfigDirsForTests(): readonly string[] {
   return PROTECTED_CLAUDE_TREES.map(tree => tree.path);
 }
 
+/**
+ * The file names Bun's test runner discovers: `.test`, `_test`, `.spec` or `_spec` before a
+ * JS/TS extension. Under `bun test`, `Bun.main` names the test file being evaluated, in the
+ * main runner and in `--parallel` workers alike. Every production entrypoint — the CLI, the
+ * service daemon, the compiled sidecar (`/$bunfs/...`), a release script — has a different name.
+ */
+const BUN_TEST_FILE = /[._](?:test|spec)\.[cm]?[jt]sx?$/i;
+
+/**
+ * Whether this process runs a Bun test file as its entry module.
+ *
+ * This exists for the run that never loads `tests/preload.ts`. Bun resolves `bunfig.toml` from
+ * the CURRENT WORKING DIRECTORY, so `cd /tmp && bun test <repo>/tests/x.test.ts` skips the
+ * preload: HOME stays real, OPENCODEX_HOME stays unset, and before this check the guard stayed
+ * down, so an OAuth save landed in the developer's real `~/.opencodex/auth.json` (#7407).
+ * Bun exposes no runner flag, and NODE_ENV=test is both settable by users and overridable by the
+ * runner's caller, so the entry file's name is the one signal that production never carries.
+ *
+ * A file passed by explicit path under a non-test name (`bun test ./scratch.ts`) is not
+ * recognised; every repository suite is a `*.test.ts`, the only name `tests/test-layout.test.ts` admits.
+ *
+ * The converse also holds: `bun run ./something.test.ts` arms, because nothing distinguishes it
+ * from the runner. That is accepted. Requiring NODE_ENV=test as well would exempt every developer
+ * whose shell exports another NODE_ENV (`bun test` keeps an existing value), reopening #7407;
+ * the cost of the false positive is a refused real-home write from a script named like a test.
+ */
+export function isBunTestFileProcess(): boolean {
+  const main = (globalThis as { Bun?: { main?: unknown } }).Bun?.main;
+  const entry = typeof main === "string" ? main : process.argv[1];
+  return typeof entry === "string" && BUN_TEST_FILE.test(basename(entry));
+}
+
+/**
+ * Armed when the preload (or a harness) set OCX_TEST_HOME_GUARD=1, or when this process runs a
+ * Bun test file and nobody set the flag. An explicit OCX_TEST_HOME_GUARD=0 is how a test case
+ * exercises the production branch of a guarded call, so it disarms even inside a test file.
+ */
 export function isTestHomeGuardArmed(): boolean {
-  return process.env[GUARD_ENV] === "1";
+  const flag = process.env[GUARD_ENV];
+  if (flag === "1") return true;
+  if (flag === "0") return false;
+  return isBunTestFileProcess();
+}
+
+/**
+ * A test process that armed through its entry file publishes the flag, so the CLI and helper
+ * processes it spawns — whose own entry is not a test file — inherit the arming instead of
+ * writing the real home they also inherited. Runs at import, which in such a run happens before
+ * any test body. A production process never matches, so it never reaches the assignment. Any value
+ * but the explicit "0" opt-out is normalised, because an empty or stray value arms this process by
+ * name but would leave a non-test child, which cannot match by name, disarmed.
+ */
+if (process.env[GUARD_ENV] !== "0" && process.env[GUARD_ENV] !== "1" && isBunTestFileProcess()) {
+  process.env[GUARD_ENV] = "1";
+}
+
+/**
+ * Appended to a refusal when no preload ran, because the fix there is different: the test did
+ * not forget OPENCODEX_HOME, the whole run started from a directory without bunfig.toml.
+ */
+function missingPreloadHint(): string {
+  if (process.env.OCX_TEST_PRELOAD_PID !== undefined) return "";
+  return " This test process did not load tests/preload.ts — Bun reads bunfig.toml from the "
+    + "current working directory — so nothing was sandboxed. Run bun test from the repository "
+    + "root, or pass --preload <repo>/tests/preload.ts.";
 }
 
 /**
@@ -127,7 +191,7 @@ export function isTestHomeGuardArmed(): boolean {
  */
 export function isProtectedHomeUnderTest(dir: string): boolean {
   if (!isTestHomeGuardArmed()) return false;
-  return canonicalize(dir) === PROTECTED_HOME;
+  return samePathIgnoringPlatformCase(canonicalize(dir), PROTECTED_HOME);
 }
 
 /**
@@ -140,11 +204,12 @@ export function isProtectedHomeUnderTest(dir: string): boolean {
  */
 export function assertNotRealHomeUnderTest(dir: string): void {
   if (!isTestHomeGuardArmed()) return;
-  if (canonicalize(dir) !== PROTECTED_HOME) return;
+  if (!samePathIgnoringPlatformCase(canonicalize(dir), PROTECTED_HOME)) return;
   throw new Error(
     `refusing to write the real OpenCodex home (${PROTECTED_HOME}) from a test process. `
     + "Point OPENCODEX_HOME at a temp directory for this test, or inject persistence "
-    + "instead of calling the global writer (see devlog 260730_codex_rs_upstream_v2_live_handoff/070).",
+    + "instead of calling the global writer (see devlog 260730_codex_rs_upstream_v2_live_handoff/070)."
+    + missingPreloadHint(),
   );
 }
 
@@ -162,7 +227,7 @@ export function protectedLaunchAgentsDirForTests(): string {
  */
 export function assertNotRealLaunchAgentsUnderTest(dir: string): void {
   if (!isTestHomeGuardArmed()) return;
-  if (canonicalize(dir) !== PROTECTED_LAUNCH_AGENTS) return;
+  if (!samePathIgnoringPlatformCase(canonicalize(dir), PROTECTED_LAUNCH_AGENTS)) return;
   throw new Error(
     `refusing to write the real LaunchAgents directory (${PROTECTED_LAUNCH_AGENTS}) from a test `
     + "process: os.homedir() ignores HOME, so rewriting HOME does not move this path. Pass an "
@@ -173,11 +238,12 @@ export function assertNotRealLaunchAgentsUnderTest(dir: string): void {
 /** Throw when an armed test process is about to write the real native Codex home. */
 export function assertNotRealCodexHomeUnderTest(dir: string): void {
   if (!isTestHomeGuardArmed()) return;
-  if (canonicalize(dir) !== PROTECTED_CODEX_HOME) return;
+  if (!samePathIgnoringPlatformCase(canonicalize(dir), PROTECTED_CODEX_HOME)) return;
   throw new Error(
     `refusing to write the real Codex home (${PROTECTED_CODEX_HOME}) from a test process. `
     + "Point CODEX_HOME at a temp directory for this test before writing Codex files "
-    + "(auth.json, the catalog, models_cache.json, the journal or config.toml).",
+    + "(auth.json, the catalog, models_cache.json, the journal or config.toml)."
+    + missingPreloadHint(),
   );
 }
 
@@ -219,6 +285,15 @@ function foldPlatformCase(path: string): string {
   return process.platform === "darwin" || process.platform === "win32" ? path.toLowerCase() : path;
 }
 
+/**
+ * Path equality as the default filesystem on this platform sees it. A not-yet-existing
+ * `.OPENCODEX` canonicalizes through its parent and keeps its spelling, so a plain `===`
+ * against the canonical home calls it a different directory on Windows and macOS (#7853).
+ */
+function samePathIgnoringPlatformCase(a: string, b: string): boolean {
+  return foldPlatformCase(a) === foldPlatformCase(b);
+}
+
 function isSameOrInsideIgnoringPlatformCase(root: string, candidate: string): boolean {
   const parent = foldPlatformCase(root);
   const child = foldPlatformCase(candidate);
@@ -256,10 +331,29 @@ export function protectedRemovalTreesForTests(): readonly string[] {
   return [PROTECTED_REAL_HOME, ...PROTECTED_TREES.map(tree => tree.path)];
 }
 
-/** Whether `child` sits strictly below `parent`, both already canonicalized. */
+/**
+ * Whether `child` sits strictly below `parent`, both already canonicalized.
+ *
+ * Containment is decided per path component, with case folded where the filesystem folds it.
+ * A prefix test on the relative path called a direct child named `..backup` "outside", so the
+ * removal guard let it through (#7853).
+ */
 function isInside(parent: string, child: string): boolean {
+  return !samePathIgnoringPlatformCase(parent, child) && isSameOrInsideIgnoringPlatformCase(parent, child);
+}
+
+/**
+ * Whether `child` sits strictly below `parent` with case PRESERVED, deciding per path component.
+ *
+ * Only for the checkout exemption below, which LIFTS a refusal. Folding case there would let a
+ * running checkout at `~/.codex/worktrees/repo` exempt a distinct `~/.codex/worktrees/REPO` on a
+ * case-sensitive macOS volume. Protection decisions fold, because comparing too broadly only refuses
+ * more; an exemption must not, because the same breadth removes more.
+ */
+function isInsidePreservingCase(parent: string, child: string): boolean {
+  if (parent === child) return false;
   const rel = relative(parent, child);
-  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+  return rel !== "" && !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`);
 }
 
 let checkoutRootSpellings: readonly string[] | undefined;
@@ -296,7 +390,7 @@ function checkoutRoots(): readonly string[] {
  * tree (one at `$HOME`, or the virtual root of a compiled build) never qualifies.
  */
 function isOwnCheckoutContent(protectedPath: string, candidate: string): boolean {
-  return checkoutRoots().some(root => isInside(protectedPath, root) && isInside(root, candidate));
+  return checkoutRoots().some(root => isInsidePreservingCase(protectedPath, root) && isInsidePreservingCase(root, candidate));
 }
 
 /**
@@ -321,12 +415,12 @@ export function protectedRemovalReason(target: string): string | null {
   // form still names it. Upstream Codex makes the same distinction in its writable-root
   // handling, keeping logical and resolved forms side by side rather than collapsing to one.
   for (const candidate of [canonicalize(target), resolve(target)]) {
-    if (candidate === PROTECTED_REAL_HOME || candidate === LEXICAL_REAL_HOME) {
+    if (samePathIgnoringPlatformCase(candidate, PROTECTED_REAL_HOME) || samePathIgnoringPlatformCase(candidate, LEXICAL_REAL_HOME)) {
       return `the real home directory (${PROTECTED_REAL_HOME})`;
     }
     for (const tree of PROTECTED_TREES) {
       for (const protectedPath of [tree.path, tree.lexical]) {
-        if (candidate === protectedPath) return `${tree.label} (${protectedPath})`;
+        if (samePathIgnoringPlatformCase(candidate, protectedPath)) return `${tree.label} (${protectedPath})`;
         if (isInside(protectedPath, candidate) && !isOwnCheckoutContent(protectedPath, candidate)) {
           return `a path inside ${tree.label} (${protectedPath})`;
         }
@@ -351,12 +445,13 @@ export function protectedRemovalReason(target: string): string | null {
 /**
  * Throw before a removal that would reach a protected tree.
  *
- * Deliberately NOT gated on {@link isTestHomeGuardArmed}. Arming happens in `tests/preload.ts`,
- * which Bun loads from the `bunfig.toml` it finds in the CURRENT WORKING DIRECTORY — so a run
- * started outside the repository arms nothing, leaves OPENCODEX_HOME unset, and resolves the
- * developer's real home. That unarmed run is precisely the one that caused the incident, so the
- * refusal has to hold without it. Nothing in production calls this; the callers are test
- * helpers, where the only cost of an unconditional check is a path comparison.
+ * Deliberately NOT gated on {@link isTestHomeGuardArmed}. `tests/preload.ts` is loaded from the
+ * `bunfig.toml` Bun finds in the CURRENT WORKING DIRECTORY, so a run started outside the
+ * repository leaves OPENCODEX_HOME unset and resolves the developer's real home. Such a run now
+ * arms through its test-file entry, but a helper launched as a plain script does not, and the
+ * incident was exactly this unsandboxed shape, so the refusal has to hold without arming.
+ * Nothing in production calls this; the callers are test helpers, where the only cost of an
+ * unconditional check is a path comparison.
  */
 export function assertRemovalOutsideProtectedTrees(target: string): void {
   const reason = protectedRemovalReason(target);

@@ -7,6 +7,16 @@ other CLI commands retain their existing format, even with an inherited marker.
 Existing redaction stays in the producers; this adds no request-body capture or
 diagnostic fields. Windows service-wrapper messages retain their wrapper format.
 
+## Combo diagnostics
+
+`src/combos/resolve.ts` and `src/server/responses/core-combo.ts` name combos by their
+position in configuration and targets by position plus the validated provider-id label from
+`src/lib/error-destination.ts`. Failure, cooldown-wait, reprobe and JEV debug lines omit raw
+combo aliases, model ids and URLs. `src/combos/request.ts` effort diagnostics retain the
+validated provider and closed effort/capability fields, with no model field. Operational
+selection and cooldown keys remain internal. `tests/responses/chat-error-body-normalization.test.ts`
+covers failure, wait, last-resort, reprobe and effort diagnostic output.
+
 ## Retention
 
 Startup and once-per-minute checks rotate above 20 MiB. The previous archive
@@ -15,6 +25,21 @@ moves to `service.log.2`; the newest 20 MiB of the active file are copied into
 place, preserving the service manager's existing append descriptors. Both
 archives stay bounded even when a legacy active log is already very large.
 Archive paths join the config cleanup manifest.
+If an uninstall tombstone prevents registration, the logger instead truncates an oversized active
+file in place after the same identity checks, without creating archives or registering paths.
+
+Rotation accepts only regular, singly linked active and archive leaves. The
+active descriptor must match the inspected leaf's device and inode; POSIX opens
+also use no-follow and nonblocking flags. A new archive is created exclusively,
+not opened with truncation. Descriptor/leaf identities are checked while copying
+and again before truncating the active inode, after flushing the new archive.
+Unsafe leaves, observed replacements, and copy or flush failures skip truncation.
+Parent directory aliases remain supported: rotation resolves only the parent,
+uses its canonical path for exclusive archive creation, and rechecks the original
+and canonical directory identities and both leaf paths against the descriptors.
+It never resolves the leaf itself to bypass symlink rejection.
+These checks are not an atomic
+namespace lock: concurrent directory or hardlink changes can race a final check.
 
 The timer is unreferenced and filesystem failures are swallowed. The active log
 may exceed the threshold between checks. Copy-truncate can lose concurrent
@@ -23,4 +48,6 @@ per-write filesystem check and no timer when service logging is inactive.
 
 `tests/service/service-log.test.ts` covers service-only timestamps, multiline
 formatting, startup and periodic checks, bounded generations, failure handling,
-and continued writes through an append descriptor opened before rotation.
+continued writes through an append descriptor opened before rotation, unsafe
+leaves, controlled identity replacements, exclusive archive creation, parent
+aliases, and partial-copy/flush failures.

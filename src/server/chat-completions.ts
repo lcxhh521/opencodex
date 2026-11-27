@@ -1,3 +1,9 @@
+import { projectLocalModelRefusalLog } from "./request-log-failure-detail";
+import { clientFacingModelLabel, clientFacingModelText, type ClientFacingModelLabel } from "../lib/error-destination";
+import { wasAccountAutoPaused } from "../lib/account-auto-pause-response";
+import { ownedChatErrorPayload, isProxyError, LOCAL_CHAT_ERROR_MESSAGES } from "../lib/client-error-body";
+import { ownedChatErrorResponse } from "../chat/outbound";
+import type { FailureVerdictSink } from "../chat/failure-verdict";
 /**
  * OpenAI Chat Completions inbound (/v1/chat/completions) for GitHub Copilot App
  * and other OpenAI-compatible clients.
@@ -8,6 +14,7 @@
 import { FORWARD_HEADERS } from "../adapters/openai-responses";
 import {
   assertChatCompletionsRoutingBody,
+  chatRawReasoningVisible,
   ChatCompletionsRequestError,
 } from "../chat/inbound";
 import { chatSettingsBody, chatToResponsesBody } from "../protocols/codecs/chat";
@@ -22,9 +29,14 @@ import {
   responsesSseToChatCompletionsSse,
 } from "../chat/outbound";
 import { ADVISOR_INTERNAL_CAPABILITY_HEADER, isInternalCallCapability } from "../lib/local-internal-call-capability";
+import type { CapturedAdmissionPolicy } from "../types/admission-policy";
+import { ADVISOR_ADMISSION_SCOPE_HEADER, decodeAdvisorAdmissionScope, ADVISOR_ADMISSION_POLICY_HEADER, readAdvisorAdmissionPolicy, SIDECAR_ADMISSION_POLICY_HEADER, SIDECAR_INTERNAL_CAPABILITY_HEADER } from "./advisor-admission-scope";
+import {
+  captureAdmissionPolicy, captureSelfFetchCredentialPolicy, inheritAdmissionPolicy, intersectAdmissionPolicies, selfFetchHostPolicy,
+} from "./capture-admission-policy";
 import { classifyError, cyberPolicyErrorType, CYBER_POLICY_ERROR_CODE, isCyberPolicyCode, UNDECLARED_TOOL_CALL_ERROR_CODE } from "../lib/errors";
 import { redactSecretString } from "../lib/redact";
-import { resolveClientRetryAfter } from "../lib/retry-after";
+import { formatClientRetryAfter, resolveClientRetryAfter } from "../lib/retry-after";
 import {
   applyReplayRefusalClientHeaders,
   isReplayRefusalCode,
@@ -40,11 +52,14 @@ import { evidenceFromBody } from "../routing/request-evidence";
 import { resolveWireProtocolOverride } from "./adapter-resolve";
 import { resolveOpenCodeGoTransport } from "../providers/opencode-go-transport";
 import {
+  assignNativeLogConversationId,
+  fillHermesLogConversationFallback,
+  nativeLogConversationIdFromHeaders,
   getOrAllocateRequestSessionLane,
   linkRequestSessionLane,
 } from "./request-log-conversation";
 import type { OcxConfig } from "../types";
-import { readJsonRequestBody, resolveInboundBodyLimitBytes } from "./request-decompress";
+import { DecompressedBodyTooLargeError, UnsupportedContentEncodingError, readJsonRequestBody, resolveInboundBodyLimitBytes } from "./request-decompress";
 import {
   addFinalRequestLog,
   cacheDiagnosticsObserving,
@@ -54,6 +69,7 @@ import {
 } from "./request-log";
 import { createFinalRequestLog } from "./inference/final-log";
 import { clientWireLogOf, clientWireOf } from "./inference/client-wire";
+import { attachAdvisorReasoning } from "./inference/advisor-diagnostics";
 import { directEncodersApply } from "./inference/client-encoder-delivery";
 import { responseWithDeferredRequestLog } from "./relay";
 import { handleResponses } from "./responses";
@@ -63,12 +79,13 @@ import { captureExplicitOpenAiCallerAuth } from "../providers/openai-sidecar";
 import { captureCallerDirectAuth } from "../providers/caller-authorization";
 import type { AdmissionLease } from "../lib/admission";
 import {
-  admissionModelDeniedResponse,
+  admissionModelDeniedResponse, projectAdmissionModelDeniedLog,
   AdmissionModelDeniedError,
+  MODEL_NOT_ALLOWED_FOR_KEY,
   assertRouteAllowedByScope,
   resolveAdmissionModelScope,
 } from "./admission-model-scope";
-import type { DataPlaneAdmission } from "./auth-cors";
+import { resolveContextPrincipal, type DataPlaneAdmission } from "./auth-cors";
 import { tryClaimNativeMainProfileForTurn } from "../codex/native-main-admission";
 import {
   createTranslatorBudget,
@@ -80,10 +97,11 @@ import { createNativeChatComboSource, handleNativeChatCompletions, nativeChatDec
 import { upstreamWireForAdapter, type ProtocolReasonCode } from "../protocols/contract";
 import { createProtocolEnvelope } from "../protocols/envelope";
 import { featuresFromChatBody } from "../protocols/features";
+import { credentialDomainFor } from "../protocols/opaque-state";
 import { checkRepresentable, unrepresentableMessage } from "../protocols/guard";
 import { requestPathForLane } from "../protocols/path";
 import { resolveProtocolSettings } from "../protocols/settings";
-import { markProtocolBlocked, markProtocolEntry } from "../protocols/trace";
+import { markProtocolBlocked, markProtocolEntry, suppressProtocolTrace } from "../protocols/trace";
 import { recordProtocolShadowPlan } from "../protocols/shadow-plan";
 import { jsonCompletionSse } from "./chat-native-sse";
 import { parseRequestEffortRowId } from "./effort-row";
@@ -97,12 +115,16 @@ type Rec = Record<string, unknown>;
 function isRec(v: unknown): v is Rec {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
+function routingPolicyRefusalMessage(kind: "unknown" | "unavailable", model: ClientFacingModelLabel): string {
+  return kind === "unknown" ? `Unknown routing policy: ${clientFacingModelText(model)}`
+    : `No eligible candidates for policy profile: ${clientFacingModelText(model)}`;
+}
 async function readChatBody(req: Request, budget: TranslatorBudget, maxBytes: number): Promise<unknown> {
   try {
     return await readJsonRequestBody(req, budget, maxBytes);
   } catch (err) {
     if (isTranslatorBudgetExceededError(err)) throw err;
-    throw new ChatCompletionsRequestError(err instanceof Error && err.message ? err.message : "Invalid JSON body");
+    throw new ChatCompletionsRequestError(err instanceof DecompressedBodyTooLargeError || err instanceof UnsupportedContentEncodingError ? err.message : "Invalid JSON body");
   }
 }
 
@@ -110,12 +132,23 @@ export async function handleChatCompletions(
   req: Request,
   config: OcxConfig,
   logCtx: RequestLogContext,
-  logIds?: { requestId: string; start: number; turnAdmissionLease?: AdmissionLease; admission?: DataPlaneAdmission },
+  logIds?: {
+    requestId: string; start: number; turnAdmissionLease?: AdmissionLease; admission?: DataPlaneAdmission;
+    advisorAdmissionPolicy?: CapturedAdmissionPolicy;
+    suppressProtocolTrace?: boolean;
+  },
 ): Promise<Response> {
+  if (logIds?.suppressProtocolTrace) suppressProtocolTrace(logCtx);
+  // Set before routing so pre-dispatch refusals stay correlated. A Hermes-only id is marked as a
+  // fallback, so a native id resolved later on the Responses bridge still replaces it.
+  assignNativeLogConversationId(logCtx, nativeLogConversationIdFromHeaders(req.headers));
+  fillHermesLogConversationFallback(logCtx, req.headers);
   const translatorBudget = createTranslatorBudget();
   try {
+    let response = await handleChatCompletionsWithBudget(req, config, logCtx, translatorBudget, logIds);
+    if (isInternalCallCapability(req.headers.get(ADVISOR_INTERNAL_CAPABILITY_HEADER))) response = attachAdvisorReasoning(response, logCtx);
     return finalizeTranslatorBudgetResponse(
-      await handleChatCompletionsWithBudget(req, config, logCtx, translatorBudget, logIds),
+      response,
       translatorBudget,
       req.signal,
     );
@@ -127,7 +160,7 @@ export async function handleChatCompletions(
     }
     if (isChatCompletionsStreamError(error)) {
       if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, error.status, { closeReason: "non_stream" });
-      return chatCompletionsErrorResponse(error.status, error.message, error.type, error.code);
+      return ownedChatErrorResponse(error.status, error.message, error.type, error.code);
     }
     throw error;
   }
@@ -138,8 +171,35 @@ async function handleChatCompletionsWithBudget(
   config: OcxConfig,
   logCtx: RequestLogContext,
   translatorBudget: TranslatorBudget,
-  logIds?: { requestId: string; start: number; turnAdmissionLease?: AdmissionLease; admission?: DataPlaneAdmission },
+  logIds?: {
+    requestId: string; start: number; turnAdmissionLease?: AdmissionLease; admission?: DataPlaneAdmission;
+    advisorAdmissionPolicy?: CapturedAdmissionPolicy;
+  },
 ): Promise<Response> {
+  const advisorInternal = isInternalCallCapability(req.headers.get(ADVISOR_INTERNAL_CAPABILITY_HEADER));
+  const sidecarInternal = isInternalCallCapability(req.headers.get(SIDECAR_INTERNAL_CAPABILITY_HEADER));
+  const callerPolicy = advisorInternal
+    ? readAdvisorAdmissionPolicy(req.headers.get(ADVISOR_ADMISSION_POLICY_HEADER), req.headers.get(ADVISOR_INTERNAL_CAPABILITY_HEADER))
+    : readAdvisorAdmissionPolicy(req.headers.get(SIDECAR_ADMISSION_POLICY_HEADER), req.headers.get(SIDECAR_INTERNAL_CAPABILITY_HEADER));
+  const decodedScope = advisorInternal
+    ? decodeAdvisorAdmissionScope(req.headers.get(ADVISOR_ADMISSION_SCOPE_HEADER))
+    : undefined;
+  // Only a validated internal hop gets its presented credential resolved; loopback admission for
+  // every other caller is untouched. An unknown credential fails closed (#7894).
+  const selfFetchPolicy = callerPolicy ? captureSelfFetchCredentialPolicy(req, config) : undefined;
+  if ((advisorInternal || sidecarInternal) && (!callerPolicy || selfFetchPolicy === null
+    || advisorInternal && req.headers.has(ADVISOR_ADMISSION_SCOPE_HEADER) && !decodedScope)) {
+    // Refused requests still own a final log row like every other early rejection.
+    if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 403, { closeReason: "non_stream" });
+    return chatCompletionsErrorResponse(403, "invalid inherited advisor admission scope", "permission_error", MODEL_NOT_ALLOWED_FOR_KEY);
+  }
+  // The listener snapshot was captured at authentication; internal hops add the policy of the
+  // credential they selected (which loopback admission never read) and their frozen registration.
+  const listenerPolicy = logIds?.advisorAdmissionPolicy ?? captureAdmissionPolicy(config, logIds?.admission);
+  const hostPolicy = selfFetchPolicy ? selfFetchHostPolicy(listenerPolicy, selfFetchPolicy, logIds?.admission) : listenerPolicy;
+  const advisorAdmissionPolicy = callerPolicy ? intersectAdmissionPolicies(hostPolicy, callerPolicy) : hostPolicy;
+  const admission = callerPolicy ? inheritAdmissionPolicy(logIds?.admission, advisorAdmissionPolicy) : logIds?.admission;
+  const inheritedAdmissionScope = callerPolicy ? advisorAdmissionPolicy.modelScope : undefined;
   let chatBody: Rec;
   try {
     const rawBody = await readChatBody(req, translatorBudget, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));
@@ -166,6 +226,8 @@ async function handleChatCompletionsWithBudget(
   const droidDefaultEffort = effortRow
     ? undefined
     : droidReasoningDefault(req.headers.get(DROID_DEFAULT_EFFORT_HEADER), chatBody);
+  // Read the caller's delivery choice before any generation default (Droid effort) is written.
+  const rawReasoningVisible = chatRawReasoningVisible(chatBody);
   if (effortRow) chatBody.model = effortRow.baseId;
   if (fastRow) {
     chatBody.model = fastRow.baseId;
@@ -195,7 +257,7 @@ async function handleChatCompletionsWithBudget(
     );
     // Native Chat must check its own destination; translated xAI OAuth turns
     // preview the billed Fast lane before their final Responses scope check.
-    assertRouteAllowedByScope(resolveAdmissionModelScope(config, logIds?.admission), requestedModel, {
+    assertRouteAllowedByScope(inheritedAdmissionScope ?? resolveAdmissionModelScope(config, logIds?.admission), clientFacingModelLabel(requestedModel), {
       providerName: route.providerName,
       modelId: previewXaiOauthWireModel({ options: {
         serviceTier: typeof chatBody.service_tier === "string" ? chatBody.service_tier : undefined,
@@ -254,18 +316,23 @@ async function handleChatCompletionsWithBudget(
     }
     if (err instanceof AdmissionModelDeniedError) {
       logCtx.requestedModel = requestedModel;
+      projectAdmissionModelDeniedLog(err, logCtx);
       if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 403, { closeReason: "non_stream" });
       return admissionModelDeniedResponse(err);
     }
     if (err instanceof UnknownRoutingPolicyError) {
       logCtx.requestedModel = requestedModel;
+      const clientModel = clientFacingModelLabel(requestedModel);
+      projectLocalModelRefusalLog(logCtx, clientModel);
       if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 404, { closeReason: "non_stream" });
-      return chatCompletionsErrorResponse(404, err.message, "invalid_request_error");
+      return chatCompletionsErrorResponse(404, routingPolicyRefusalMessage("unknown", clientModel), "invalid_request_error");
     }
     if (err instanceof NoEligiblePolicyCandidateError) {
       logCtx.routeDecision = err.trace;
+      const clientModel = clientFacingModelLabel(requestedModel);
+      projectLocalModelRefusalLog(logCtx, clientModel);
       if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 404, { closeReason: "non_stream" });
-      return chatCompletionsErrorResponse(404, err.message, "invalid_request_error");
+      return chatCompletionsErrorResponse(404, routingPolicyRefusalMessage("unavailable", clientModel), "invalid_request_error");
     }
     /* unknown model: let handleResponses shape the 404 */
   }
@@ -339,9 +406,22 @@ async function handleChatCompletionsWithBudget(
     // and sends the core only the request settings.
     if (directRoute) {
       directConversation = chatConversationToIr(chatBody, chatBody.model as string);
+      // Unlike the bridge body below, the settings-only projection does not contain the
+      // conversation. Account for the retained IR itself before an adapter materializes it
+      // again; reasoning placeholders can be larger than the source Chat message.
+      translatorBudget.chargeRetained(
+        Buffer.byteLength(JSON.stringify(directConversation), "utf8"),
+        { kind: "request_copies" },
+      );
       internalBody = chatSettingsBody(chatBody);
     } else {
-      internalBody = chatToResponsesBody(chatBody);
+      internalBody = chatToResponsesBody(chatBody, {
+        // #7429: only a route that is and stays first-party Anthropic may receive signed thinking
+        // a Chat client returns; a combo, policy or rewritten route resolves its target later.
+        acceptAnthropicReasoningSignatures: settledRoute !== null && !routeMayChangeCredentialDomain
+          && settledRoute.provider.adapter === "anthropic"
+          && credentialDomainFor(settledRoute.provider)?.firstPartyAnthropic === true,
+      });
     }
     if (effortRow) {
       internalBody.reasoning = {
@@ -405,11 +485,11 @@ async function handleChatCompletionsWithBudget(
   // authority comes from a process-owned capability minted at random per process and compared in
   // constant time, so a forged header — or a token captured from an older process — is treated
   // as an ordinary external request.
-  const advisorInternal = isInternalCallCapability(req.headers.get(ADVISOR_INTERNAL_CAPABILITY_HEADER));
   // Concrete helper targets must fail before optional stored-main credential enrichment.
   // Unresolved combos are checked after their concrete child route is selected in Responses.
   if (settledRoute && !settledRoute.combo && isCanonicalOpenAiForwardProvider(settledRoute.provider)
     && isCodexReserveHelperUnsupported(config, settledRoute.modelId, logIds?.admission, visionDescribeTerminal)) {
+    if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 400, { closeReason: "non_stream" });
     return chatCompletionsErrorResponse(400, CODEX_RESERVE_HELPER_UNSUPPORTED_MESSAGE, "invalid_request_error");
   }
   const nativeCallerAuth = captureExplicitOpenAiCallerAuth(req.headers, config);
@@ -479,6 +559,7 @@ async function handleChatCompletionsWithBudget(
 
   const finalizeNativeLog = createFinalRequestLog(logIds, logCtx).finish;
   const upstream = await handleResponses(internalReq, config, logCtx, {
+    clientModelLabel: clientFacingModelLabel(requestedModel),
     openAiSidecarAuth,
     allowStoredOpenAiSidecarAuth: !!(callerAuthorizationRoute && settledRoute
       && !isCanonicalOpenAiForwardProvider(settledRoute.provider)),
@@ -487,10 +568,14 @@ async function handleChatCompletionsWithBudget(
     ...(logIds?.turnAdmissionLease ? { turnAdmissionLease: logIds.turnAdmissionLease } : {}),
     // #1686: the Chat surface translates its body and replays here, so the admission fact has
     // to ride along or a bearer-admitted Chat caller would still be refused by Direct.
-    ...(logIds?.admission ? { admission: logIds.admission } : {}),
+    ...(admission ? { admission } : {}),
+    advisorAdmissionPolicy,
+    // The bridge request carries no caller credential, so resolve the replay principal here.
+    replayPrincipal: { clientPrincipalId: resolveContextPrincipal(req, config, logIds?.admission) },
     abortSignal: req.signal,
     // Body is Responses-shaped by now, but the client spoke Chat Completions.
     inboundWire: "chat",
+    chatRawReasoningVisible: rawReasoningVisible,
     // A Chat caller may send an explicit empty `tools` array — a deny-all declaration the
     // translation drops along with the whole catalog. Carried separately so the
     // undeclared-tool guard can still enforce it; absent/partial catalogs stay deferred.
@@ -502,6 +587,9 @@ async function handleChatCompletionsWithBudget(
     ...(envelope && nativeChatCombos ? {
       protocolSource: createNativeChatComboSource({
         req, config, envelope, requestedModel, requestedStream: stream, translatorBudget,
+        // Children run without logIds; the request's admission rides the source so their
+        // replay scope resolves the same caller principal as every other surface.
+        ...(admission ? { admission } : {}),
       }),
     } : {}),
     // Terminal vision-describe marker (roadmap 180): the bridge rebuilds
@@ -509,6 +597,7 @@ async function handleChatCompletionsWithBudget(
     // header — so the fact is detected here and carried as an option flag.
     ...(visionDescribeTerminal ? { visionDescribeTerminal: true } : {}),
     ...(advisorInternal ? { advisorInternal: true } : {}),
+    ...(inheritedAdmissionScope ? { admissionScope: inheritedAdmissionScope } : {}),
     translatorBudget,
     ...(logIds ? { onFirstOutput: () => recordFirstOutput(logCtx, logIds.start) } : {}),
     onNativePassthroughTerminal: status => finalizeNativeLog(httpStatusForRequestLogTerminal(status, logCtx), { terminalStatus: status, closeReason: "terminal" }),
@@ -601,6 +690,9 @@ async function handleChatCompletionsWithBudget(
       // below could never restore this one -- the translated client was told the provider
       // throttled the turn, and handed a two-second wait to send it again.
       classified.code = UPSTREAM_RESET_REPLAY_REFUSED_CODE;
+    } else if (upstreamCode === "claude_subscription_cooldown") {
+      classified.code = "claude_subscription_cooldown";
+      classified.type = "rate_limit_error";
     } else if (upstreamCode === "model_not_found") {
       // Structured model_not_found must win over classifyError's generic remaps.
       classified.code = "model_not_found";
@@ -622,25 +714,31 @@ async function handleChatCompletionsWithBudget(
         message,
         upstreamRetryAfter: upstream.headers.get("retry-after"),
       });
-    const rewritten = new Response(JSON.stringify({
+    const legacyEnvelope = JSON.stringify({
       error: {
         message: classified.message,
         type: classified.type,
         param: null,
         code: classified.code,
       },
-    }), {
+    });
+    const localReason = logCtx.errorCode ?? (wasAccountAutoPaused(upstream) ? "credentials_paused" : undefined);
+    const proxyAuthored = isProxyError(upstream) || LOCAL_CHAT_ERROR_MESSAGES.has(logCtx.errorCode ?? "");
+    const rewritten = new Response(proxyAuthored ? legacyEnvelope : JSON.stringify(ownedChatErrorPayload({ status, type: classified.type, code: classified.code,
+      evidence: { status: upstream.status, type: upstreamType, code: upstreamCode ?? undefined, message },
+      localReason,
+    })), {
       status,
       headers: {
         "Content-Type": "application/json",
-        ...(retryAfter ? { "Retry-After": retryAfter } : {}),
+        ...(formatClientRetryAfter(retryAfter) ? { "Retry-After": formatClientRetryAfter(retryAfter)! } : {}),
         ...(replayRefusal ? REPLAY_REFUSAL_CLIENT_HEADERS : {}),
       },
     });
     if (replayRefusal) retainReplayRefusal(rewritten);
     return logIds
       // Deferred logging re-wraps this response and carries the verdict with it.
-      ? responseWithDeferredRequestLog(rewritten, logIds.requestId, logIds.start, logCtx)
+      ? responseWithDeferredRequestLog(rewritten, logIds.requestId, logIds.start, logCtx, undefined, legacyEnvelope)
       : rewritten;
   }
 
@@ -653,7 +751,8 @@ async function handleChatCompletionsWithBudget(
     : upstream;
 
   if (contentType.includes("text/event-stream") && response.body) {
-    const chatSse = responsesSseToChatCompletionsSse(response.body, requestedModel, { translatorBudget });
+    const failureVerdictSink: FailureVerdictSink = {};
+    const chatSse = responsesSseToChatCompletionsSse(response.body, requestedModel, { translatorBudget, failureVerdictSink, proxyErrorContext: logCtx });
     if (stream) {
       // Stream failures surface as an error SSE frame then abort the body — never a
       // success completion that embeds `[error] ...` + clean [DONE].
@@ -667,16 +766,16 @@ async function handleChatCompletionsWithBudget(
       });
     }
     try {
-      const completion = await collectChatCompletion(chatSse, requestedModel, translatorBudget);
+      const completion = await collectChatCompletion(chatSse, requestedModel, translatorBudget, failureVerdictSink);
       return new Response(JSON.stringify(completion), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
     } catch (err) {
       if (isChatCompletionsStreamError(err)) {
-        return chatCompletionsErrorResponse(err.status, err.message, err.type, err.code);
+        return ownedChatErrorResponse(err.status, err.message, err.type, err.code, failureVerdictSink.contract, failureVerdictSink.proxyAuthored);
       }
-      return chatCompletionsErrorResponse(
+      return ownedChatErrorResponse(
         502,
         err instanceof Error ? err.message : String(err),
         "server_error",
@@ -693,7 +792,7 @@ async function handleChatCompletionsWithBudget(
   try {
     json = await response.json();
   } catch {
-    return finishJson(chatCompletionsErrorResponse(502, "internal replay returned a non-JSON response", "server_error"));
+    return finishJson(ownedChatErrorResponse(502, "internal replay returned a non-JSON response", "server_error"));
   }
   const status = (json as Rec)?.status;
   if (status === "failed") {
@@ -716,7 +815,7 @@ async function handleChatCompletionsWithBudget(
       classified.type = "invalid_request_error";
     }
     if (isReplayRefusalCode(classified.code)) {
-      const refusal = chatCompletionsErrorResponse(
+      const refusal = ownedChatErrorResponse(
         REPLAY_REFUSED_STATUS, message, classified.type, classified.code,
       );
       const headers = new Headers(refusal.headers);
@@ -725,7 +824,7 @@ async function handleChatCompletionsWithBudget(
         new Response(refusal.body, { status: refusal.status, headers }),
       ));
     }
-    return finishJson(chatCompletionsErrorResponse(
+    return finishJson(ownedChatErrorResponse(
       classified.code === "translation_buffer_limit"
         ? 502
         : isCyberPolicyCode(classified.code) ? 400 : 502,

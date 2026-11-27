@@ -5,10 +5,20 @@ import { startClientRuntimeUnderOwnershipLease } from "../../src/cli/client-star
 import { recoverStartStateUnderOwnershipLease } from "../../src/cli/start-owner-fence";
 import { serviceChildOwnershipDecisionForClassifiedChild } from "../../src/service/service-child-ownership";
 import type { ServiceOwnershipResolution } from "../../src/service/state";
+import { clientRuntimeRecord } from "../../src/client/runtime";
+import { currentServingCommand } from "../../src/config/serving-runtimes";
 
 class StayOut extends Error {}
 
 describe("connected-client start ownership fence", () => {
+  test("published connected-client identity retains the current serving command", () => {
+    expect(clientRuntimeRecord(123, 12345).command).toEqual(currentServingCommand());
+  });
+  test("ordinary start publishes its serving command alongside the attestation secret", () => {
+    const cli = readFileSync(repoPath("src/cli/index.ts"), "utf8");
+    const record = cli.slice(cli.indexOf("writeRuntime: bound =>"), cli.indexOf("stopBound: bound =>"));
+    expect(record).toContain("command: currentServingCommand()");
+  });
   test("a desktop claim committed at recovery lease acquisition skips sibling marking and journal reconciliation", async () => {
     let ownership: ServiceOwnershipResolution = { kind: "none", revision: 0 };
     expect(serviceChildOwnershipDecisionForClassifiedChild(true, () => ownership)).toEqual({ kind: "proceed" });
@@ -27,16 +37,16 @@ describe("connected-client start ownership fence", () => {
     expect(events).toEqual(["lease", "release", "stay-out"]);
   });
 
-  test("ordinary starts recover without taking the service lease", async () => {
+  test("ordinary starts hold the lease for recovery without inspecting service ownership", async () => {
     const events: string[] = [];
     expect(await recoverStartStateUnderOwnershipLease({
       supervised: false,
-      acquireLease: () => { throw new Error("ordinary start must not acquire the service lease"); },
+      acquireLease: () => { events.push("lease"); return { release: () => { events.push("release"); } }; },
       decide: () => { throw new Error("ordinary start must not inspect service ownership"); },
       stayOut: () => { throw new Error("ordinary start must not stay out"); },
       recover: async () => { events.push("recover"); return true; },
     })).toBe(true);
-    expect(events).toEqual(["recover"]);
+    expect(events).toEqual(["lease", "recover", "release"]);
   });
 
   test("supervised recovery holds the lease through the shared mutation", async () => {
@@ -56,9 +66,16 @@ describe("connected-client start ownership fence", () => {
     const start = cli.slice(cli.indexOf("async function handleStart("), cli.indexOf("function detachedStartEnvironment("));
     const fence = start.indexOf("recoverStartStateUnderOwnershipLease(");
     expect(fence).toBeGreaterThan(start.indexOf("probeOwnerPastRestartParent("));
-    expect(fence).toBeLessThan(start.indexOf("markCrossHomeSibling()"));
-    expect(fence).toBeLessThan(start.indexOf("removePidIfValueIs(owner.pidSnapshot)"));
-    expect(fence).toBeLessThan(start.indexOf("reconcileStartupJournal()"));
+    expect(fence).toBeLessThan(start.indexOf("recoverStartJournalAfterOwnerRecheck(owner, siblingStart)"));
+    const recovery = readFileSync(repoPath("src/cli/start-owner-fence.ts"), "utf8");
+    expect(recovery.indexOf("await findLiveProxy(START_OWNERSHIP_LIVENESS)"))
+      .toBeLessThan(recovery.indexOf("removePidIfValueIs(owner.pidSnapshot)"));
+    expect(recovery.indexOf("if (owner.live) return sibling"))
+      .toBeLessThan(recovery.indexOf("removePidIfValueIs(owner.pidSnapshot)"));
+    expect(recovery.indexOf("removePidIfValueIs(owner.pidSnapshot)"))
+      .toBeLessThan(recovery.indexOf("await markCrossHomeSibling()"));
+    expect(recovery.indexOf("await markCrossHomeSibling()"))
+      .toBeLessThan(recovery.indexOf("if (!sibling) reconcileStartupJournal()"));
     expect(fence).toBeLessThan(start.indexOf('if (clientState.kind === "connected")'));
     expect(fence).toBeLessThan(start.indexOf("bindAndPublishStartOwnership("));
     expect(start.slice(fence, start.indexOf('if (clientState.kind === "connected")')))
@@ -118,6 +135,10 @@ describe("connected-client start ownership fence", () => {
     expect(fence).toBeLessThan(branch.indexOf("startClientRuntime({"));
     expect(branch.slice(fence, branch.indexOf("return;"))).toContain("serviceChildOwnershipDecisionForClassifiedChild(supervisedServiceChild)");
     const runtime = readFileSync(repoPath("src/client/runtime.ts"), "utf8");
-    expect(runtime).toMatch(/writeRuntimePort\(clientRuntimeRecord\(process\.pid, boundPort\)\);\s*\n\s*options\.afterPublish\?\.\(\);/);
+    // serve() binds and publishes (it runs again for a restart rollback, OCX-6); the lease is
+    // released only once the first serve() returned, i.e. after publication.
+    const serve = runtime.slice(runtime.indexOf("const serve = async"), runtime.indexOf("const stopServing"));
+    expect(serve).toMatch(/writePid\(process\.pid\);\s*\n\s*writeRuntimePort\(clientRuntimeRecord\(process\.pid, boundPort, attestationSecret\)\);/);
+    expect(runtime).toMatch(/await serve\(\);\s*\n\s*options\.afterPublish\?\.\(\);/);
   });
 });

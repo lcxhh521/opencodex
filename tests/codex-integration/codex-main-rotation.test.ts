@@ -21,6 +21,11 @@ import {
   reconcileMainCodexAccountRuntimeState,
   resetMainCodexAccountIdentityTrackingForTests,
 } from "../../src/codex/account-lifecycle";
+import {
+  forgetCodexFailureWindows,
+  isCodexFailureWindowDegraded,
+  noteCodexFailureWindowSample,
+} from "../../src/codex/routing/failure-window";
 import { MAIN_CODEX_ACCOUNT_ID, setMainAccountPlan } from "../../src/codex/main-account";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import {
@@ -165,6 +170,7 @@ describe("main account rotation (Option A)", () => {
         identityKey: expect.stringMatching(/^[a-f0-9]{64}$/),
         identityGeneration: expect.any(Number),
       },
+      affinityDecision: { move: "unbound", reason: "no_conversation" },
     });
     expect(isCodexAuthContextUsable(ctx, config)).toBe(true);
     const headers = headersForCodexAuthContext(new Headers(), ctx);
@@ -197,6 +203,7 @@ describe("main account rotation (Option A)", () => {
         identityKey: expect.stringMatching(/^[a-f0-9]{64}$/),
         identityGeneration: expect.any(Number),
       },
+      affinityDecision: { move: "unbound", reason: "no_conversation" },
     });
     expect(isCodexAccountInCooldown(MAIN_CODEX_ACCOUNT_ID)).toBe(false);
     expect(isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID)).toBe(false);
@@ -240,6 +247,29 @@ describe("main account rotation (Option A)", () => {
       expect(getAccountQuota(MAIN_CODEX_ACCOUNT_ID)).toBeNull();
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("a physical main account switch forgets its failure-window degradation", () => {
+    const config = makeConfig();
+    const now = Date.now();
+    for (let index = 0; index < 24; index += 1) {
+      noteCodexFailureWindowSample(config, MAIN_CODEX_ACCOUNT_ID, true, now - index);
+    }
+    try {
+      expect(isCodexFailureWindowDegraded(MAIN_CODEX_ACCOUNT_ID, now)).toBe(true);
+      // First reconcile observes the fixture identity; the physical switch happens on the
+      // replacement write below and must drop the alias-keyed window like every other
+      // runtime row the purge owns.
+      expect(reconcileMainCodexAccountRuntimeState()).toBe(false);
+      writeFileSync(
+        join(CODEX_DIR, "auth.json"),
+        JSON.stringify({ tokens: { access_token: "replacement_access", account_id: "replacement_acct" } }),
+      );
+      expect(reconcileMainCodexAccountRuntimeState()).toBe(true);
+      expect(isCodexFailureWindowDegraded(MAIN_CODEX_ACCOUNT_ID, now)).toBe(false);
+    } finally {
+      forgetCodexFailureWindows();
     }
   });
 

@@ -2,8 +2,11 @@
 
 `src/messaging/` contains command-owned local Codex discovery and queued peer
 submission. `src/cli/message-command.ts` activates it only for `ocx message`.
-There is no management API, startup hook, enabled setting, listener, persistent
-store or skill installation. Ordinary proxy startup does not activate messaging.
+The existing sessions/send path has no management API, startup hook, enabled setting, listener,
+persistent store or skill installation. Ordinary proxy startup does not activate
+messaging. Explicit enrolled peers belong to [remote messaging](remote-messaging.md).
+The separate opt-in stored-queue MCP host is described below; it does not replace
+the loaded-session transport or change its discovery/admission rules.
 
 > Decision record: [ADR-6478](decisions/ADR-6478-local-messaging-foundation.md)
 
@@ -57,7 +60,7 @@ guarantee that a session stays loaded after discovery.
 parent cancellation. Callers create and dispose that budget around input, home
 selection, connection, discovery, revalidation and submission. Individual RPCs
 are also capped at 10 seconds. Modules allocate no resources at import time.
-Messaging launches no subprocess. SIGINT/SIGTERM cancel only command-owned work;
+The loaded-session path launches no subprocess. SIGINT/SIGTERM cancel only command-owned work;
 no recipient, daemon or proxy is stopped.
 
 ## Command-local CLI
@@ -68,7 +71,9 @@ no recipient, daemon or proxy is stopped.
 `src/cli/message-args.ts` rejects malformed, duplicate and remote/Claude options
 before any command resource or home selection. `src/cli/codex-shim-autorestore.ts`
 skips repair for the whole namespace. Registry, capability and help declarations
-describe sessions/send; no management route is claimed.
+describe sessions/send; no management route is claimed. The separate pure remote
+parser selects a dynamic remote-command import only for explicit remote operations;
+local operations do not read peer state or start an owner.
 
 `src/cli/message-runtime.ts` reuses effective Codex-home resolution without
 persistence. Messaging needs no selected CLI binary or version pin. The existing
@@ -143,6 +148,49 @@ UUID; the daemon's submission ID remains separate. Neither is a processing recei
   root carries the repository stale-root marker. It needs no user daemon or API.
 
 Offline fixtures establish request/response contracts, not receiving-model
-obedience or a real daemon's atomic loaded-target enforcement. Remote authentication,
-enrollment, Claude, isolation and idle notices are absent. Independent review and
+obedience or a real daemon's atomic loaded-target enforcement. Remote authentication
+and enrollment have a [separate owner](remote-messaging.md); Claude, isolation and
+idle notices are absent. Independent review and
 architecture acceptance remain separate from this contribution implementation.
+
+## Opt-in stored-queue MCP host
+
+`src/cli/message-mcp-command.ts` parses `message mcp --codex --codex-home` before
+loading the SDK. Both paths are explicit and absolute; no setup, registration,
+proxy ensure or fallback into the existing sessions/send command occurs. Windows
+is refused. `src/messaging/mcp-queue-server.ts` is activated only by this command,
+exposes stdio tools, and allocates no helper at import or initialization time.
+
+`src/messaging/mcp-queue-tools.ts` exposes only `codex_threads` and
+`codex_queue_message`. The first returns one bounded page of stored metadata and
+a cursor, excluding preview, history and cwd. It explicitly reports that live
+state is unverified. The second validates an exact UUID and at most 16 KiB of
+text including a fixed peer-context label; NUL/empty text is refused. Sender
+identity, model overrides and permission escalation are not part of this API.
+These tools do not share the loaded-only admission contract above.
+
+`src/messaging/mcp-queue-rpc.ts` owns each explicitly selected CLI helper. The
+existing `src/codex/exec-boundary.ts` validates actual execution, including
+macOS bundle trust. Helpers use only app-server stdio and an explicit existing
+Codex home; inherited CODEX_THREAD_ID is removed. After initialize/initialized,
+the only allowed method is thread/list or thread/queue/add. No lifecycle or
+login RPC is issued. The queue request carries a generated clientUserMessageId;
+only a matching correlated receipt becomes queued. Rejection before/at a valid
+error is not_sent. Uncertain outcomes after write are unknown without replay.
+Queued is storage, not recipient processing. Message bodies and native output
+never appear in argv, receipts or diagnostics.
+
+At most four operations run per host. Each has a 20-second budget including
+execution validation, a 12-second RPC deadline, incremental strict UTF-8 decode
+and a 1 MiB output cap. Cleanup escalates to SIGKILL after 600 ms. SDK cancellation, host disconnect and process signals
+cancel owned work. EOF is followed by bounded TERM/KILL escalation and joined
+child exit. Cleanup targets invocation-owned groups, never the recipient.
+The native CLI may maintain state in its selected home; OpenCodex adds no store.
+Local-user MCP access is not per-project/thread isolation.
+
+`tests/codex-integration/messaging-mcp-queue.test.ts` covers offline protocol,
+limits, privacy, failure receipts and cancellation. `tests/cli/cli-message-mcp.test.ts`
+exercises the actual CLI/MCP handshake, inert initialization, the four-helper
+bound and disconnect cleanup. The fixtures use disposable native helpers, not
+real accounts. They prove queue contracts rather than app consumption, goal
+behavior, model obedience or cross-platform native interoperability.

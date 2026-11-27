@@ -1,6 +1,8 @@
 import { listCodexAuthAccountsSnapshot } from "../codex/auth-api";
 import { isAnthropicInstanceId, configuredAnthropicInstance } from "./anthropic-instance";
+import { ANTIGRAVITY_OAUTH_STORE_KEY } from "./antigravity-quota-identity";
 import { fetchAnthropicAccountQuota } from "./quota/anthropic-account-quota";
+import { thrownQuotaFailure } from "./quota/failure-codes";
 import { resolveEnvValue } from "../config";
 import { getAccountCredential, getAccountSet } from "../oauth/store";
 import { apiKeyPoolEntryId } from "./api-keys";
@@ -31,7 +33,7 @@ import {
   isProviderQuotaReportCurrent,
   LAST_GOOD_MAX_AGE_MS,
   providerQuotaBeforePublishForTests,
-  routingEvidence,
+  routingEvidence, publishCollectedDecisionQuota,
   setProviderQuotaReportCache,
   TERMINAL_QUOTA_FAILURE,
   type CodexAuthAccountsSnapshotPromise,
@@ -53,7 +55,6 @@ import {
   hydrateAccountQuotaCache,
   mayCommitAccountQuotaKey,
   mayCommitProviderQuotaKey,
-  normalizeAnthropicQuota,
   supportsPerAccountQuota,
   type AccountQuotaCacheEntry,
   type ProviderAccountQuota,
@@ -124,7 +125,7 @@ async function maybeFetchProviderQuota(
     }
     if (provider.authMode === "oauth" && explicitAccountReader(name)) return await fetchExplicitCurrentQuota(name, provider, config);
     if (provider.authMode === "oauth" && configuredAnthropicInstance(config, name)) return fetchAnthropicQuota(name, config);
-    if (provider.authMode === "oauth" && name === "google-antigravity") return await fetchAntigravityQuota(name);
+    if (provider.authMode === "oauth" && name === ANTIGRAVITY_OAUTH_STORE_KEY) return await fetchAntigravityQuota(name, { ...provider });
     if (provider.authMode === "oauth" && name === "kiro") return fetchKiroQuota(name);
     // meta-muse: a device-logged-in account can be probed at the key endpoint; an
     // imported or pasted one cannot, and falls back to its last in-band observation.
@@ -150,8 +151,8 @@ async function maybeFetchProviderQuota(
  *
  * No previous snapshot is passed. The observer keeps its own persisted last-seen map,
  * because `previous` here is bound only when `cache.key === key` and the key digest at
- * cacheKeyWithAggregationState includes quota values and updatedAt — so it is empty exactly
- * when a reset happened.
+ * cacheKeyWithAggregationState includes quota values and their freshness — so it is empty
+ * exactly when a reset happened.
  *
  * Account identity is resolved SYNCHRONOUSLY, before any await. Two reasons, both observed:
  * pool failover rewrites `activeAccountId` during request routing
@@ -229,6 +230,7 @@ export function flushProviderQuotaObservationsForTests(): Promise<void> {
   return pendingProviderObservation;
 }
 
+/** Collect provider quota reports, using the cache unless refresh is forced, and publish the secret-free decision evidence from the collected reports. */
 export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh = false): Promise<ProviderQuotaResponse> {
   // A passive read (a Remote Link Child's, #6959) shows the held reports and starts nothing.
   if (isPassiveRead()) return heldProviderQuotaReports(Object.keys(config.providers));
@@ -329,7 +331,7 @@ export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh 
     ) {
       const reports = response.reports.filter(item => mayCommitProviderQuotaKey(item.provider, writerGeneration));
       setProviderQuotaReportCache({ key, ts: Date.now(), response: { ...response, reports } });
-      replaceCachedProviderQuotas(reports, routingEvidence);
+      replaceCachedProviderQuotas(reports, routingEvidence); publishCollectedDecisionQuota(reports, config);
       notifyProviderQuotaSnapshot(reports, config);
     }
     return response;
@@ -367,6 +369,8 @@ async function readExplicitAccountQuota(provider: string, accountId: string, con
     case "kimi": result = await fetchKimiQuota(provider, config, accessToken); break;
     case "command-code": result = await fetchCommandCodeQuota(provider, config, accessToken); break;
     case "devin": result = await (await import("./quota/devin")).fetchDevinQuota(provider, accessToken, credential.apiBaseUrl, config.baseUrl); break;
+    case "workbuddy-ai": result = await (await import("./quota/workbuddy")).fetchWorkBuddyQuota(provider, credential); break;
+    case "dsh-account": result = await (await import("./quota/dsh-account")).fetchDshAccountQuota(provider, accessToken, { accountId, credential }); break;
     default: return null;
   }
   return { result, identity, isCurrent };
@@ -424,7 +428,8 @@ async function fetchAccountQuota(
   providerConfig?: OcxProviderConfig,
   liveConfig?: OcxConfig,
 ): Promise<AccountQuotaCacheEntry> {
-  if (accountQuotaProbeSkip(provider, accountId)) return accountQuotaProbeSkip(provider, accountId)!;
+  const skipped = accountQuotaProbeSkip(provider, accountId);
+  if (skipped) return skipped;
   if (isAnthropicInstanceId(provider)) return fetchAnthropicAccountQuota(provider, accountId, forceRefresh, liveConfig);
   if (explicitAccountReader(provider)) return fetchExplicitAccountQuota(provider, accountId, forceRefresh, providerConfig);
   if (provider === "kiro") hydrateAccountQuotaCache();
@@ -432,7 +437,8 @@ async function fetchAccountQuota(
   const writerGeneration = captureConfigGeneration();
   const kiroIdentity = provider === "kiro" ? kiroProbeIdentity(accountId) : undefined;
   const cachedCandidate = accountQuotaCache.get(key);
-  const cached = provider !== "kiro" || cachedCandidate?.identity === kiroIdentity ? cachedCandidate : undefined;
+  const cached = (provider !== "kiro" || cachedCandidate?.identity === kiroIdentity)
+    && cachedCandidate?.isCurrent?.() !== false ? cachedCandidate : undefined;
   if (!forceRefresh && cached && Date.now() - cached.ts < ACCOUNT_QUOTA_TTL_MS) {
     if (provider === "google-antigravity" && cached.quotaFailure && cached.quotaFailureIsCurrent?.() !== true) return { ...cached, quotaFailure: undefined };
     return cached;
@@ -454,6 +460,7 @@ async function fetchAccountQuota(
       try { return epoch === explicitAccountEpoch && diagnosticIdentity !== undefined && diagnosticIdentity === antigravityQuotaDiagnosticIdentity(accountId); }
       catch { return false; }
     };
+    const antigravityIsCurrent = () => quotaFailureIsCurrent();
     const diagnosticFields = () => quotaFailure && quotaFailureIsCurrent() ? { quotaFailure, quotaFailureIsCurrent } : {};
     const unavailable = (): AccountQuotaCacheEntry => {
       const entry: AccountQuotaCacheEntry = {
@@ -461,9 +468,11 @@ async function fetchAccountQuota(
         quota: cached?.quota ?? null,
         unavailable: true,
         ...(provider === "kiro" ? { identity: kiroIdentity } : {}),
+        ...(provider === "google-antigravity" ? { isCurrent: antigravityIsCurrent } : {}),
         ...diagnosticFields(),
       };
-      if (mayCommitAccountQuotaKey(key, writerGeneration) && (provider !== "kiro" || kiroProbeCurrent(accountId, kiroIdentity))) {
+      if (entry.isCurrent?.() !== false && mayCommitAccountQuotaKey(key, writerGeneration)
+        && (provider !== "kiro" || kiroProbeCurrent(accountId, kiroIdentity))) {
         accountQuotaCache.set(key, entry);
         if (provider === "kiro") persistKiroAccountState();
         sweepExpiredOnWrite(entry.ts);
@@ -493,12 +502,15 @@ async function fetchAccountQuota(
           return { ts: Date.now(), quota: null, unavailable: true };
         }
       }
+      if (provider === "google-antigravity" && !antigravityIsCurrent()) return { ts: Date.now(), quota: null, unavailable: true };
       if (!quota) return unavailable();
       const entry: AccountQuotaCacheEntry = {
         ts: Date.now(), quota,
         ...(provider === "kiro" ? { identity: kiroIdentity } : {}),
+        ...(provider === "google-antigravity" ? { isCurrent: antigravityIsCurrent } : {}),
       };
       if (mayCommitAccountQuotaKey(key, writerGeneration)
+        && entry.isCurrent?.() !== false
         && (provider !== "kiro" || kiroProbeCurrent(accountId, kiroIdentity))) {
         accountQuotaCache.set(key, entry);
         if (provider === "kiro") { commitKiroAccountUsageState(key, kiroSnapshot, kiroIdentity); persistKiroAccountState(); }
@@ -506,7 +518,10 @@ async function fetchAccountQuota(
       }
       return entry;
     } catch (error) {
-      if (provider === "google-antigravity") quotaFailure = "account_unavailable";
+      // The probe itself reports HTTP and transport failures as results; what throws here is the
+      // credential side (missing/paused account, failed refresh, no project). A refresh that hit
+      // its deadline is a timeout to retry, not an account the operator must re-sign.
+      if (provider === "google-antigravity") quotaFailure = thrownQuotaFailure(error) === "timeout" ? "timeout" : "account_unavailable";
       return unavailable();
     }
   })().finally(() => {
@@ -530,21 +545,7 @@ export async function fetchProviderAccountQuotas(
   if (!set) return [];
   return mapQuotaRoster(set.accounts, async account => {
     const entry = await fetchAccountQuota(provider, account.id, forceRefresh, providerConfig, liveConfig);
-    const result: ProviderAccountQuota = {
-      accountId: account.id,
-      quota: isAnthropicInstanceId(provider) ? normalizeAnthropicQuota(entry.quota, Date.now()) : entry.quota,
-      ...(entry.unavailable ? { unavailable: true as const } : {}),
-      ...(entry.unavailable && entry.quotaFailure && entry.quotaFailureIsCurrent?.() === true ? { quotaFailure: entry.quotaFailure } : {}),
-    };
-    if (entry.quotaFailureIsCurrent) Object.defineProperty(result, "quotaFailureIsCurrent", { value: entry.quotaFailureIsCurrent });
-    if (isAnthropicInstanceId(provider) && entry.isCurrent) Object.defineProperty(result, "isCurrent", { value: entry.isCurrent });
-    if (!explicitAccountReader(provider)) return result;
-    const identity = entry.identity;
-    Object.defineProperty(result, "isCurrent", { value: () => {
-      if (entry.isCurrent) return entry.isCurrent();
-      const credential = getAccountCredential(provider, account.id);
-      return !!credential && (!identity || explicitQuotaIdentity(provider, account.id, providerConfig) === identity);
-    } });
-    return result;
+    const { projectAccountQuotaRow } = await import("./quota/account-row");
+    return projectAccountQuotaRow(provider, account.id, entry, providerConfig);
   });
 }

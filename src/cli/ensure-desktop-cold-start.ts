@@ -9,24 +9,39 @@
  * Desktop.
  *
  * Rules, in order:
- * - A running Desktop app is the supervisor. Wait for its proxy; never start a competing one.
- * - A durable Desktop claim with no running app: start Desktop (hidden, as a login launch would)
- *   where that is possible, then wait. Elsewhere, fail with guidance. A missing Desktop process
- *   never authorizes a CLI proxy by itself; handing ownership to the CLI stays an explicit
+ * - Facts re-observed after the asynchronous recovery inspection keep first refusal:
+ *   ownership or the process list that cannot be read is not evidence of absence.
+ * - Verified native intent wins over every other signal: an independently verified recovery
+ *   keeps its replacement, including without a claim, while a verified stop refuses. The
+ *   current bundled CLI (or protected system installation) anchors the executable; the
+ *   accepted socket, process incarnation and fresh native intent bind the recovery proof.
+ * - Conflicting native evidence — drift, contradiction or an unprovable observation on a
+ *   platform that can verify — refuses even under a durable claim. A claim outranks only
+ *   the structurally unsupported verdict of a platform with no live-image binding.
+ * - An unclaimed start cannot be authorized or suppressed by a name, locator file or
+ *   unverifiable observation: unknown still refuses; otherwise the ordinary CLI cold start
+ *   runs. Unsupported per-user installations do not acquire authority from their
+ *   self-reported identity; use their bundled CLI.
+ * - A running Desktop app with a durable Desktop claim is the supervisor. Wait for its proxy;
+ *   never start a competing one. A process name alone is not ownership evidence. A durable
+ *   Desktop claim with no running app: start Desktop (hidden, by the path its own login
+ *   registration recorded — LaunchServices never picks the bundle) where that is verifiable,
+ *   then wait. Elsewhere, fail with guidance. A missing Desktop process never authorizes a
+ *   CLI proxy by itself; an unsupported verdict beside an absent observation is
+ *   contradictory and refuses. Handing ownership to the CLI stays an explicit
  *   `ocx service install` consent step.
- * - Ownership or the process list that cannot be read is not evidence of absence: refuse.
- * - No claim and no running app: the ordinary CLI cold start.
  *
  * Concurrent shim launches share one Desktop launch through a lease file held by a live process;
  * every caller then waits on the same readiness probe.
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, linkSync, readdirSync, readFileSync, readlinkSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, linkSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, win32 } from "node:path";
+import { basename, dirname, join, posix, win32 } from "node:path";
 import { getConfigDir } from "../config/paths";
 import { resolveServiceOwnership } from "../service/state";
+import { inspectDesktopRecovery, type DesktopRecoveryEvidence } from "../service/desktop-recovery";
 
 export type DesktopProcessState = "running" | "absent" | "unknown";
 export type DesktopOwnershipState = "desktop" | "other" | "unknown";
@@ -35,16 +50,28 @@ export type EnsureColdStartPlan =
   | { kind: "spawn-cli" }
   | { kind: "wait-desktop" }
   | { kind: "launch-desktop" }
-  | { kind: "refuse"; reason: "desktop-unlaunchable" | "unverified" };
+  | { kind: "refuse"; reason: "desktop-unlaunchable" | "desktop-stopped" | "unverified" };
 
 export function planEnsureColdStart(facts: {
   ownership: DesktopOwnershipState;
   desktopProcess: DesktopProcessState;
   platform: NodeJS.Platform;
+  recovery?: DesktopRecoveryEvidence;
 }): EnsureColdStartPlan {
-  if (facts.desktopProcess === "running") return { kind: "wait-desktop" };
   if (facts.ownership === "unknown" || facts.desktopProcess === "unknown") return { kind: "refuse", reason: "unverified" };
-  if (facts.ownership === "other") return { kind: "spawn-cli" };
+  if (facts.recovery?.kind === "recovering") return { kind: "wait-desktop" };
+  if (facts.recovery?.kind === "stopped") return { kind: "refuse", reason: "desktop-stopped" };
+  // Drifted or contradictory native evidence refuses even under a durable claim; the claim
+  // outranks only the structurally unsupported verdict of a platform with no image binding.
+  if (facts.recovery?.kind === "unknown" && facts.recovery.unsupported !== true) return { kind: "refuse", reason: "unverified" };
+  if (facts.ownership === "other") {
+    // An unclaimed start cannot be authorized or suppressed by an unverifiable observation.
+    return facts.recovery?.kind === "unknown" ? { kind: "refuse", reason: "unverified" } : { kind: "spawn-cli" };
+  }
+  if (facts.desktopProcess === "running") return { kind: "wait-desktop" };
+  // A matched native process beside an absent observation is contradictory; refuse rather
+  // than launch a new app or guess at the supervisor's state.
+  if (facts.recovery?.kind === "unknown") return { kind: "refuse", reason: "unverified" };
   return facts.platform === "darwin" ? { kind: "launch-desktop" } : { kind: "refuse", reason: "desktop-unlaunchable" };
 }
 
@@ -60,6 +87,7 @@ export interface DesktopColdStartDeps<T> {
   platform: NodeJS.Platform;
   ownership: () => DesktopOwnershipState;
   desktopProcess: () => DesktopProcessState;
+  desktopRecovery?: () => Promise<DesktopRecoveryEvidence>;
   /** Start the Desktop app hidden. Returns false when the request could not be made. */
   launchDesktop: () => boolean;
   /** Returns a release function when this caller should launch, or null when another caller already did. */
@@ -71,15 +99,18 @@ export interface DesktopColdStartDeps<T> {
 const QUIT_HINT = "To run the proxy from this CLI instead, quit OpenCodex and run `ocx service install` or `ocx start`.";
 
 export async function runDesktopColdStart<T>(deps: DesktopColdStartDeps<T>): Promise<DesktopColdStartResult<T>> {
+  const recovery = await deps.desktopRecovery?.();
   const plan = planEnsureColdStart({
     ownership: deps.ownership(),
     desktopProcess: deps.desktopProcess(),
     platform: deps.platform,
+    recovery,
   });
   if (plan.kind === "spawn-cli") return { kind: "cli" };
   if (plan.kind === "refuse") {
     return { kind: "failed", message: plan.reason === "unverified"
       ? "Could not verify whether OpenCodex Desktop manages this proxy, so no CLI proxy was started. Run `ocx doctor`, or start the proxy explicitly with `ocx start`."
+      : plan.reason === "desktop-stopped" ? `OpenCodex Desktop has stopped its proxy. Use Start Proxy in the OpenCodex menu. ${QUIT_HINT}`
       : `OpenCodex Desktop manages this proxy but is not running. Open OpenCodex to start it. ${QUIT_HINT}` };
   }
   if (plan.kind === "launch-desktop") {
@@ -220,11 +251,63 @@ export function inspectDesktopProcess(options: DesktopProcessOptions = {}): Desk
   }
 }
 
-/** Start the macOS app hidden, the same way its login item does. */
-export function launchDesktopApp(options: { platform?: NodeJS.Platform; run?: Execute } = {}): boolean {
+const DESKTOP_BUNDLE_ID = "com.opencodex.desktop";
+const DESKTOP_PLIST_LABEL = "OpenCodex";
+
+/**
+ * The app bundle the consented installation itself registered as its Start-at-Login program —
+ * not whichever bundle LaunchServices would resolve for our identifier. `open -b` answers a
+ * mutable per-user registry: any planted bundle claiming {@link DESKTOP_BUNDLE_ID} could be
+ * selected and executed in the real app's place. The recorded claim, this app's own install-id
+ * store, and the login registration it wrote are the durable evidence of which installation
+ * that is; a claim whose registration is absent, malformed, stale or points off a Desktop
+ * executable refuses the launch instead of guessing.
+ */
+function consentedDesktopBundle(home: string, installId: string, run: Execute): string | null {
+  const localId = readFileSync(
+    join(home, "Library", "Application Support", DESKTOP_BUNDLE_ID, "install-id"), "utf8",
+  ).trim();
+  if (!localId || localId !== installId) return null;
+  const plistPath = realpathSync(join(home, "Library", "LaunchAgents", `${DESKTOP_PLIST_LABEL}.plist`));
+  const registration = JSON.parse(
+    run("/usr/bin/plutil", ["-convert", "json", "-o", "-", plistPath], 3_000),
+  ) as { Label?: unknown; RunAtLoad?: unknown; ProgramArguments?: unknown; Program?: unknown };
+  const args = registration.ProgramArguments;
+  // The shapes auto-launch writes: [program] or [program, "--autostart"]; see the migration
+  // rules in desktop/src-tauri/src/login_registration.rs, which classify anything else Leave.
+  // This is a macOS plist path, regardless of the host running an injected launch probe.
+  if (registration.Label !== DESKTOP_PLIST_LABEL || registration.RunAtLoad !== true || !Array.isArray(args)
+    || (args.length !== 1 && args.length !== 2) || typeof args[0] !== "string" || !posix.isAbsolute(args[0])
+    || (args.length === 2 && args[1] !== "--autostart")
+    || (registration.Program !== undefined && registration.Program !== args[0])) return null;
+  const executable = realpathSync(args[0]);
+  if (!isDesktopExecutable(executable, "darwin") || !statSync(executable).isFile()) return null;
+  accessSync(executable, constants.X_OK);
+  const bundle = dirname(dirname(dirname(executable)));
+  if (!bundle.endsWith(".app")) return null;
+  const info = JSON.parse(
+    run("/usr/bin/plutil", ["-convert", "json", "-o", "-", join(bundle, "Contents", "Info.plist")], 3_000),
+  ) as { CFBundleIdentifier?: unknown; CFBundleExecutable?: unknown };
+  // `open` uses this selector, so checking only the registration and identifier would
+  // validate one binary while launching another. The registered path is already canonical.
+  if (info.CFBundleIdentifier !== DESKTOP_BUNDLE_ID || info.CFBundleExecutable !== "opencodex-desktop") return null;
+  return realpathSync(join(bundle, "Contents", "MacOS", info.CFBundleExecutable)) === executable ? bundle : null;
+}
+
+/** Start the consented macOS app hidden, by the path its own login registration recorded. */
+export function launchDesktopApp(options: {
+  platform?: NodeJS.Platform;
+  run?: Execute;
+  home?: string;
+  ownership?: () => ReturnType<typeof resolveServiceOwnership>;
+} = {}): boolean {
   if ((options.platform ?? process.platform) !== "darwin") return false;
   try {
-    (options.run ?? execute)("/usr/bin/open", ["-g", "-b", "com.opencodex.desktop", "--args", "--autostart"], 10_000);
+    const owner = (options.ownership ?? resolveServiceOwnership)();
+    if (owner.kind !== "owned" || owner.ownership.owner !== "desktop") return false;
+    const bundle = consentedDesktopBundle(options.home ?? homedir(), owner.ownership.installId, options.run ?? execute);
+    if (bundle === null) return false;
+    (options.run ?? execute)("/usr/bin/open", ["-g", bundle, "--args", "--autostart"], 10_000);
     return true;
   } catch { return false; }
 }
@@ -321,6 +404,7 @@ export function productionDesktopColdStartDeps<T>(waitForProxy: (timeoutMs: numb
       } catch { return "unknown"; }
     },
     desktopProcess: () => inspectDesktopProcess(),
+    desktopRecovery: () => inspectDesktopRecovery(),
     launchDesktop: () => launchDesktopApp(),
     acquireLaunchLease: () => acquireDesktopLaunchLease(getConfigDir()),
     waitForProxy,

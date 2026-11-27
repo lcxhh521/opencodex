@@ -40,6 +40,7 @@ export const TABS: readonly TabDefinition[] = [
   { id: "cursor", hash: "integrations/cursor", labelKey: "integrations.tab.cursor" },
   { id: "opencode", hash: "integrations/opencode", labelKey: "integrations.tab.opencode" },
   { id: "pi", hash: "integrations/pi", labelKey: "integrations.tab.pi" },
+  { id: "gentle-shell", hash: "integrations/gentle-shell", labelKey: "integrations.tab.gentleShell" },
   { id: "omp", hash: "integrations/omp", labelKey: "integrations.tab.omp" },
   { id: "hermes", hash: "integrations/hermes", labelKey: "integrations.tab.hermes" },
   { id: "openclaw", hash: "integrations/openclaw", labelKey: "integrations.tab.openclaw" },
@@ -54,14 +55,19 @@ export const TABS: readonly TabDefinition[] = [
   { id: "raycast", hash: "integrations/raycast", labelKey: "integrations.tab.raycast" },
   { id: "omo", hash: "integrations/omo", labelKey: "integrations.tab.omo" },
   { id: "qoder", hash: "integrations/qoder", labelKey: "integrations.tab.qoder" },
+  { id: "qoder-cn", hash: "integrations/qoder-cn", labelKey: "integrations.tab.qoderCn" },
+  { id: "workbuddy", hash: "integrations/workbuddy", labelKey: "integrations.tab.workbuddy" },
+  { id: "workbuddy-ai", hash: "integrations/workbuddy-ai", labelKey: "integrations.tab.workbuddyAi" },
   { id: "cline", hash: "integrations/cline", labelKey: "integrations.tab.cline" },
   { id: "kilo", hash: "integrations/kilo", labelKey: "integrations.tab.kilo" },
   { id: "droid", hash: "integrations/droid", labelKey: "integrations.tab.droid" },
+  { id: "t3code", hash: "integrations/t3code", labelKey: "integrations.tab.t3code" },
 ] as const;
 
 export const FILE_CLIENTS = new Set<FileIntegrationClientId>([
   "opencode",
   "pi",
+  "gentle-shell",
   "omp",
   "hermes",
   "openclaw",
@@ -79,4 +85,8 @@ export const FILE_CLIENTS = new Set<FileIntegrationClientId>([
   "kilo",
   "droid",
   "qoder",
+  "qoder-cn",
+  "workbuddy",
+  "workbuddy-ai",
+  "t3code",
 ]);

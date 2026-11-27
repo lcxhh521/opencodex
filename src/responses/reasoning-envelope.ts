@@ -20,6 +20,8 @@ export const OCX_REASONING_PREFIX = "ocxr1:";
 export interface ReasoningEnvelope {
   /** Anthropic thinking-block signature (signature_delta), if captured. */
   sig?: string;
+  /** ID of the immediately following commentary copy of this signed thinking block. */
+  upd?: string;
   /** Raw redacted_thinking block data payloads, order preserved. */
   red?: string[];
   /**
@@ -119,6 +121,18 @@ export function isProviderIssuedThinkingSignature(
   }
 }
 
+/**
+ * Whether a value has the spelling of a signature Anthropic issued. An allow-list on top of
+ * `isProviderIssuedThinkingSignature`: Anthropic's signature is base64, so item ids and the
+ * parser's serialized placeholder never pass. Shared by the adapter, which forwards only such a
+ * signature, and the Chat `reasoning_details` carrier, which accepts and emits only such a one.
+ */
+export function isLikelyRealAnthropicThinkingSignature(signature: string | undefined): signature is string {
+  if (typeof signature !== "string" || signature.length < 16) return false;
+  if (/^(fc|call|msg|rs|resp|reasoning|item|ws|tool|func|function)[-_]/i.test(signature)) return false;
+  return /^[A-Za-z0-9+/_=-]+$/.test(signature);
+}
+
 /** Decode an ocxr1 envelope; returns null for native (OpenAI-encrypted) blobs or garbage. */
 export function decodeReasoningEnvelope(encryptedContent: string, budget?: TranslatorBudget): ReasoningEnvelope | null {
   if (!encryptedContent.startsWith(OCX_REASONING_PREFIX)) return null;
@@ -133,6 +147,8 @@ export function decodeReasoningEnvelope(encryptedContent: string, budget?: Trans
       const obj = parsed as { sig?: unknown; red?: unknown };
       const envelope: ReasoningEnvelope = {};
       if (typeof obj.sig === "string") envelope.sig = obj.sig;
+      const upd = (parsed as { upd?: unknown }).upd;
+      if (typeof upd === "string" && /^msg_[a-f0-9]{32}$/.test(upd)) envelope.upd = upd;
       if (Array.isArray(obj.red)) {
         const red = obj.red.filter((r): r is string => typeof r === "string");
         if (red.length > 0) envelope.red = red;

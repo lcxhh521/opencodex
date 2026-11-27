@@ -77,8 +77,9 @@ etiketler; bunlar normalde hem `authMode` hem de `apiKey`'i atlar.
 özelliği yalnızca API anahtarı sağlayıcıları için geçerlidir (`authMode:
 "key"`). OAuth, iletme ve yerel önayarlar hariç tutulur — kimlik bilgileri asla
 aynı belirteç üzerinde yeniden oynatılmamalıdır ve yerel çalışma zamanlarının
-korunacak uzak bir anahtarı yoktur. İsteğe bağlıdır: seçenek olmadığında özellik
-kapalıdır; nesnenin varlığı `enabled: false` olmadığı sürece etkinleştirir.
+korunacak uzak bir anahtarı yoktur. Belgelenmiş hedefe özgü varsayılanlar dışında isteğe bağlıdır. Standart Mistral Chat, mevcut istek genelindeki gönderim hakkı içinde sabırlı bir yeniden deneme politikası (6 yeniden oynatma, 10 saniyelik yedek aralık) kullanır. `enabled: false` dahil açık `retryOn429` ayarları önceliklidir. Mistral önayarı, sağlanan istem önbelleği anahtarlarını da varsayılan olarak iletir; `promptCacheKey: false` iletmeyi kapatır. Önbellek yakınlığı yeniden kullanım olasılığını artırır, ancak önbellek isabetini garanti etmez ve belirteç verimi sınırlarını kaldırmaz.
+
+Mistral, hem Studio hem Vibe anahtarları için tek bir API anahtarı sağlayıcısı kullanır. Anahtar türleri ve plan hakları [Mistral'ın API anahtarı belgelerinde](https://docs.mistral.ai/admin/identity-access/api-keys) açıklanır; proxy anahtardan abonelik katmanı çıkarmaz. Tüm modellerde, yukarı akışın açıkça bildirdiği `Retry-After` süreleri aynı kimlik bilgisi ve model üzerindeki çağrılar arasında paylaşılır. Yeniden deneme zamanı içermeyen bir 429, geçerli dakikalık sayaçlar kapasitenin tükendiğini gösterdiğinde veya reddedilen sorgunun ölçülen maliyeti kalan belirteçleri aşıp ilan edilen tam hakka sığdığında temkinli bir 60 saniyelik kurtarma beklemesi başlatabilir. Bu, sunucu sıfırlamasının kesin bir tahmini değil, yerel bir kurtarma politikasıdır. Sağlıklı trafik, bir sonraki sorgunun önbelleğini veya maliyetini asla tahmin etmez. Beklemeden sonra tek bir kurtarma yoklaması çalışır; başarılı olursa normal trafik geri gelir. Eksik, hatalı biçimli, sıfır haklı, aylık hakkı tükenmiş veya tam hakkın üzerindeki kanıtlar bir sıfırlama uydurmaz ve geçmişi sıkıştırmaz. `requestPacing: { "enabled": false }` veya `retryOn429: { "respectRetryAfter": false }` paylaşılan hız ayarlamasını kapatır. Aynı anahtarla yeniden oynatmada, Mistral'ın yeniden deneme süresi `retryOn429.maxIntervalMs` değerini aşarsa proxy erken yeniden oynatmak yerine 429'u ve yeniden deneme ipucunu döndürür. Döngüsel (round-robin) anahtar seçimi etkinse bekleyen istekler anahtar soğuma sürelerini yeniden denetler ve yedek anahtar için hız kapasitesi alır; çıktıdan önceki bir anahtar reddi, isteğin mevcut gönderim sınırı içinde sağlıklı bir anahtarla kurtarılabilir. Bağlam pencereleri ve model başına sıkıştırma tercihleri bağımsız kalır.
 
 ## 1. ChatGPT girişi (iletme / doğrudan geçiş)
 
@@ -125,6 +126,7 @@ ocx login google-antigravity
 ocx login cursor       # bağımsız Cursor PKCE girişi
 ocx login command-code # Command Code tarayıcı OAuth (veya ~/.commandcode/auth.json içe aktarma)
 ocx login devin       # Cognition/Devin: önce Devin CLI kimliği içe aktarılır, yoksa Auth0 tarayıcı girişi
+ocx login dsh-account # DeepSeek Harness Desktop (~/.dsh/.credentials.yaml yetkisi içe aktarılır)
 ocx login github-copilot  # GitHub cihaz akışı → Copilot belirteci (Copilot Pro/Business)
 ocx login codex        # Codex hesap havuzu (takma adlar: chatgpt, openai; çalışan bir proxy gerekir)
 ocx logout <saglayici>
@@ -141,6 +143,7 @@ ocx logout <saglayici>
 | `google-antigravity` | `google` | `https://daily-cloudcode-pa.googleapis.com` | Cloud Code Assist hattı üzerinden Google OAuth. Canlı keşif CCA'nın kimlik doğrulamalı `v1internal:fetchAvailableModels` uç noktasını kullanır ve oturum açmış hesap için kullanılabilir olan ajan modellerini yayınlar; sürdürülen katalog geri dönüş olarak kalır. |
 | `cursor` | `cursor` | `https://api2.cursor.sh` | Deneysel PKCE girişi, canlı HTTP/2 aktarımı ve hesap filtreli model keşfi. |
 | `devin` | `devin` | `https://server.codeium.com` | Deneysel, resmi olmayan Cognition/Devin köprüsü. Giriş önce kurulu Devin CLI'nin zaten tuttuğu kimlik bilgisini içe aktarır (`devin auth login`, `devin-session-token`'ı kendi `credentials.toml` dosyasına yazar); yoksa tarayıcıda Auth0 oturumunu açar ve yapıştırılan belirteci `RegisterUser` ile uzun ömürlü bir API anahtarına dönüştürür. `ocx login devin-cli` kullanımdan kaldırılmış bir takma ad olarak çalışmaya devam eder. Modeller hesaba göre `GetCascadeModelConfigs` ile keşfedilir; akış yalnızca Connect-RPC üzerindeki `runTurn` yolunu kullanır. Panel ön ayarında varsayılan olarak yer almaz. |
+| `dsh-account` | `dsh-account` | `https://api.deepseek.com/anthropic` | Kurulu ve oturum açılmış DeepSeek Harness (DSH) Desktop hesabını yeniden kullanan deneysel, içe aktarma öncelikli hesap sağlayıcısı. Açık içe aktarma sırasında `~/.dsh/.credentials.yaml` dosyasından kesinlikle salt okunur kimlik bilgilerini okur. DeepSeek API anahtarı faturalandırmasından bağımsızdır. |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | Deneysel. GitHub cihaz akışı + `copilot_internal` değişimi (VS Code OAuth istemcisi). Aktif bir Copilot aboneliği gerektirir; resmi bir üçüncü taraf API değildir. |
 
 Google Antigravity hesap ve sağlayıcı kota sorguları, model listesine geri dönüş dahil sabit Google uç noktalarını kullanır. Bu hedefler için şeffaf Fake-IP DNS desteklenirken TLS doğrulaması, yönlendirme reddi ve özel adres kontrolleri korunur. Özel base URL yalnızca model isteklerini değiştirir; `NO_PROXY` doğrudan bağlantı politikasını korur.
@@ -193,8 +196,7 @@ sağlayıcıları birden fazla oturum tutabilir. Sağlayıcılar sayfası bu hes
 bir açılır menüde gösterir, başka bir tane eklemenize izin verir ve diğerlerinin
 oturumunu kapatmadan etkin hesabı değiştirir. Normal oturum açmada kimliği olmayan
 Kimi kimlik bilgileri etkin yuvanın yerini alır; açık **Hesap ekle** akışı mevcut
-yuvayı korur ve ayrı yeni yuvayı etkinleştirir. Kiro hesapları profil ARN'sine göre
-anahtarlanır. `chatgpt` her zaman tek yuvalıdır çünkü Codex havuz hesaplarının
+yuvayı korur ve ayrı yeni yuvayı etkinleştirir. Kiro hesapları, varsa oturum açan kullanıcının e-posta adresi ile profil ARN'si birlikte kullanılarak ayırt edilir; aynı kuruluş profilini paylaşan kullanıcılar ayrı kimlik bilgilerini koruyabilir. `chatgpt` her zaman tek yuvalıdır çünkü Codex havuz hesaplarının
 ayrı bir defteri vardır. Belirteçler `~/.opencodex/auth.json` içinde kalır;
 `/api/oauth/accounts` yalnızca maskelenmiş meta verileri döndürür.
 
@@ -277,6 +279,8 @@ referansında [`ocx status` / `ocx doctor`](/tr/reference/cli/) bölümüne bak�
 
 ### Kiro kimlik bilgisi içe aktarma
 
+Panelde **AWS IAM Identity Center** seçeneğini seçip kuruluşunuzun AWS erişim portalı URL’sini ve SSO bölgesini girin. Tarayıcıda cihaz kodunu onaylayın ve birden fazla Kiro profili varsa kaydedilecek profili seçin. CLI veya SSH gerekmez. Aşağıdaki CLI adımları **Kiro CLI** seçeneği içindir.
+
 Kiro oturum açma Kiro CLI'yı bekler: Unix'te `curl -fsSL
 https://cli.kiro.dev/install | bash` ile kurun; Windows PowerShell'de `irm
 'https://cli.kiro.dev/install.ps1' | iex` kullanın; ardından `kiro-cli login`
@@ -325,9 +329,20 @@ altındaki okunamayan veritabanını onarın veya kaldırın, bu içe aktarma
 seçicilerini kaldırın ve ardından yeniden deneyin. Mevcut bir `kiro-cli` oturumu
 olmayan bir makineden oturum açmak bundan etkilenmez.
 
+### DeepSeek Account (DSH)
+
+`dsh-account`, kurulu bir DeepSeek Harness (DSH) Desktop uygulamasının kimliği doğrulanmış hesap bilgilerini yeniden kullanmak üzere tasarlanmış deneysel, içe aktarma öncelikli bir hesap sağlayıcısıdır.
+
+- **DeepSeek API Anahtarından Bağımsız:** `dsh-account`, kullanıcının kimliği doğrulanmış DeepSeek oturum kotasını (normal/bonus cüzdan bakiyeleri ve toplam harcama) kullanırken, `deepseek` sağlayıcısı platform API anahtarı bakiyesinden ücretlendirilir. Bu iki kimlik bilgisi alanı ve yönlendirmesi kesinlikle ayrıdır ve birbirine asla geri dönüş yapmaz.
+- **Yalnızca Açık İçe Aktarma:** OpenCodeX, DeepSeek Harness'in kurulu ve oturum açılmış olup olmadığını (`~/.dsh/.credentials.yaml`) algılar, ancak kullanıcının açık bir komutu (`ocx login dsh-account` veya Web Panelinde İçe Aktar'a tıklama) olmadan belirteci asla otomatik olarak kopyalamaz, içe aktarmaz veya kullanmaz.
+- **Salt Okunur DSH Kimlik Deposu:** OpenCodeX, `~/.dsh/.credentials.yaml` dosyasına kesinlikle salt okunur olarak yaklaşır. OpenCodeX, DeepSeek Harness'e ait hiçbir dosyayı asla yazmaz, değiştirmez, silmez veya dosya izinlerini değiştirmez.
+- **Yalıtılmış Kimlik Bilgisi Kopyası ve Oturumu Kapatma:** İçe aktarma sırasında OpenCodeX, belirteci DeepSeek'in yetkili kimlik uç noktasında (`/auth-api/v0/users/current`) doğrular ve kendi kopyasını OpenCodeX kimlik deposuna kaydeder. OpenCodeX'te oturumu kapatmak veya hesabı kaldırmak yalnızca OpenCodeX'in yerel kopyasını siler; yukarı akış uzak oturum kapatmayı asla tetiklemez ve DeepSeek Harness Desktop oturumunuzu kapatmaz.
+- **Arka Planda Belirteç Döndürme Yok ve 401 Durumunda Yeniden İçe Aktarma:** DSH oturum yetkileri otomatik bir arka plan yenileme uç noktasına sahip değildir. Yukarı akış HTTP 401 (`ACCOUNT_TOKEN_INVALID`) döndürürse OpenCodeX hesabı `needsReauth` olarak işaretler ve yönlendirmeyi durdurur. Erişimi geri yüklemek için kullanıcı `ocx login dsh-account` ile açıkça yeniden içe aktarmalıdır.
+- **Üçüncü Taraf Sorumluluk Reddi:** OpenCodeX, oturum yetkilerini yeniden kullanan üçüncü taraf istemciler için DeepSeek tarafından herhangi bir resmi onay veya yetkilendirme iddiasında bulunmaz.
+
 ## 3. API anahtarı kataloğu
 
-opencodex 104 yerleşik önayar ile birlikte gelir: 85 anahtar tabanlı, 15
+opencodex 106 yerleşik önayar ile birlikte gelir: 85 anahtar tabanlı, 17
 OAuth, üç yerel ve bir varsayılan ChatGPT iletme önayarı. Kontrol panelinin
 **Sağlayıcı ekle** seçicisi bir anahtar sağlayıcısının kontrol panelini açar,
 anahtarı doğrular ve saklar; doğrulama sağlayıcıya özgüdür. Dikkate değer
@@ -383,13 +398,13 @@ yalnızca Cline IDE/CLI içinde mevcuttur; `minimax/minimax-m2.5` belgelenmiş A
 | Novita AI | `https://api.novita.ai/openai/v1` |
 | Together | `https://api.together.xyz/v1` |
 | Fireworks | `https://api.fireworks.ai/inference/v1` |
-| Moonshot (Kimi API) · Kimi (kodlama) | `https://api.moonshot.ai/v1` · `https://api.kimi.com/coding/v1` |
+| Moonshot (Kimi API) · Kimi (kodlama) | `https://api.moonshot.ai/v1` · `https://api.kimi.com/coding/v1`. `moonshot` API varsayılanı `kimi-k3.1-pro` modelidir; resmî API adresleri için kaydedilmiş `kimi-k2.5` seçimleri bu modele taşınır. |
 | Hugging Face | `https://router.huggingface.co/v1` |
 | NVIDIA NIM | `https://integrate.api.nvidia.com/v1` |
 | Z.AI (GLM Kodlama) | `https://api.z.ai/api/coding/paas/v4` |
 | Zhipu AI (BigModel) | `https://open.bigmodel.cn/api/paas/v4` |
 | [BigModel Coding Plan — Responses (statik model listesi)](/guides/providers/#bigmodel-coding-plan-over-responses) | `https://open.bigmodel.cn/api/v1` |
-| Qwen Cloud | Token planı (varsayılan): `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` · Kullandıkça öde: `https://dashscope.aliyuncs.com/compatible-mode/v1` · veya Özel |
+| Qwen Cloud | Token planı (varsayılan): `https://token-plan.maas.qwencloudapi.com/compatible-mode/v1` · Kullandıkça öde: `https://dashscope.aliyuncs.com/compatible-mode/v1` · veya Özel |
 | Tencent Cloud Coding Plan | `https://api.lkeap.cloud.tencent.com/coding/v3` |
 | SiliconFlow | `https://api.siliconflow.cn/v1` |
 | Volcengine Ark · Coding Plan · Agent Plan | `https://ark.cn-beijing.volces.com/api/v3` · `https://ark.cn-beijing.volces.com/api/coding/v3` · `https://ark.cn-beijing.volces.com/api/plan/v3` |
@@ -409,36 +424,20 @@ yeniler ve etkin Chat Completions modellerini (ve yalnızca Responses ile sunulu
 [OpenGateway panelinde](https://opengateway.ai/api-keys) bir anahtar oluşturun, ardından
 `ocx provider add opengateway` çalıştırın veya panelde **OpenGateway** seçin. Chat istekleri
 yapılandırılmış Bearer anahtarını kullanır; genel model listesi anahtarı doğrulamaz.
+Responses protokolünde OpenGateway, yeniden oynatılan yerel özel araç çağrılarını reddeder; bu nedenle ön ayar, kod modundaki `exec` gibi Codex özel araçlarını göndermeden önce işlev araçlarına dönüştürür.
+Araç sonucu içerik dizileri metin olarak gönderilir; görseller eşleşen araç sonucu grubundan sonra korunur. Ret yanıtları ve opak içerik dahil desteklenmeyen sonuç parçaları, gönderimden önce açık bir istemci girdi hatasıyla reddedilir.
+`original` görsel ayrıntısı, ağ geçidinin kabul ettiği `high` değerine eşlenir; görsel baytları değişmez.
+Yerel Responses yolu, yalnızca metin içeren boş tamamlamaları başarı olarak sunmadan önce de denetler.
+Tükenen çıktı bütçeleri `max_output_tokens` ile `incomplete` üretir; proxy istenen bütçeyi artırmaz. Bütçesi kalan ve güvenle yeniden oynatılabilen boş bir tamamlama, mevcut gönderim sınırı içinde bir kez yeniden denenebilir. Açık `emptyCompletionRetry: false` veya `OCX_EMPTY_COMPLETION_RETRY=0` bu yeniden denemeyi kapatır. Metin, ret yanıtları, araç etkinliği ve bilinmeyen akış olayları yeniden oynatmayı engeller ve özgün akışı korur. Bu koruma diğer sağlayıcıları ve onların yeniden deneme varsayılanlarını değiştirmez.
+Yeniden oynatma açık `store: false`, eksiksiz girdi ve yalnızca istemcide çalışan araçlar gerektirir; `web_search` gibi barındırılan bir araç, hiçbir araç olayı gözlenmemiş olsa bile otomatik yeniden oynatmayı engeller.
 
-**OpenCode Zen** (`opencode-zen`) ve anahtarsız **OpenCode Free** önayarı
-`https://opencode.ai/zen/v1` adresini paylaşır. Bu ağ geçidindeki ücretsiz
-modeller genellikle yaklaşık 15–20 istek/dakika civarında kısa pencereli bir
-patlama sınırına ulaşır (topluluk tarafından ölçülmüştür; OpenCode RPM
-yayınlamaz). Zen, `Retry-After` / `X-RateLimit-*` başlıkları olmadan genel hız
-sınırı 429 yanıtları döndürebilir. Bu, OpenCode'un tanıttığı anahtarsız masaüstü
-kotasından ayrıdır (`opencode-free` üzerinde 5 saatte yaklaşık 200 Big
-Pickle/ücretsiz model isteği). Zen böyle bir 429'da `Retry-After`'ı atladığında
-opencodex istemci hatasına sağlayıcı rehberliği ve sentetik bir `Retry-After`
-ekler; bir yukarı akış `Retry-After`'ı yine de önceliklidir. Aynı anahtarla
-bekle ve yeniden dene özelliği [`retryOn429`](/tr/reference/configuration/)
-aracılığıyla isteğe bağlı kalır.
+**OpenCode Zen** (`opencode-zen`), [opencode.ai/auth](https://opencode.ai/auth) üzerinden alınan API anahtarıyla `https://opencode.ai/zen/v1` kullanır. Ücretsiz modeller yaklaşık 15–20 istek/dakika kısa pencere sınırına takılabilir (topluluk ölçümü; OpenCode RPM yayımlamaz). Hız sınırı 429 yanıtında `Retry-After` yoksa opencodex açıklama ve sentetik `Retry-After` ekler; geçerli üst kaynak başlıkları önceliklidir. Aynı anahtarla yeniden deneme [`retryOn429`](/tr/reference/configuration/) ile isteğe bağlıdır.
 
-**Anahtarsız `opencode-free` katmanı şu anda üçüncü taraf istemcilere kapalıdır.** Zen,
-`x-opencode-session` başlığı olmadan gelen her isteği reddeder ve `MissingSessionID` hata
-tipiyle "OpenCode's free tier can only be used in OpenCode" mesajını döndürür. Kapıda
-yalnızca başlığın varlığı denetlenir; yani bir proxy uydurma bir değerle geçebilirdi,
-opencodex bunu yapmaz. Bir oturum kimliği ile sürüm taşıyan `opencode/<version>`
-User-Agent üretmek, kendini OpenCode istemcisi ilan etmek demektir ve OpenCode bu
-anahtarsız katman için üçüncü taraf entegrasyon sözleşmesi yayımlamamıştır; böyle elde
-edilen bir HTTP 200, izin değil atlatılmış bir kabul denetimidir. Bu yüzden opencodex
-kısıtlamayı aşmak yerine bildirir: `opencode-free` sağlayıcısına giden bir istek, yukarı
-akıştaki kapıyı açıklayan bir hata döndürür.
+Standart `opencode-zen` sağlayıcısının API anahtarıyla kimlik doğrulanan resmi `https://opencode.ai/zen/v1` ve `https://opencode.ai/inference/v1` yollarında Gemini, varsayılan `googleMode: ai-studio` modunda Google'ın yerel API'sini otomatik kullanır. Zen model kimlikleri, `-tiered` eki olmayan Flash kimlikleri dahil korunur. Claude, `googleMode` değerinden bağımsız olarak Anthropic Messages kullanır. Kaydedilmiş yapılandırmalar yüklenirken yalnızca bu yerel modellerin uygun eski Chat/Responses geçersiz kılmaları ve uygun, yalnızca Responses'a özgü `image_generation` barındırılan araç tercihleri yok sayılır. Özel sağlayıcılar, anahtar kimlik doğrulaması kullanmayan yollar ve diğer tercihler değişmez.
 
-Aynı modellere giden desteklenen yol, [opencode.ai/auth](https://opencode.ai/auth)
-üzerinden alınan bir OpenCode Zen API anahtarıyla kullanılan anahtarlı
-**`opencode-zen`** sağlayıcısıdır. OpenCode ileride anahtarsız katman için desteklenen
-bir üçüncü taraf yolu yayımlarsa opencodex bunu izleyebilir; o zamana kadar önayar
-kısıtlamayı belgeler. Yukarı akış koşulları: [opencode.ai/docs/zen](https://opencode.ai/docs/zen/).
+**`opencode-free` desteği kaldırıldı**: OpenCode’un üst kaynak ücretsiz katman kapısı nedeniyle tüm modeller artık `403 permission_denied` döndürüyor ([#7255](https://github.com/lidge-jun/opencodex/issues/7255)). Mevcut yapılandırma yüklenirken ilgili kayıtlar ve bağımlı model referansları bellekte devre dışı bırakılır, işlem başına bir kez uyarılır ve yükleme sırasında dosya değiştirilmez. Bir sonraki yapılandırma kaydı bu girdileri ve referansları config.json dosyasından kaldırır. Kayıttan önce özgün dosya aynı dizinde `config.json.pre-opencode-free-removal.bak` adıyla otomatik olarak korunur; bu ad kullanılıyorsa benzersiz bir kardeş dosya adı kullanılır. Baytları aynı olan bağımsız bir kopya, yalnızca erişimin sahibine özel olduğu doğrulanabiliyorsa yeniden kullanılır; aksi halde yanına yeni ve korumalı bir kopya yazılır. Mevcut dosyaların üzerine yazılmaz. İlk yüklemeler çakışırsa birden fazla aynı ve korumalı kopya kalabilir ve uyarıda kurtarma kopyasının yolu gösterilir. Geri yüklemek için, örneğin eski sürüme döndükten sonra, bu kopyayı config.json dosyasının üzerine kopyalayın. Kopyalama başarısız olursa uyarı config.json dosyasını hemen kopyalamanızı ister. Varsayılan sağlayıcı buysa standart OpenAI OAuth yolu varsayılan olur. `opencode-go`, anahtarlı `opencode-zen` veya başka bir sağlayıcı kullanın. [OpenCode Zen koşulları](https://opencode.ai/docs/zen/). Pasif okumalar yalnızca bellekte devre dışı bırakır; kopya oluşturmaz veya uyarı vermez.
+
+Geçerli Claude Desktop atamaları ve varsayılanları korunur. Kaynak model izin listesi boşalan kurallar devre dışı bırakılır; enjeksiyon modeli kaldırılırsa yerel alt ajan eşitlemesi de kapatılır. Sonraki yapılandırma kayıtları budanan referansları geri getirmez ve geçerli eşzamanlı düzenlemeleri korur.
 
 Çoğu, taşıyıcı anahtarla `openai-chat` adaptörünü kullanır; **Xiaomi MiMo** (`xiaomi`)
 gibi Anthropic uyumlu önayarlar `anthropic` adaptörünü (`x-api-key`) kullanır.
@@ -667,6 +666,9 @@ tohumlanmıştır:
 | Codex girişi (Pool veya Direct) | `gpt-5.6-*` | 922.000 |
 | OpenAI (API anahtarı) | `openai-apikey/gpt-5.6-*` artı `*-pro` | 922.000 (922.000 maksimum girdi) |
 | OpenRouter | `openrouter/openai/gpt-5.6-sol`, `openrouter/openai/gpt-5.6-terra`, `openrouter/openai/gpt-5.6-luna` | 922.000 |
+| Codex | `gpt-6.1-terra` | 500,000 / 872,000 |
+| OpenAI API | `openai-apikey/gpt-6.1-terra` | 1,050,000 (128,000 max output) |
+| OpenRouter | `openrouter/openai/gpt-6.1-terra` | 1,050,000 |
 | Cursor | `cursor/gpt-5.6-sol`, `cursor/gpt-5.6-terra`, `cursor/gpt-5.6-luna` | 1.000.000 |
 
 Yerel GPT-5.6 girdileri sabitlenmiş yukarı akış akıl yürütme merdivenlerini
@@ -690,7 +692,7 @@ anahtar/abonelik belirteci ağ geçidi olarak kalır. **Cloudflare AI Gateway**,
 URL'ye doldurulan hesap + ağ geçidi kimliklerinize ihtiyaç duyar.
 
 Copilot karma hatlı bir katalog sunar: modeller (`gpt-5.3-codex`, `gpt-5.4`,
-`gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-6-astra`, `grok-4.5`, `grok-4.6`, `mai-code-1.1-flash`, `mai-code-1-flash-picker`) ajan
+`gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, `grok-4.5`, `grok-4.6`, `mai-code-1.1-flash`, `mai-code-1-flash-picker`) ajan
 trafiği için `/chat/completions`'ı reddeder, bu nedenle opencodex yerleşik
 varsayılan olarak bu modelleri Responses API üzerinden yönlendirirken diğer tüm
 Copilot modelleri sohbet tamamlamalarında kalır. Öncelik sırası: sabit hat
@@ -779,5 +781,5 @@ gösterir.
 
 Canlı araştırmaya sahip sağlayıcılar: OpenAI/Codex, Anthropic, xAI, Cursor,
 Kimi, Google Antigravity, OpenRouter, DeepSeek, ClinePass, Z.AI, MiniMax,
-Moonshot, Venice, Synthetic, DeepInfra, Neuralwatt ve a6api destekli herhangi
-bir özel sağlayıcı.
+Moonshot, Venice, Synthetic, DeepInfra, Neuralwatt ve a6api ya da Abliteration
+destekli herhangi bir özel sağlayıcı.

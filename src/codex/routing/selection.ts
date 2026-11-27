@@ -1,7 +1,8 @@
 import { getEffectiveCodexAutoSwitchThreshold } from "../account-auto-switch";
 import { codexAccountUsesCreditsAfterLimit, isCodexAccountHeldForCredits } from "../account-credit-use";
 import { isCodexAccountPaused } from "../account-pause";
-import { codexAccountPriorityLookup, pinnedCodexAccountId } from "../account-priority";
+import { pinnedCodexAccountId } from "../account-priority";
+import { codexSelectionPriorityLookup } from "../account-preservation";
 import { isSelectableCodexPoolAccount } from "../account-id";
 import { isAccountNeedsReauth } from "../account-runtime-state";
 import { isCodexAccountUsable, type CodexAccountUsabilityOptions } from "../account-usability";
@@ -38,6 +39,7 @@ import {
   promoteActiveCodexAccount,
   rememberActiveCodexAccount,
   setActiveCodexAccount,
+  unspentManualPreference,
 } from "./active-account";
 
 /**
@@ -248,7 +250,7 @@ export function getEligiblePoolAccounts(
   const pinned = pinnedCodexAccountId(config);
   return selectPriorityTier(
     withoutModelDeniedAccounts(ids, selectionOptions?.deniedModelAccountIds, pinned),
-    codexAccountPriorityLookup(config),
+    codexSelectionPriorityLookup(config),
     id => hasCodexQuotaHeadroom(config, id, selectionOptions, now),
     pinned,
   );
@@ -299,6 +301,38 @@ export function hasCodexQuotaHeadroom(
   );
   if (isUnknownUsage(usage)) return true;
   return usage < threshold;
+}
+
+/**
+ * Where round-robin may place a NEW conversation: the eligible accounts that still have headroom
+ * under their own threshold, or the whole eligible list when none does.
+ *
+ * Rotation by count alone put a fresh conversation on an account already at 95%. The conversation
+ * binds there, and when the account runs out it has to move to another account with a cold prompt
+ * cache. Preferring headroom at placement avoids that hop without touching anything already bound:
+ * live bindings never reach this function, and failover ({@link pickAlternateCodexAccount}) keeps
+ * plain ring order because leaving a failing account is not a placement.
+ *
+ * The score is {@link hasCodexQuotaHeadroom}, the one fill-first and the priority tier already use,
+ * so a threshold of 0 or unknown usage counts as headroom. It is a preference, never eligibility:
+ * when every account is at or over its threshold the ring sees the full list, exactly as before.
+ *
+ * An operator's unspent manual selection for this scope stays in the list whatever its usage.
+ * Manual selection seeds the ring so the next placement lands on the chosen account, and a
+ * preference must not overrule a person's explicit choice: dropping it here would clear that seed.
+ * Once a dispatch on it succeeds the selection is spent and the account is treated like any other.
+ */
+function roundRobinPlacementCandidates(
+  config: OcxConfig,
+  eligible: readonly string[],
+  now: number,
+  quotaScope?: CodexQuotaScope,
+  selectionOptions?: CodexAccountUsabilityOptions,
+): readonly string[] {
+  const operatorChoice = unspentManualPreference(codexPoolKeyForScope(quotaScope));
+  const withHeadroom = eligible.filter(id =>
+    id === operatorChoice || hasCodexQuotaHeadroom(config, id, selectionOptions, now));
+  return withHeadroom.length > 0 ? withHeadroom : eligible;
 }
 
 /**
@@ -474,7 +508,13 @@ export function pickUnboundStrategyAccount(
 
   let picked: string | null = null;
   if (strategy === "round-robin") {
-    const eligible = listEligibleCodexAccountIds(config, now, quotaScope, selectionOptions);
+    const eligible = roundRobinPlacementCandidates(
+      config,
+      listEligibleCodexAccountIds(config, now, quotaScope, selectionOptions),
+      now,
+      quotaScope,
+      selectionOptions,
+    );
     const limit = stickyLimitForConfig(config);
     if (!commit) {
       return peekRoundRobinAccount(poolKey, eligible, limit);
@@ -767,7 +807,7 @@ export function pickPriorityPreemption(
     && eligible.includes(pinned)
     && hasCodexQuotaHeadroom(config, pinned, selectionOptions, now)
   ) return null;
-  const priorityOf = codexAccountPriorityLookup(config);
+  const priorityOf = codexSelectionPriorityLookup(config);
   if (priorityOf(eligible[0]!) <= priorityOf(active)) return null;
   // Members without headroom are in the tier only because a sibling has some;
   // picking one would hand the request straight back to a drained account.

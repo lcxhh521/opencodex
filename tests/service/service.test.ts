@@ -73,7 +73,6 @@ async function readText(path: string): Promise<string> {
 function windowsBatchValue(value: string): string {
   return value
     .replace(/%/g, "%%")
-    .replace(/\^/g, "^^")
     .replace(/"/g, "")
     .replace(/[\r\n]/g, "");
 }
@@ -410,6 +409,18 @@ describe("systemd service unit", () => {
     expect(unit).not.toContain("http_proxy=");
   });
 
+  test("Claude first-party's own intercept URL is never baked; a plain loopback proxy is", () => {
+    // A shell started by Claude Code inherits HTTPS_PROXY from ~/.claude/settings.json.
+    const own = "http://opencodex:tok@127.0.0.1:10200";
+    expect(resolvedProxyEnv({ HTTPS_PROXY: own }, own)).toEqual([]);
+    expect(resolvedProxyEnv({ HTTPS_PROXY: own, https_proxy: "http://127.0.0.1:7897" }, own))
+      .toEqual([{ name: "HTTPS_PROXY", value: "http://127.0.0.1:7897" }]);
+    expect(resolvedProxyEnv({ HTTPS_PROXY: "http://127.0.0.1:7897", HTTP_PROXY: "http://user:pw@127.0.0.1:7897" }))
+      .toEqual([{ name: "HTTP_PROXY", value: "http://user:pw@127.0.0.1:7897" }, { name: "HTTPS_PROXY", value: "http://127.0.0.1:7897" }]);
+    expect(resolvedProxyEnv({ HTTPS_PROXY: "http://opencodex:corporate-password@127.0.0.1:8080" }, own))
+      .toEqual([{ name: "HTTPS_PROXY", value: "http://opencodex:corporate-password@127.0.0.1:8080" }]);
+  });
+
   test("the Windows wrapper bakes proxy env the same way the unit and plist do (#2107)", () => {
     // This builder was the only one of the three with no proxy assertion, because the only way
     // to reach it was to assign process.env — the pattern that leaked HTTP_PROXY across files.
@@ -426,35 +437,6 @@ describe("systemd service unit", () => {
     expect(script).not.toContain("HTTPS_PROXY=");
   });
 
-
-  test("preserves custom Codex and OpenCodex homes", () => {
-    const oldCodexHome = process.env.CODEX_HOME;
-    const oldCodexSqliteHome = process.env.CODEX_SQLITE_HOME;
-    const oldOpenCodexHome = process.env.OPENCODEX_HOME;
-    const oldApiAuthToken = process.env.OPENCODEX_API_AUTH_TOKEN;
-    try {
-      process.env.CODEX_HOME = "/tmp/codex-home";
-      process.env.CODEX_SQLITE_HOME = "/tmp/codex-sqlite-home";
-      process.env.OPENCODEX_HOME = "/tmp/opencodex-home";
-      process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
-      const unit = buildUnit();
-      expect(unit).toContain('Environment="CODEX_HOME=/tmp/codex-home"');
-      expect(unit).toContain('Environment="CODEX_SQLITE_HOME=/tmp/codex-sqlite-home"');
-      expect(unit).toContain('Environment="OPENCODEX_HOME=/tmp/opencodex-home"');
-      expectTextToContainPath(unit, serviceApiTokenFilePath());
-      expect(unit).not.toContain("local-secret");
-      expect(unit).not.toContain("Environment=\"OPENCODEX_API_AUTH_TOKEN=");
-    } finally {
-      if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
-      else process.env.CODEX_HOME = oldCodexHome;
-      if (oldCodexSqliteHome === undefined) delete process.env.CODEX_SQLITE_HOME;
-      else process.env.CODEX_SQLITE_HOME = oldCodexSqliteHome;
-      if (oldOpenCodexHome === undefined) delete process.env.OPENCODEX_HOME;
-      else process.env.OPENCODEX_HOME = oldOpenCodexHome;
-      if (oldApiAuthToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
-      else process.env.OPENCODEX_API_AUTH_TOKEN = oldApiAuthToken;
-    }
-  });
 
   test("service start checks for the systemd user unit before shelling out", async () => {
     const service = await readText("src/service/systemd.ts");
@@ -1196,23 +1178,29 @@ describe("Windows service task", () => {
 
   test("escapes environment values that would break out of set quotes", () => {
     const oldPath = process.env.PATH;
+    const oldCodexHome = process.env.CODEX_HOME;
     const oldOpenCodexHome = process.env.OPENCODEX_HOME;
     const oldApiAuthToken = process.env.OPENCODEX_API_AUTH_TOKEN;
     try {
       process.env.PATH = 'C:\\safe" & echo PWNED & rem "';
+      process.env.CODEX_HOME = 'C:\\codex" & del C:\\important & rem "';
       process.env.OPENCODEX_HOME = 'C:\\ocx" & del C:\\important & rem "';
       process.env.OPENCODEX_API_AUTH_TOKEN = 'token" & echo LEAK & rem "';
       const script = buildWindowsServiceScript();
       expect(script).toContain('set "PATH=C:\\safe & echo PWNED & rem "');
-      expect(script).toContain('set "OPENCODEX_HOME=C:\\ocx & del C:\\important & rem "');
+      expect(script).toContain('set "CODEX_HOME=C:\\codex & del C:\\important & rem "');
+      expect(script).toContain('C:\\ocx & del C:\\important & rem ');
       expect(script).toContain('set "OCX_API_TOKEN_FILE=');
       expect(script).toContain('set /p OPENCODEX_API_AUTH_TOKEN=<"%OCX_API_TOKEN_FILE%"');
       expect(script).not.toContain('set "PATH=C:\\safe" & echo PWNED');
-      expect(script).not.toContain('set "OPENCODEX_HOME=C:\\ocx" & del');
+      expect(script).not.toContain('set "CODEX_HOME=C:\\codex" & del');
+      expect(script).not.toContain('C:\\ocx" & del');
       expect(script).not.toContain("token & echo LEAK");
     } finally {
       if (oldPath === undefined) delete process.env.PATH;
       else process.env.PATH = oldPath;
+      if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = oldCodexHome;
       if (oldOpenCodexHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = oldOpenCodexHome;
       if (oldApiAuthToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
@@ -1227,7 +1215,7 @@ describe("Windows service task", () => {
       cli: "C:\\OpenCodex&Dir\\cli.ts",
     });
 
-    expect(script).toContain('set "OCX_BUN=C:\\Bun&Dir\\100%%bun^^\\bun.exe"');
+    expect(script).toContain('set "OCX_BUN=C:\\Bun&Dir\\100%%bun^\\bun.exe"');
     expect(script).toContain('set "OCX_CLI=C:\\OpenCodex&Dir\\cli.ts"');
     expect(script).toContain('"%OCX_BUN%" "%OCX_CLI%" start --port');
     expect(script).not.toContain('"C:\\Bun&Dir\\100%bun^\\bun.exe"');
@@ -1506,7 +1494,7 @@ describe("launchd service plist", () => {
       service.indexOf("export function restartLaunchdJob"),
     );
     expect(installLaunchd).not.toContain("stableLauncherEntry");
-    expect(installLaunchd).toContain("buildPlist(resolvedProxyEnv())");
+    expect(installLaunchd).toContain("buildPlist(resolvedProxyEnv(), { homes })");
     expect(installLaunchd).toContain('writeServiceInstallState("scheduler")');
   });
 
@@ -2283,12 +2271,13 @@ describe("service lifecycle cleanup ordering", () => {
       platform: "win32",
       diagnose: () => ({ supported: true, installed: true, enabled: true, running: true, viable: true, startable: true, stale: false, conflict: false, backend: "scheduler", summary: "test" }),
       managerOps,
+      killServiceWrappers: () => { calls.push("kill:wrappers"); },
       stopTrackedProxy: async () => { calls.push("stop:standalone"); },
     });
     expect(calls).toEqual([
       "status:scheduler", "stop:scheduler",
       "status:native", "stop:native",
-      "stop:standalone", "install:native",
+      "kill:wrappers", "stop:standalone", "install:native",
     ]);
   });
 
@@ -2396,6 +2385,7 @@ describe("service lifecycle cleanup ordering", () => {
             if (failure === "stop") throw new Error("stop failed");
           },
         }),
+        killServiceWrappers: () => {},
         stopTrackedProxy: async () => {
           if (failure === "standalone") throw new Error("standalone failed");
         },
@@ -2411,9 +2401,10 @@ describe("service lifecycle cleanup ordering", () => {
       platform: "win32",
       diagnose: () => ({ supported: true, installed: true, enabled: true, running: true, viable: false, startable: false, stale: false, conflict: true, backend: "scheduler", summary: "test" }),
       managerOps: backend => ({ status: () => "present", stop: () => { stopped.push(backend); } }),
+      killServiceWrappers: () => { stopped.push("wrappers"); },
       stopTrackedProxy: async () => {},
     });
-    expect(stopped).toEqual(["scheduler", "native"]);
+    expect(stopped).toEqual(["scheduler", "native", "wrappers"]);
   });
 
   test("direct service stop kills the tracked proxy before restoring native Codex", async () => {

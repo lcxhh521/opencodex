@@ -1,9 +1,11 @@
 import { formatErrorResponse } from "../bridge";
+import type { CodexAuthContext } from "../codex/auth-context";
 import type { AdmissionLease } from "../lib/admission";
 import type { OcxConfig } from "../types";
 import type { AudioClient } from "./audio-client";
 import { resolveAudioUpstream, TRANSCRIPTION_MODEL, type AudioUpstream } from "./audio-upstream";
 import type { RequestLogContext } from "./request-log";
+import { authorizationCredential } from "../lib/authorization-scheme";
 
 export const DICTATION_SESSION_MAX_MS = 300_000;
 const DICTATION_FRAME_MAX_BYTES = 64 * 1024;
@@ -46,6 +48,7 @@ export function createDictationFrameValidator(): (frame: string | Buffer) => boo
 }
 
 export interface AudioSocketTarget {
+  authContext?: CodexAuthContext;
   headers: Record<string, string>;
   upstreamWsUrl: string;
   protocols?: string[];
@@ -74,13 +77,14 @@ export async function resolveDictationSocket(
     return formatErrorResponse(400, "invalid_request_error", "Streaming dictation requires a connected ChatGPT account");
   }
   const headers = new Headers(relay.headers);
-  const token = headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
+  const token = authorizationCredential(headers);
   if (!token || /[\s,]/.test(token)) {
     relay.release();
     return formatErrorResponse(401, "authentication_error", "Dictation account authentication unavailable");
   }
   headers.delete("authorization");
   return {
+    authContext: relay.authContext,
     upstreamWsUrl: "wss://chatgpt.com/backend-api/dictation/stream",
     headers: Object.fromEntries(headers),
     protocols: ["chatgpt-dictation", `openai-bearer.${token}`, "codex-desktop"],

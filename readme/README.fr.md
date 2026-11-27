@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="../assets/banner.png" alt="opencodex — proxy universel de fournisseurs pour Codex, Claude Code, Claude Desktop et Grok Build" width="100%">
+  <img src="../assets/banner.png" alt="opencodex — une passerelle locale pour Codex, Claude Code, Claude Desktop, Grok Build et plus" width="100%">
 </p>
 
-<h3 align="center">make codex open!</h3>
-<p align="center"><b>Proxy universel de fournisseurs pour OpenAI Codex, Claude Code, Claude Desktop &amp; Grok Build</b><br>
-Deux commandes suffisent pour que chacun d'eux exécute le LLM de votre choix.</p>
+<h3 align="center">Une passerelle locale pour vos outils de programmation IA et vos modèles.</h3>
+<p align="center"><b>Utilisez les modèles de votre choix avec Codex, Claude Code, Claude Desktop et Grok Build,<br>et connectez OpenCode, Pi, Qoder, WorkBuddy, Kilo, Cline, T3 Code et d’autres outils grâce aux configurations gérées.</b><br>
+<a href="https://opencodex.me/fr/reference/client-support/">Voir tous les outils pris en charge →</a></p>
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="Suivre @claudeebum sur X"></a>
@@ -80,13 +80,7 @@ Sol pilote la session et appelle un sous-agent Kimi K3.
   <a href="../README.md">English</a> · <b>Français</b> · <a href="README.ko.md">한국어</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.ru.md">Русский</a> · <a href="README.ja.md">日本語</a> · <a href="README.tr.md">Türkçe</a> · 📖 <a href="https://opencodex.me/fr/"><b>Documentation complète →</b></a>
 </p>
 
-opencodex est un proxy local léger qui traduit l'API Responses de Codex vers le protocole utilisé
-par votre fournisseur — streaming, appels d'outils, jetons de raisonnement, images, dans les deux
-sens. Utilisez Claude, Gemini, Grok, GLM, DeepSeek, Kimi, Qwen, Ollama ou tout autre LLM avec Codex,
-Claude Code, Claude Desktop et Grok Build. Il peut également gérer un **groupe de comptes ChatGPT**
-pour l'authentification Codex : ajoutez des comptes, actualisez leurs quotas dans le tableau de bord
-et laissez les nouvelles sessions être automatiquement routées vers le compte opérationnel le moins utilisé,
-tandis que les fils existants restent associés au compte qui les a démarrés.
+opencodex est une passerelle locale légère entre vos outils de programmation et vos fournisseurs de modèles. Elle accepte les API Responses, Chat Completions et Anthropic Messages et traduit chaque requête pour votre fournisseur, en prenant en charge le streaming, les appels d’outils, le raisonnement et les images lorsque le client, le modèle et le fournisseur le permettent. Utilisez Claude, Gemini, Grok, GLM, DeepSeek, Kimi, Qwen, Ollama et d’autres fournisseurs avec Codex, Claude Code, Claude Desktop, Grok Build et les outils de la [page des clients pris en charge](https://opencodex.me/fr/reference/client-support/). Elle peut aussi gérer un **pool de comptes ChatGPT** pour l’authentification Codex : ajoutez des comptes et actualisez leurs quotas dans le tableau de bord ; les nouvelles sessions sont dirigées vers le compte sain le moins utilisé, tandis que les conversations existantes restent liées à leur compte initial.
 
 ## Démarrage rapide
 
@@ -104,6 +98,21 @@ fournisseurs (plus de 40 intégrés, ou n'importe quel point de terminaison comp
 choisissez les modèles, gérez les comptes. `ocx gui`
 rouvre le tableau de bord à tout moment.
 
+### Connectez votre outil
+
+Connectez l’outil que vous utilisez déjà :
+
+| Outil | Connexion |
+|---|---|
+| Codex | Activez le commutateur Codex sur la page **Connect** du tableau de bord, puis exécutez `codex` comme d’habitude. Sur une écoute locale, cela dirige le fournisseur intégré de Codex vers le proxy. Depuis le terminal, exécutez `ocx init` avant d’ajouter des fournisseurs dans le tableau de bord et acceptez son invite Codex. |
+| Claude Code | Avec le CLI `claude` installé, exécutez `ocx claude`. Il démarre le proxy si nécessaire et lance Claude Code à travers celui-ci. |
+| Claude Desktop | Exécutez `ocx claude desktop`. Lors d’une nouvelle installation, cette commande configure le profil de passerelle pour toute l’application ; une configuration first-party existante est conservée et `ocx claude desktop apply --gateway` permet de changer explicitement. Consultez le [guide Claude Code](https://opencodex.me/fr/guides/claude-code/). Quittez complètement puis rouvrez Claude Desktop après un changement. |
+| Grok Build | Sur une écoute locale avec l’intégration Grok activée, `ocx start` enregistre les modèles lorsque `~/.grok` existe ; choisissez un modèle `ocx-*` dans Grok Build. Pour une configuration distante, consultez le [guide Grok Build](https://opencodex.me/fr/guides/grok-build/). Après avoir ajouté des fournisseurs, redémarrez le proxy (ou lancez `ocx ensure` lorsque le démarrage automatique de Codex est activé) pour actualiser la liste. |
+| Outils avec intégration gérée | Utilisez la page **Connect** du tableau de bord ou `ocx integration client enable --client <id>`. |
+| Tout autre outil | Définissez l’URL de base compatible OpenAI `http://localhost:10100/v1` ou l’URL de base Anthropic `http://localhost:10100`. |
+
+La [page des clients pris en charge](https://opencodex.me/fr/reference/client-support/) indique la méthode de connexion et le protocole de chaque outil.
+
 <details>
 <summary><b>Application de bureau (bêta)</b></summary>
 
@@ -115,7 +124,7 @@ correspondant à votre plateforme sur la page de la [dernière version publiée]
 | Plateforme | Fichier | Remarques |
 |---|---|---|
 | macOS 13+ (Apple Silicon et Intel) | `OpenCodex-<version>-macos.dmg` | Compilation universelle, signée avec un identifiant Developer ID et notariée |
-| Windows (x64) | `OpenCodex-<version>-windows-x64.msi` | Pas encore signée numériquement : SmartScreen demande une confirmation, choisissez **Informations complémentaires → Exécuter quand même** |
+| Windows (x64) | `OpenCodex-<version>-windows-x64.msi` | Signature du code via SignPath Foundation en cours de déploiement ([politique de signature du code](https://opencodex.me/fr/reference/code-signing/)) ; tant qu’une version n’est pas signée, SmartScreen demande une confirmation : choisissez **Informations complémentaires → Exécuter quand même** |
 | Linux (x86_64) | `OpenCodex-<version>-linux-x86_64.AppImage` ou `-linux-amd64.deb` | La barre d'état nécessite un environnement de bureau compatible AppIndicator |
 
 Chaque fichier est accompagné d'un `.sha256` sur la page de la version. Sous macOS 14+, l'application embarque
@@ -478,6 +487,16 @@ Consultez le guide **[Contribuer](../CONTRIBUTING.md)**.
 Les contributions de contributeurs intégrées par un report ou une réimplémentation d'un mainteneur,
 lorsque le commit ne nomme pas l'auteur d'origine, sont consignées dans
 **[CREDITS.md](../CREDITS.md)**.
+
+## Politique de signature du code (Code signing policy)
+
+Les binaires Windows passent à la signature Authenticode ([#7207](https://github.com/lidge-jun/opencodex/issues/7207)). Le [guide de signature du code Windows](https://opencodex.me/fr/reference/code-signing/) décrit le déploiement, la vérification d’une signature et la politique complète.
+
+Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+
+- Committers and reviewers: [lidge-jun](https://github.com/lidge-jun)
+- Approvers: [lidge-jun](https://github.com/lidge-jun)
+- Privacy: This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
 
 ## Avis de non-responsabilité
 

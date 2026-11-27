@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
 /**
@@ -74,6 +74,8 @@ export function staticImports(source: string, tsx = false): string[] {
 }
 
 export function scanGraph(root: string, sourceRoot = SOURCE_ROOT): ImportGraph {
+  // Bun resolves imports to physical paths; graph keys must use the same root (e.g. /var on macOS).
+  root = realpathSync(root);
   const graph: ImportGraph = new Map();
   for (const abs of listSources(join(root, sourceRoot)).sort()) {
     const targets = new Set<string>();
@@ -176,4 +178,3 @@ if (import.meta.main) {
     for (const component of components) console.log(component.length + ": " + component.join(" "));
   }
 }
-

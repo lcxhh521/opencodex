@@ -62,6 +62,11 @@ export function resetAtToMs(resetAt: number): number {
   return resetAt < RESET_AT_SECONDS_MAX ? resetAt * 1000 : resetAt;
 }
 
+/** Only a valid reset at or before now proves a short-window reading has elapsed. */
+export function hasElapsedShortWindow(resetAt: number | undefined, now: number): boolean {
+  return typeof resetAt === "number" && Number.isFinite(resetAt) && resetAt > 0 && resetAtToMs(resetAt) <= now;
+}
+
 /**
  * A short-only reading that proves the account is blocked NOW.
  *
@@ -108,6 +113,9 @@ export type StoredAccountQuota = {
   resetCredits?: number;
   /** Spendable usage credits; resetCredits are separate, manually redeemed reset tickets. */
   credits?: CodexSpendableCredits | null;
+  /** Only with null: provider evidence was unavailable, not a proven spending veto.
+   * Affects retry advice only; legacy null remains conservative. */
+  creditObservationUnavailable?: true;
   /** Monthly usage came from an explicitly monthly PRIMARY, not supplementary tertiary, window. */
   monthlyIsPrimaryWindow?: boolean;
   updatedAt: number;

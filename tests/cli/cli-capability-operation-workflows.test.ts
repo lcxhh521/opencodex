@@ -11,6 +11,10 @@ import { handleCompanionCommand } from "../../src/cli/companion";
 import { handleConfigCommand } from "../../src/cli/config-command";
 import { planServiceCommand } from "../../src/service/cli";
 import type { RuntimeApiDeps } from "../../src/cli/runtime-api";
+import type { UsageCompareDeps } from "../../src/cli/usage-compare";
+import { createLocalAttestationProof, LOCAL_ATTESTATION_PROOF_HEADER } from "../../src/lib/local-management-attestation";
+import { LOCAL_MANAGEMENT_NONCE_HEADER } from "../../src/lib/local-management-capability";
+import { managementPrincipal, requireManagementAuth, type ManagementAuthState } from "../../src/server/management-auth";
 import { repoPath } from "../helpers/repo-root";
 
 const envKeys = ["HOME", "USERPROFILE", "OPENCODEX_HOME", "CODEX_HOME", "OPENCODEX_ADMIN_AUTH_TOKEN"] as const;
@@ -80,11 +84,55 @@ describe("operation capability workflows use existing handlers", () => {
     expect(await handleObserveCommand(["logs", "explain", "req/1", "--json"], explain.deps)).toBe(0);
     expect(explain.requests).toEqual([{ method: "GET", path: "/api/request-history/req%2F1/route-decision", body: null }]);
   });
+  test("logs history pages the index and get reads one canonical row", async () => {
+    const io = transport({ entries: [], hasMore: false, index: { indexedRows: 0 } });
+    expect(capability("logs history").routes).toEqual([{ method: "GET", path: "/api/request-history" }]);
+    expect(await handleObserveCommand(["logs", "history", "--provider", "xai", "--limit", "10", "--json"], io.deps)).toBe(0);
+    expect(io.requests).toEqual([{ method: "GET", path: "/api/request-history?provider=xai&limit=10", body: null }]);
+    const get = transport({ requestId: "req/1" });
+    expect(capability("logs get").routes).toEqual([{ method: "GET", path: "/api/request-history/{id}" }]);
+    expect(await handleObserveCommand(["logs", "get", "req/1", "--json"], get.deps)).toBe(0);
+    expect(get.requests).toEqual([{ method: "GET", path: "/api/request-history/req%2F1", body: null }]);
+  });
   test("usage keeps surface and custom bounds in the actual request", async () => {
     const io = transport({ customWindow: true, since: 1000, until: 2000 });
     expect(capability("observe usage").flags.map(flag => flag.name)).toContain("--surface");
     expect(await handleObserveCommand(["usage", "--range", "7d", "--surface", "claude", "--since", "1000", "--until", "2000", "--json"], io.deps)).toBe(0);
     expect(io.requests).toEqual([{ method: "GET", path: "/api/usage?range=7d&surface=claude&since=1000&until=2000", body: null }]);
+  });
+  test("usage compare reads current then previous equal windows", async () => {
+    expect(capability("usage compare").routes).toEqual([{ method: "GET", path: "/api/usage" }]);
+    const requests: string[] = [];
+    const runtime = { pid: 4242, port: 10100, hostname: "127.0.0.1", attestationSecret: "A".repeat(43) };
+    const auth: ManagementAuthState = { available: true, token: "workflow-fixture-admin", source: "environment", sessions: new Map(), pairingGrants: new Map() };
+    const deps: UsageCompareDeps = {
+      baseUrl: "http://capability.invalid",
+      now: () => Date.UTC(2026, 9, 15, 15, 30, 0),
+      readRuntime: () => ({ ...runtime }),
+      findLiveProxy: async () => ({ ...runtime, source: "runtime" }),
+      fetchImpl: async (input, init) => {
+        const url = new URL(String(input));
+        requests.push(url.pathname + url.search);
+        const req = new Request(input, init);
+        expect(url.origin).toBe(`http://${runtime.hostname}:${runtime.port}`);
+        for (const header of ["authorization", "cookie", "x-opencodex-api-key"]) expect(req.headers.has(header)).toBe(false);
+        expect(requireManagementAuth(req, auth, undefined, runtime)).toBeNull();
+        expect(managementPrincipal(req, auth, undefined, runtime)).toBe("local-read-capability");
+        return Response.json({
+          customWindow: true,
+          since: Number(url.searchParams.get("since")),
+          until: Number(url.searchParams.get("until")),
+          summary: { requests: 1, totalTokens: 1, estimatedCostUsd: 1 },
+        }, { headers: {
+          [LOCAL_ATTESTATION_PROOF_HEADER]: createLocalAttestationProof(runtime.attestationSecret,
+            req.headers.get(LOCAL_MANAGEMENT_NONCE_HEADER)!, runtime.pid, runtime.port)!,
+        } });
+      },
+    };
+    expect(await handleObserveCommand(["usage", "compare", "--range", "today", "--json"], deps)).toBe(0);
+    expect(requests).toHaveLength(2);
+    expect(requests[0]!.startsWith("/api/usage?range=today&")).toBe(true);
+    expect(requests[1]!.startsWith("/api/usage?range=today&")).toBe(true);
   });
   test("system settings distinguishes read from submitted field writes", async () => {
     const leaf = capability("system settings");
@@ -200,7 +248,7 @@ describe("operation capability workflows use existing handlers", () => {
     expect(tray).toContain('args.includes("--no-start") && sub !== "install"');
     expect(tray).toContain('process.platform !== "win32"');
     const dispatch = readFileSync(repoPath("src/cli/dispatch.ts"), "utf8");
-    expect(dispatch).toContain('case "install": {\n        const r = installCodexShim();');
+    expect(dispatch).toContain('case "install": {\n        const r = await installCodexShimAsync();');
   });
 });
 

@@ -1,3 +1,4 @@
+import { proxyErrorPresentation, isProxyError, rememberProxyErrorMessage } from "../../lib/client-error-body";
 import { anthropicRejectionPolicy, bindAnthropicRejectionPolicy, rejectedAnthropicPayloads } from "../../adapters/anthropic-rejection-memo";
 import { normalizeUpstreamErrorText, readDisplaySafeErrorText } from "./core-errors";
 import { sanitizeNonReplayableUpstreamError } from "./non-replayable-error";
@@ -28,6 +29,7 @@ export function createAnthropicThinkingRecovery(
   signal: AbortSignal,
   guard: OpaqueBlobRecoveryGuard,
   canRetry: () => boolean,
+  proxyErrorContext?: object,
 ) {
   let rejectedScope: OcxParsedRequest["_reasoningReplayScope"];
   let rejectedPayloads: ReadonlySet<string> | undefined;
@@ -130,6 +132,7 @@ export function createAnthropicThinkingRecovery(
       || response.status !== "completed" || !Array.isArray(response.output) || response.output.length === 0
       || !rejectedScope
       || rejectedScope.clientThreadId !== parsed._reasoningReplayScope?.clientThreadId
+      || rejectedScope.clientPrincipalId !== parsed._reasoningReplayScope?.clientPrincipalId
       || JSON.stringify(rejectedScope.current) !== JSON.stringify(parsed._reasoningReplayScope?.current)) return;
     remembered = true;
     rememberReasoningReplayOpaqueBlobRejection(rejectedScope, rejectedPayloads);
@@ -145,6 +148,7 @@ export function createAnthropicThinkingRecovery(
     if (nonReplayable) response = await sanitizeNonReplayableUpstreamError(response, abortSignal);
     const text = await readDisplaySafeErrorText(response, abortSignal, `Provider error ${response.status}`);
     const error = normalizeUpstreamErrorText(text, `Provider error ${response.status}`);
+    if (proxyErrorContext && isProxyError(response)) rememberProxyErrorMessage(proxyErrorContext, error.message ?? error.safeText, { status: response.status, type: error.type ?? "upstream_error", code: error.code, presentation: proxyErrorPresentation(response) });
     return { type: "error", status: response.status, message: error.message ?? error.safeText,
       errorType: error.type ?? "upstream_error", ...(error.code ? { code: error.code } : {}),
       ...(nonReplayable ? { retryable: false } : {}) };

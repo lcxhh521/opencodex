@@ -479,24 +479,6 @@ export function stripExistingModelProvider(content: string): string {
   return bom + sourceText(lines.filter((_, index) => !drop.has(index)));
 }
 
-/**
- * Drop ROOT-level `model_context_window` overrides (keys before the first table header). Codex
- * treats this root key as a global override that wins over the per-model catalog values, so a stale
- * `model_context_window = 1000000` makes every model (e.g. gpt-5.5) report a 1M window. User-owned
- * compaction limits do not alter the advertised context window and must survive reinjection.
- */
-export function stripRootContextWindowOverrides(content: string): string {
-  const { bom, lines, rootEnd } = rootSourceLines(content);
-  const drop = new Set<number>();
-  for (let index = 0; index < rootEnd; index++) {
-    if (!lines[index]!.structural || rootAssignmentKey(lines[index]!.text) !== "model_context_window") continue;
-    const assignment = sourceAssignmentSpan(lines, index, rootEnd);
-    if (!assignment) throw new Error("Cannot safely rewrite an incomplete model_context_window assignment.");
-    for (let at = index; at < assignment.end; at++) drop.add(at);
-  }
-  return bom + sourceText(lines.filter((_, index) => !drop.has(index)));
-}
-
 export function stripRootRoutedModel(content: string): string {
   const { bom, lines, rootEnd } = rootSourceLines(content);
   return bom + sourceText(lines.filter((line, index) => index >= rootEnd || !line.structural
@@ -688,6 +670,94 @@ export function buildProfileFileForTarget(
   if (fastMode !== undefined) lines.push("", "[features]", `fast_mode = ${fastMode ? "true" : "false"}`);
   lines.push(buildProviderTableBlockForTarget(target, supportsWebsockets, displayName).trimEnd(), "");
   return lines.join("\n");
+}
+
+/**
+ * Root keys this build owns in either profile shape. They are never carried
+ * forward: leaving provider-table mode drops `model_provider` from the template,
+ * and a caller that passes no catalog path drops `model_catalog_json`, so a
+ * carried copy would point the profile at routing this build no longer writes.
+ */
+const MANAGED_PROFILE_ROOT_KEYS = new Set([
+  "model_provider",
+  "model_catalog_json",
+  "openai_base_url",
+]);
+
+/**
+ * Root keys the previous profile carried that this build does not write.
+ *
+ * Operators add Codex settings such as `stream_idle_timeout_ms` and
+ * `stream_max_retries` to `opencodex.config.toml`. Rebuilding the file from the
+ * template dropped them without a word (#8066), so any root key this build does
+ * not own is carried over, ahead of the first table. Values that span several
+ * lines are copied whole, because one line of a multi-line value would not
+ * parse, and every carried assignment keeps its original bytes: nothing is
+ * decoded and reserialized, so a 64-bit integer Bun cannot represent survives.
+ *
+ * A carried root key named like a table the generated profile writes (an inline
+ * `features = { ... }` against a generated `[features]`) is dropped: TOML
+ * forbids defining the same table twice, and the generated table wins because
+ * it carries the settings this build manages.
+ */
+export function preserveUnmanagedProfileKeys(existing: string | null, generated: string): string {
+  if (!existing) return generated;
+  const generatedKeys = rootKeysOf(generated);
+  if (generatedKeys.size === 0) return generated;
+  const generatedTables = topLevelTableNamesOf(generated);
+
+  const existingSource = rootSourceLines(existing);
+  const carried: string[] = [];
+  const carriedKeys = new Set<string>();
+  for (let index = 0; index < existingSource.rootEnd; index += 1) {
+    if (!existingSource.lines[index]?.structural) continue;
+    const span = sourceAssignmentSpan(existingSource.lines, index, existingSource.rootEnd);
+    if (!span) continue;
+    index = span.end - 1;
+    if (generatedKeys.has(span.key) || MANAGED_PROFILE_ROOT_KEYS.has(span.key)) continue;
+    if (generatedTables.has(span.key)) continue;
+    if (carriedKeys.has(span.key)) continue;
+    carriedKeys.add(span.key);
+    // Drop only trailing blank lines; the assignment's own bytes, trailing spaces included, stay.
+    carried.push(span.text.replace(/(?:\r?\n[ \t]*)+$/, ""));
+  }
+  if (carried.length === 0) return generated;
+
+  const lines = generated.split("\n");
+  const firstTable = lines.findIndex((line) => /^\s*\[/.test(line));
+  lines.splice(firstTable === -1 ? lines.length : firstTable, 0, [
+    "# Root keys OpenCodex does not manage, kept from the previous profile:",
+    ...carried,
+    "",
+  ].join("\n"));
+  return lines.join("\n");
+}
+
+/** Names of the root assignments in a TOML document, before its first table. */
+function rootKeysOf(content: string): Set<string> {
+  const keys = new Set<string>();
+  const source = rootSourceLines(content);
+  for (let index = 0; index < source.rootEnd; index += 1) {
+    if (!source.lines[index]?.structural) continue;
+    const span = sourceAssignmentSpan(source.lines, index, source.rootEnd);
+    if (!span) continue;
+    keys.add(span.key);
+    index = span.end - 1;
+  }
+  return keys;
+}
+
+/** First path segment of every table header in a generated document. */
+function topLevelTableNamesOf(content: string): Set<string> {
+  const names = new Set<string>();
+  for (const line of rootSourceLines(content).lines) {
+    if (!line.structural || !/^\s*\[/.test(line.text)) continue;
+    try {
+      const name = Object.keys(Bun.TOML.parse(line.text))[0];
+      if (name !== undefined) names.add(name);
+    } catch { /* the template only writes valid headers */ }
+  }
+  return names;
 }
 
 export function chooseCatalogPathForInjection(

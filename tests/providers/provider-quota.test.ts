@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { tmpdir } from "node:os";
@@ -21,6 +21,7 @@ import {
   setAntigravityAccountQuotaTransportForTests,
   setProviderQuotaBeforePublishForTests,
 } from "../../src/providers/quota";
+import { cacheKeyWithAggregationState } from "../../src/providers/quota/report-cache";
 import type { OcxConfig } from "../../src/types";
 import { clearComboTargetCooldowns, coolComboTarget, pickComboTarget, pickComboTargetWithWait } from "../../src/combos";
 import { routedProviderConfig } from "../../src/router";
@@ -98,6 +99,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setSystemTime();
   clearComboTargetCooldowns();
   for (const key of proxyKeys) {
     if (originalProxyEnv[key] === undefined) delete process.env[key];
@@ -265,8 +267,8 @@ describe("fetchProviderQuotaReports", () => {
     } as OcxConfig, true);
 
     expect(result.reports[0]?.quota).toMatchObject({
-      fiveHourPercent: 11,
-      weeklyPercent: 22,
+      fiveHourPercent: 44,
+      weeklyPercent: 55,
       customWindows: [{ label: "Fable", percent: 33, resetAt: Date.parse("2026-07-12T12:00:00Z") }],
     });
     expect(result.reports[0]?.quota.customWindows).toHaveLength(1);
@@ -391,6 +393,9 @@ describe("fetchProviderQuotaReports", () => {
     expect(byProvider["google-antigravity"]?.quota.customWindows).toEqual([
       { label: "Gem", percent: 36, resetAt: Date.parse("2026-07-05T14:00:00Z") },
       { label: "Cla", percent: 79, resetAt: Date.parse("2026-07-05T15:00:00Z") },
+      { label: "gemini-3.6-flash-medium", modelId: "gemini-3.6-flash-medium", percent: 36, resetAt: Date.parse("2026-07-05T14:00:00Z") },
+      { label: "claude-sonnet-4.6 · sonnet", modelId: "claude-sonnet-4.6", percent: 79, resetAt: Date.parse("2026-07-05T15:00:00Z") },
+      { label: "autocomplete", modelId: "autocomplete", percent: 99, resetAt: Date.parse("2026-07-05T16:00:00Z") },
     ]);
     expect(byProvider.cursor?.source).toBe("cursor:period-usage");
     expect(byProvider.cursor?.reverseEngineered).toBe(true);
@@ -2425,6 +2430,105 @@ describe("fetchProviderQuotaReports", () => {
     expect((await fetchProviderQuotaReports(config)).reports[0]?.aggregation?.weekly?.usedPercent).toBeCloseTo((20 * 20 + 11) / 21, 8);
   });
 
+  test("restamped pool observations keep the report cache and last-good rows (#7956)", async () => {
+    await saveCredential("anthropic", { access: "synthetic-claude-access", refresh: "synthetic-claude-refresh", expires: Date.now() + 3600_000 });
+    saveCodexAccountCredential("added", {
+      accessToken: "added-access", refreshToken: "added-refresh",
+      expiresAt: Date.now() + 3600_000, chatgptAccountId: "added-chatgpt-id",
+    });
+    const config = testConfig();
+    config.providers = { openai: config.providers.openai, anthropic: config.providers.anthropic };
+    config.codexAccounts = [{ id: "added", email: "a@example.test", plan: "pro", isMain: false }];
+    let anthropicCalls = 0;
+    let anthropicDown = false;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "https://api.anthropic.com/api/oauth/usage") {
+        anthropicCalls += 1;
+        if (anthropicDown) return new Response("unavailable", { status: 503 });
+        return Response.json({ five_hour: { utilization: 41, resets_at: new Date(Date.now() + 3600_000).toISOString() } });
+      }
+      const added = (init?.headers as Record<string, string> | undefined)?.["ChatGPT-Account-Id"] === "added-chatgpt-id";
+      return Response.json({ plan_type: added ? "pro" : "plus",
+        rate_limit: { secondary_window: { used_percent: added ? 30 : 11, reset_at: 1_999_000_000 } } });
+    }) as typeof fetch;
+
+    await fetchProviderQuotaReports(config, true);
+    expect(anthropicCalls).toBe(1);
+    // A proxied Codex response re-observes unchanged values with a new timestamp.
+    setSystemTime(new Date(Date.now() + 1_000));
+    updateAccountQuota("added", 30, 1_999_000_000);
+    const cached = await fetchProviderQuotaReports(config);
+    expect(anthropicCalls).toBe(1);
+    expect(cached.reports.map(report => report.provider).sort()).toEqual(["anthropic", "openai"]);
+
+    // A transient Anthropic failure on the next probe keeps its bounded last-good row.
+    anthropicDown = true;
+    setSystemTime(new Date(Date.now() + 1_000));
+    updateAccountQuota("added", 30, 1_999_000_000);
+    const refreshed = await fetchProviderQuotaReports(config, true);
+    expect(anthropicCalls).toBe(2);
+    expect(refreshed.reports.find(report => report.provider === "anthropic")?.quota.fiveHourPercent).toBe(41);
+  });
+
+  test("a restamp during an outstanding probe still lets that probe commit (#7956)", async () => {
+    await saveCredential("anthropic", { access: "synthetic-claude-access", refresh: "synthetic-claude-refresh", expires: Date.now() + 3600_000 });
+    saveCodexAccountCredential("added", {
+      accessToken: "added-access", refreshToken: "added-refresh",
+      expiresAt: Date.now() + 3600_000, chatgptAccountId: "added-chatgpt-id",
+    });
+    const config = testConfig();
+    config.providers = { openai: config.providers.openai, anthropic: config.providers.anthropic };
+    config.codexAccounts = [{ id: "added", email: "a@example.test", plan: "pro", isMain: false }];
+    let anthropicCalls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let probing!: () => void;
+    const started = new Promise<void>(resolve => { probing = resolve; });
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "https://api.anthropic.com/api/oauth/usage") {
+        anthropicCalls += 1;
+        probing();
+        await gate;
+        return Response.json({ five_hour: { utilization: 41, resets_at: new Date(Date.now() + 3600_000).toISOString() } });
+      }
+      const added = (init?.headers as Record<string, string> | undefined)?.["ChatGPT-Account-Id"] === "added-chatgpt-id";
+      return Response.json({ plan_type: added ? "pro" : "plus",
+        rate_limit: { secondary_window: { used_percent: added ? 30 : 11, reset_at: 1_999_000_000 } } });
+    }) as typeof fetch;
+
+    const first = fetchProviderQuotaReports(config, true);
+    await started;
+    setSystemTime(new Date(Date.now() + 1_000));
+    updateAccountQuota("added", 30, 1_999_000_000);
+    release();
+    await first;
+    const next = await fetchProviderQuotaReports(config);
+    expect(anthropicCalls).toBe(1);
+    expect(next.reports.map(report => report.provider).sort()).toEqual(["anthropic", "openai"]);
+  });
+
+  test("only an exhausted reset-less short window keeps its observation clock in the key (#7956)", async () => {
+    const config = testConfig();
+    config.providers = { openai: config.providers.openai };
+    let quota: Partial<StoredAccountQuota> = {};
+    const poolSpy = spyOn(authApi, "listCodexAuthAccountsSnapshot").mockImplementation(async () => ({
+      mainIdentityGeneration: captureMainAccountIdentityGeneration(),
+      accounts: [{ id: "__main__", isMain: true, paused: false, plan: "plus", quota }],
+    } as unknown as Awaited<ReturnType<typeof authApi.listCodexAuthAccountsSnapshot>>));
+    const keyFor = async (next: Partial<StoredAccountQuota>) => { quota = next; return await cacheKeyWithAggregationState(config); };
+    try {
+      const now = Date.now();
+      const withReset = { weeklyPercent: 20, shortPercent: 100, shortResetAt: Math.floor(now / 1000) + 3600 };
+      expect(await keyFor({ ...withReset, shortObservedAt: now, updatedAt: now }))
+        .toBe(await keyFor({ ...withReset, shortObservedAt: now + 5, updatedAt: now + 5 }));
+      const resetless = { weeklyPercent: 20, shortPercent: 100 };
+      expect(await keyFor({ ...resetless, shortObservedAt: now, updatedAt: now }))
+        .not.toBe(await keyFor({ ...resetless, shortObservedAt: now + 5, updatedAt: now + 5 }));
+    } finally {
+      poolSpy.mockRestore();
+    }
+  });
+
   test("ordinary fetch reflects runtime reauthentication state", async () => {
     saveCodexAccountCredential("added", {
       accessToken: "added-access", refreshToken: "added-refresh",
@@ -3473,7 +3577,10 @@ describe("fetchProviderQuotaReports", () => {
         expect(resolved).toEqual(urls.map(url => ({ url, benchmark: true, private: false, mihomo: true })));
         expect(posted).toEqual(urls.map(url => ({ url, address: "198.18.56.214", tls: true, auth: "Bearer agy-canonical-access", body: JSON.stringify({ project: "agy-canonical-project" }), signal: true })));
         expect(result.reports[0]?.source).toBe(fallback ? "google-antigravity:fetchAvailableModels" : "google-antigravity:retrieveUserQuotaSummary");
-        expect(result.reports[0]?.quota.customWindows).toEqual([{ label: "Gem", percent: fallback ? 25 : 40 }]);
+        expect(result.reports[0]?.quota.customWindows).toEqual([
+          { label: "Gem", percent: fallback ? 25 : 40 },
+          ...(fallback ? [{ label: "gemini", modelId: "gemini", percent: 25 }] : []),
+        ]);
         expect(plainFetchCalls).toEqual([]);
       });
     }
@@ -3493,7 +3600,10 @@ describe("fetchProviderQuotaReports", () => {
           },
         });
         const result = await fetchProviderQuotaReports(config(baseUrl), true);
-        expect(result.reports[0]?.quota.customWindows).toEqual([{ label: "Gem", percent: 25 }]);
+        expect(result.reports[0]?.quota.customWindows).toEqual([
+          { label: "Gem", percent: 25 },
+          { label: "gemini", modelId: "gemini", percent: 25 },
+        ]);
         expect(resolved).toEqual([{ url: summaryUrl, private: false }, { url: modelsUrl, private: false }]);
         expect(posted).toEqual([summaryUrl, modelsUrl]);
         expect(plainFetchCalls).toEqual([]);
@@ -3547,7 +3657,10 @@ describe("fetchProviderQuotaReports", () => {
           },
         });
         const result = await fetchProviderQuotaReports(config(), true);
-        expect(result.reports[0]?.quota.customWindows).toEqual([{ label: "Gem", percent: 25 }]);
+        expect(result.reports[0]?.quota.customWindows).toEqual([
+          { label: "Gem", percent: 25 },
+          { label: "gemini", modelId: "gemini", percent: 25 },
+        ]);
         expect(posted).toEqual([summaryUrl, modelsUrl]);
         expect(plainFetchCalls).toEqual([]);
       });

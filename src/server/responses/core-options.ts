@@ -1,3 +1,4 @@
+import type { ClientFacingModelLabel } from "../../lib/error-destination";
 import type { CodexAccountModelRefusal } from "../../combos/failover";
 import type { NativeResponseControl } from "./native-response-control";
 import type { AdapterEvent, OcxUsage, OcxProviderContinuationState, OcxConfig } from "../../types";
@@ -6,6 +7,7 @@ import type { SingleUseDispatchPermit } from "../../lib/request-execution-budget
 import type { CodexAuthPolicyConfig, CodexAuthContext } from "../../codex/auth-context";
 import type { AdmissionLease } from "../../lib/admission";
 import type { DataPlaneAdmission } from "../auth-cors";
+import type { AdmissionModelScope } from "../admission-model-scope";
 import { resolveCodexModelEntitlements } from "../../codex/model-entitlements";
 import type { ResponsesTerminalStatus } from "../../bridge";
 import type { ResponsesTerminalRepairScheduler } from "../responses-terminal-repair";
@@ -15,6 +17,7 @@ import type { InboundWire } from "../../providers/registry";
 import type { ExplicitOpenAiCallerAuth } from "../../providers/openai-sidecar";
 import type { CallerDirectAuth } from "../../providers/caller-authorization";
 import type { CompactionRoutingOverride } from "./compaction-routing";
+import type { MainHardLockFallbackOverride } from "./main-hard-lock-routing";
 import type { TranslatorBudget } from "../../lib/translator-budget";
 import type { NativeReasoningOwner } from "../../responses/reasoning-replay-cache";
 import type { TransientSendBudget } from "../../lib/upstream-retry";
@@ -48,6 +51,8 @@ export interface ConsumedComboFailure {
    * marker, so the combo loop reads it here and stops instead of sending the turn to a later target.
    */
   nonReplayable?: boolean;
+  /** The failed attempt was an adapter-normalized plan refusal; only this grants its combo hop. */
+  verifiedPlanRefusal?: boolean;
 }
 
 
@@ -92,6 +97,14 @@ export interface DirectRequestOption {
 }
 
 export interface HandleResponsesOptions {
+  /** Original caller label, carried through synthetic children without route substitution. */
+  clientModelLabel?: ClientFacingModelLabel;
+  /** Original client envelope label when a combo was selected by a synthetic rewrite. */
+  clientResponseModelLabel?: ClientFacingModelLabel;
+  /** Immutable caller scope inherited by a capability-authenticated internal sidecar request. */
+  admissionScope?: AdmissionModelScope;
+  /** Captured synchronously at ingress, before parsing or child replay can suspend. */
+  advisorAdmissionPolicy?: import("../../types/admission-policy").CapturedAdmissionPolicy;
   /** Internal request-owned policy authorization; never read from client headers or body. */
   policyRequestScope?: PolicyRequestScope;
   /** Internal concrete selector chosen from the original policy evaluation. */
@@ -110,6 +123,8 @@ export interface HandleResponsesOptions {
   claudeGoAffinity?: { sessionLane?: string };
   /** Validated Claude metadata identity; projected only into final canonical attempt headers. */
   claudeNativeSessionId?: string;
+  /** Private Claude bridge pool identity (validated, principal-scoped when derived); completes session-id/thread-id only on Codex account-selection headers. */
+  claudeBridgePoolSession?: string;
   /** Original live policy owner; separate from caller-specific routing/sidecar snapshots. */
   codexAuthPolicy?: CodexAuthPolicyConfig;
   turnAdmissionLease?: AdmissionLease;
@@ -127,6 +142,11 @@ export interface HandleResponsesOptions {
    * which is why it refused the whole env_key flow instead of serving it.
    */
   admission?: DataPlaneAdmission;
+  /**
+   * Internal caller identity captured before Combo strips provisional credentials. An existing
+   * holder with no principal preserves keyless replay; never populate it from client data.
+   */
+  replayPrincipal?: Readonly<{ clientPrincipalId: string | undefined }>;
   /** Called at most once after the complete client body is read and accepted for dispatch. */
   onRequestBodyRead?: () => void;
   /** Internal handoff for retry wrappers that must reuse the already-accounted request body. */
@@ -174,6 +194,12 @@ export interface HandleResponsesOptions {
   clientDeclaredEmptyToolCatalog?: boolean;
   nativeReasoningReplay?: ReadonlyMap<string, string>;
   nativeReasoningMint?: { owner?: NativeReasoningOwner };
+  /** The Claude client's typed `web_search_*` / `web_fetch_*` declarations; kept only for `inboundWire: "anthropic"`. */
+  anthropicServerTools?: readonly Record<string, unknown>[];
+  /** The Claude client's replayable server-tool exchanges (`replayedAnthropicServerBlocks`); same scope. */
+  anthropicServerReplay?: ReadonlyMap<string, readonly Record<string, unknown>[]>;
+  /** Metadata-qualified Messages discovery evidence, never caller JSON or a preselected destination. */
+  anthropicToolLoadingSource?: Readonly<Record<string, unknown>>;
   /** Droid's per-request effort default; each concrete combo or policy target applies it only if its ladder allows it. */
   droidDefaultEffort?: string;
   /** PF-07: the Chat source a combo child may send natively; set only by the Chat ingress. */
@@ -198,6 +224,13 @@ export interface HandleResponsesOptions {
   callerDirectAuth?: CallerDirectAuth | null;
   /** Internal recursion guard; callers outside this module must not set it. */
   comboAttempt?: boolean;
+  /**
+   * Set by the combo loop for each child. A child logs into its own context, which the combo
+   * copies once when the child commits, and the bridge reports usage after that, at the terminal
+   * frame. The transport calls this when it binds that usage on the child's context, so the combo
+   * can carry the binding to the context that writes the row.
+   */
+  onBridgeUsageBound?: () => void;
   /** Child-owned prepaid initial send; capacity remains charged until dispatch or unsent release. */
   comboInitialSend?: { permit: SingleUseDispatchPermit; producerOwned?: boolean };
   /** Exact externally booked combo hop, used for its child's spend preflight and send reports. */
@@ -207,6 +240,8 @@ export interface HandleResponsesOptions {
   /** Internal handoff: the memory phase this turn belongs to, so combo children keep its routing. */
   memoryModelPhase?: "extract" | "consolidation";
   compactionRoutingOverride?: CompactionRoutingOverride | null;
+  /** Internal handoff: the hard-lock fallback rewrote this turn; the log shows `sourceModel`. */
+  mainHardLockFallbackOverride?: MainHardLockFallbackOverride | null;
   /** Internal combo handoff for one parent-validated continuation snapshot. */
   comboReplaySnapshot?: {
     sourceBody: unknown;
@@ -254,6 +289,8 @@ export interface HandleResponsesOptions {
    * returning a Responses body, which the ingress converts as before.
    */
   clientEncoder?: ClientEncoderOption;
+  /** Chat ingress raw-channel delivery preference; never an upstream generation option. */
+  chatRawReasoningVisible?: boolean;
   /** Set only by the Chat or Messages ingress on an eligible Antigravity route; see {@link DirectRequestOption}. */
   directRequest?: DirectRequestOption;
 }

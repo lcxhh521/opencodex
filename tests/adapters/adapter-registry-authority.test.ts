@@ -10,6 +10,7 @@ import type { OcxParsedRequest, OcxProviderConfig } from "../../src/types";
 import { withTestTranslatorBudget } from "../helpers/translator-budget";
 
 const EXPECTED_ADAPTER_NAMES = {
+  "workbuddy-ai": "workbuddy-ai",
   codebuddy: "codebuddy",
   "command-code": "command-code",
   "openai-chat": "openai-chat",
@@ -26,6 +27,7 @@ const EXPECTED_ADAPTER_NAMES = {
   "mimo-free": "mimo-free",
   qoder: "qoder",
   "claude-cli": "claude-cli",
+  "dsh-account": "dsh-account",
 } as const;
 
 function provider(adapter: string): OcxProviderConfig {

@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +14,8 @@ import {
   createLocalAttestationProof,
 } from "../../src/lib/local-management-attestation";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
-import { repoPath } from "../helpers/repo-root";
+import { helperPath, repoPath } from "../helpers/repo-root";
+import { createFixtureNamespaceOwner } from "../helpers/fixture-namespace-owner";
 import { captureStartupChildOutput, STARTUP_OUTPUT_TAIL_CHARS } from "../helpers/startup-child-output";
 
 const originalEnv = { ...process.env };
@@ -205,7 +206,7 @@ test("live local sibling record marks a fresh ensure decision during primary dow
     pid: process.pid + 1, port: secondaryPort, siblingOfPort: primaryPort,
   }));
   expect(await findCrossHomeOwner({ homeDir: fx.home })).toBeNull();
-  expect(await markLiveHomeSibling({ pid: process.pid + 1, port: secondaryPort })).toBe(true);
+  expect(await markLiveHomeSibling({ pid: process.pid + 1, port: secondaryPort }, { homeDir: fx.home })).toBe(true);
   expect(siblingOfLivePort()).toBe(primaryPort);
 });
 
@@ -296,11 +297,16 @@ test("same PID, null PID, foreign, stale and remote hints grant no sibling owner
   const foreign = healthServer(process.pid + 1, "another-service");
   writeFileSync(grokPath, grokFence(foreign));
   expect(await findCrossHomeOwner({ homeDir: fx.home })).toBeNull();
-  const closed = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("closed") });
-  const stale = closed.port;
-  closed.stop(true);
+  // A stale URL exercises transport refusal, not a subsequent bind. Inject the
+  // refusal so an unrelated process cannot turn the "dead" hint into a live one.
+  const stale = 42101;
+  let refusedProbes = 0;
   writeFileSync(grokPath, grokFence(stale));
-  expect(await findCrossHomeOwner({ homeDir: fx.home })).toBeNull();
+  expect(await findCrossHomeOwnerDetailed({ homeDir: fx.home, io: {
+    fetchFn: async () => { refusedProbes++; throw Object.assign(new Error("fixture refusal"), { code: "ECONNREFUSED" }); },
+    sleepFn: async () => {},
+  } })).toEqual({ kind: "none" });
+  expect(refusedProbes).toBeGreaterThan(0);
   writeFileSync(grokPath, grokFence("not-a-port"));
   expect(await findCrossHomeOwner({ homeDir: fx.home })).toBeNull();
   writeFileSync(grokPath, grokFence(foreign).replace("127.0.0.1", "example.com"));
@@ -324,9 +330,6 @@ test("a secondary start preserves shared client bytes and records the sibling ow
   const fx = fixture();
   const fakeOwnerPid = 1_000_000_000;
   const ownerPort = healthServer(fakeOwnerPid);
-  const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("reserved") });
-  const secondaryPort = reservation.port;
-  reservation.stop(true);
   defaultRuntime(fx, fakeOwnerPid, ownerPort);
   const grokPath = join(fx.grok, "config.toml");
   const codexPath = join(fx.codex, "config.toml");
@@ -336,11 +339,11 @@ test("a secondary start preserves shared client bytes and records the sibling ow
   writeFileSync(claudePath, "owned roster bytes\n");
   const before = [grokPath, codexPath, claudePath].map(path => readFileSync(path));
   writeFileSync(join(fx.ocx, "config.json"), JSON.stringify({
-    port: secondaryPort, hostname: "127.0.0.1", codexAutoStart: false, syncResumeHistory: false,
+    port: 0, hostname: "127.0.0.1", codexAutoStart: false, syncResumeHistory: false,
     checkForUpdates: false, clientIntegrations: { codex: true, grok: true, "claude-desktop": false },
     claudeCode: { injectAgents: false, systemEnv: false }, providers: {}, defaultProvider: "openai",
   }));
-  const child = Bun.spawn([process.execPath, repoPath("src/cli/index.ts"), "start", "--port", String(secondaryPort)], {
+  const child = Bun.spawn([process.execPath, repoPath("src/cli/index.ts"), "start"], {
     cwd: fx.root, env: { ...process.env, NO_PROXY: "127.0.0.1,localhost" }, stdout: "pipe", stderr: "pipe",
   });
   trackChild(child);
@@ -357,9 +360,6 @@ test("a secondary ensure parent preserves shared Grok, Codex and Claude agent by
   const fx = fixture();
   const ownerPort = healthServer(process.pid);
   defaultRuntime(fx, process.pid, ownerPort);
-  const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("reserved") });
-  const secondaryPort = reservation.port;
-  reservation.stop(true);
   const grokPath = join(fx.grok, "config.toml");
   const codexPath = join(fx.codex, "config.toml");
   const claudePath = join(fx.claude, "agents", "ocx-existing.md");
@@ -368,11 +368,11 @@ test("a secondary ensure parent preserves shared Grok, Codex and Claude agent by
   writeFileSync(claudePath, "---\ngenerated-by: opencodex\n---\nowner roster\n");
   const before = [grokPath, codexPath, claudePath].map(path => readFileSync(path));
   writeFileSync(join(fx.ocx, "config.json"), JSON.stringify({
-    port: secondaryPort, hostname: "127.0.0.1", codexAutoStart: true, syncResumeHistory: false,
+    port: 0, hostname: "127.0.0.1", codexAutoStart: true, syncResumeHistory: false,
     checkForUpdates: false, clientIntegrations: { codex: true, grok: true, "claude-desktop": false },
     claudeCode: { injectAgents: false, systemEnv: false }, providers: {}, defaultProvider: "openai",
   }));
-  const ensure = Bun.spawn([process.execPath, repoPath("src/cli/index.ts"), "ensure"], {
+  const ensure = Bun.spawn([process.execPath, "--preload", helperPath("ensure-without-desktop-preload.ts"), repoPath("src/cli/index.ts"), "ensure"], {
     cwd: fx.root, env: { ...process.env, NO_PROXY: "127.0.0.1,localhost" }, stdout: "pipe", stderr: "pipe",
   });
   trackChild(ensure);
@@ -380,17 +380,17 @@ test("a secondary ensure parent preserves shared Grok, Codex and Claude agent by
   const output = captured.stdout.tail;
   const error = captured.stderr.tail;
   expect(await ensure.exited).toBe(0);
-  expect(output + error).toContain(`Proxy running on port ${secondaryPort}`);
   const runtime = JSON.parse(readFileSync(join(fx.ocx, "runtime-port.json"), "utf8")) as {
     pid: number; port: number; siblingOfPort?: number;
   };
   detachedPids.push(runtime.pid);
+  expect(output + error).toContain(`Proxy running on port ${runtime.port}`);
   expect(runtime.siblingOfPort).toBe(ownerPort);
   expect([grokPath, codexPath, claudePath].map(path => readFileSync(path))).toEqual(before);
 
   // A fresh ensure parent sees this home's live sibling after the primary goes down.
   servers.pop()?.stop(true);
-  const again = Bun.spawn([process.execPath, repoPath("src/cli/index.ts"), "ensure"], {
+  const again = Bun.spawn([process.execPath, "--preload", helperPath("ensure-without-desktop-preload.ts"), repoPath("src/cli/index.ts"), "ensure"], {
     cwd: fx.root, env: { ...process.env, NO_PROXY: "127.0.0.1,localhost" }, stdout: "pipe", stderr: "pipe",
   });
   trackChild(again);
@@ -401,31 +401,29 @@ test("a secondary ensure parent preserves shared Grok, Codex and Claude agent by
 
 test("a lone custom-home start still syncs Grok and prunes its own Claude roster", async () => {
   const fx = fixture();
-  const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("reserved") });
-  const port = reservation.port;
-  reservation.stop(true);
+  const namespaceOwner = createFixtureNamespaceOwner(fx.root);
   const grokPath = join(fx.grok, "config.toml");
   const claudePath = join(fx.claude, "agents", "ocx-existing.md");
   writeFileSync(grokPath, grokFence(12345));
   writeFileSync(claudePath, "---\ngenerated-by: opencodex\n---\nold roster\n");
   writeFileSync(join(fx.ocx, "config.json"), JSON.stringify({
-    port, hostname: "127.0.0.1", codexAutoStart: true, syncResumeHistory: false,
+    port: 0, hostname: "127.0.0.1", codexAutoStart: true, syncResumeHistory: false,
     checkForUpdates: false, clientIntegrations: { codex: false, grok: true, "claude-desktop": false },
     claudeCode: { injectAgents: false, systemEnv: false }, providers: {}, defaultProvider: "openai",
   }));
-  const child = Bun.spawn([process.execPath, repoPath("src/cli/index.ts"), "start", "--port", String(port)], {
-    cwd: fx.root, env: { ...process.env, NO_PROXY: "127.0.0.1,localhost" }, stdout: "pipe", stderr: "pipe",
+  const child = Bun.spawn([process.execPath, "--preload", helperPath("fixture-windows-runtime-preload.ts"), repoPath("src/cli/index.ts"), "start"], {
+    cwd: fx.root, env: { ...process.env, ...namespaceOwner, NO_PROXY: "127.0.0.1,localhost" }, stdout: "pipe", stderr: "pipe",
   });
   trackChild(child);
   const runtime = await waitForRuntime(join(fx.ocx, "runtime-port.json"), child);
   expect(runtime.siblingOfPort).toBeUndefined();
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline && readFileSync(grokPath, "utf8").includes("127.0.0.1:12345")) await Bun.sleep(20);
-  expect(readFileSync(grokPath, "utf8")).toContain(`127.0.0.1:${port}`);
+  expect(readFileSync(grokPath, "utf8")).toContain(`127.0.0.1:${runtime.port}`);
   expect(existsSync(claudePath)).toBe(false);
   writeFileSync(claudePath, "---\ngenerated-by: opencodex\n---\nstale roster\n");
-  const ensure = Bun.spawn([process.execPath, repoPath("src/cli/index.ts"), "ensure"], {
-    cwd: fx.root, env: { ...process.env, NO_PROXY: "127.0.0.1,localhost" }, stdout: "pipe", stderr: "pipe",
+  const ensure = Bun.spawn([process.execPath, "--preload", helperPath("fixture-windows-runtime-preload.ts"), repoPath("src/cli/index.ts"), "ensure"], {
+    cwd: fx.root, env: { ...process.env, ...namespaceOwner, NO_PROXY: "127.0.0.1,localhost" }, stdout: "pipe", stderr: "pipe",
   });
   trackChild(ensure);
   await finishChildOutput(ensure);
@@ -448,7 +446,8 @@ test("a registered custom-home owner is proven through its own runtime record", 
   const verdict = await findCrossHomeOwnerDetailed({ homeDir: fx.home });
   expect(verdict.kind).toBe("indeterminate");
   expect(verdict.kind === "indeterminate" ? verdict.port : null).toBe(port);
-  expect(await markCrossHomeSibling()).toBe(true);
+  await expect(markCrossHomeSibling({ homeDir: fx.home })).rejects.toThrow("refusing startup");
+  expect(siblingOfLivePort()).toBeNull();
   resetSiblingStartForTests();
 
   registerOwnerRegistryHome(homeA);
@@ -466,8 +465,8 @@ test("a live legacy record without an attestation secret fails closed", async ()
   writeFileSync(join(fx.grok, "config.toml"), grokFence(port));
   const verdict = await findCrossHomeOwnerDetailed({ homeDir: fx.home });
   expect(verdict.kind).toBe("indeterminate");
-  expect(await markCrossHomeSibling()).toBe(true);
-  expect(siblingOfLivePort()).toBe(port);
+  await expect(markCrossHomeSibling({ homeDir: fx.home })).rejects.toThrow("refusing startup");
+  expect(siblingOfLivePort()).toBeNull();
 });
 
 test("a dropped attestation probe retries inside the shared deadline", async () => {
@@ -507,6 +506,22 @@ test("one shared deadline bounds every candidate probe", async () => {
   });
   expect(verdict.kind).toBe("indeterminate");
   expect(calls).toBe(0);
+});
+
+test("exhausted discovery refuses startup without persisting a false sibling", async () => {
+  const fx = fixture();
+  const ownerPid = process.pid + 1;
+  const port = healthServer(ownerPid);
+  defaultRuntime(fx, ownerPid, port);
+  writeFileSync(join(fx.grok, "config.toml"), grokFence(port));
+  const options = { homeDir: fx.home, io: { deadlineAt: 0, nowFn: () => 0 } };
+
+  await expect(markCrossHomeSibling(options)).rejects.toThrow("refusing startup");
+  expect(siblingOfLivePort()).toBeNull();
+
+  // A fresh attempt can still prove the real owner after the transient failure.
+  expect(await markCrossHomeSibling({ homeDir: fx.home })).toBe(true);
+  expect(siblingOfLivePort()).toBe(port);
 });
 
 test("an attested sibling record defers to the owner port it names", async () => {
@@ -622,9 +637,9 @@ test("an unlocated owner refuses start and ensure rather than claiming an unmark
   }
   expect(readOwnerRegistry().truncated).toBe(true);
   expect(await findCrossHomeOwnerDetailed({ homeDir: fx.home })).toMatchObject({ kind: "indeterminate", port: null });
-  await expect(markCrossHomeSibling()).rejects.toThrow("refusing startup");
+  await expect(markCrossHomeSibling({ homeDir: fx.home })).rejects.toThrow("refusing startup");
   expect(siblingOfLivePort()).toBeNull();
-  await expect(markLiveHomeSibling({ pid: process.pid, port: 42101 })).rejects.toThrow("refusing startup");
+  await expect(markLiveHomeSibling({ pid: process.pid, port: 42101 }, { homeDir: fx.home })).rejects.toThrow("refusing startup");
   expect(siblingOfLivePort()).toBeNull();
 });
 
@@ -636,11 +651,8 @@ test("an unlocated owner refuses start and ensure rather than claiming an unmark
 async function secondaryStartPreservesBytes(
   fx: ReturnType<typeof fixture>,
   ownerPort: number,
-  expectedSiblingPort: number,
+  expectedSiblingPort: number | null,
 ): Promise<void> {
-  const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("reserved") });
-  const secondaryPort = reservation.port;
-  reservation.stop(true);
   const grokPath = join(fx.grok, "config.toml");
   const codexPath = join(fx.codex, "config.toml");
   const claudePath = join(fx.claude, "agents", "ocx-existing.md");
@@ -649,14 +661,22 @@ async function secondaryStartPreservesBytes(
   writeFileSync(claudePath, "owned roster bytes\n");
   const before = [grokPath, codexPath, claudePath].map(path => readFileSync(path));
   writeFileSync(join(fx.ocx, "config.json"), JSON.stringify({
-    port: secondaryPort, hostname: "127.0.0.1", codexAutoStart: false, syncResumeHistory: false,
+    port: 0, hostname: "127.0.0.1", codexAutoStart: false, syncResumeHistory: false,
     checkForUpdates: false, clientIntegrations: { codex: true, grok: true, "claude-desktop": false },
     claudeCode: { injectAgents: false, systemEnv: false }, providers: {}, defaultProvider: "openai",
   }));
-  const child = Bun.spawn([process.execPath, repoPath("src/cli/index.ts"), "start", "--port", String(secondaryPort)], {
+  const child = Bun.spawn([process.execPath, repoPath("src/cli/index.ts"), "start"], {
     cwd: fx.root, env: { ...process.env, NO_PROXY: "127.0.0.1,localhost" }, stdout: "pipe", stderr: "pipe",
   });
   trackChild(child);
+  if (expectedSiblingPort === null) {
+    const output = await finishChildOutput(child);
+    expect(await child.exited).not.toBe(0);
+    expect(JSON.stringify(output)).toContain("refusing startup");
+    expect(existsSync(join(fx.ocx, "runtime-port.json"))).toBe(false);
+    expect([grokPath, codexPath, claudePath].map(path => readFileSync(path))).toEqual(before);
+    return;
+  }
   const runtime = await waitForRuntime(join(fx.ocx, "runtime-port.json"), child);
   expect(runtime.siblingOfPort).toBe(expectedSiblingPort);
   await waitForClientStartup(child);
@@ -686,7 +706,7 @@ test("an unreadable listener on a managed port vetoes shared writes end to end",
   const managed = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("unreadable", { status: 500 }) });
   servers.push(managed);
   const ownerPort = managed.port;
-  await secondaryStartPreservesBytes(fx, ownerPort, ownerPort);
+  await secondaryStartPreservesBytes(fx, ownerPort, null);
 }, 30_000);
 
 test("a live legacy record without an attestation secret vetoes shared writes end to end", async () => {
@@ -699,7 +719,7 @@ test("a live legacy record without an attestation secret vetoes shared writes en
     pid: ownerPid, port: ownerPort,
   }));
   registerOwnerRegistryHome(homeA);
-  await secondaryStartPreservesBytes(fx, ownerPort, ownerPort);
+  await secondaryStartPreservesBytes(fx, ownerPort, null);
 }, 30_000);
 
 test("a registry-only discovered owner vetoes shared writes end to end", async () => {
@@ -722,15 +742,12 @@ test("a registry-only discovered owner vetoes shared writes end to end", async (
   writeFileSync(codexPath, "model = \"gpt-6\"\n");
   writeFileSync(claudePath, "owned roster bytes\n");
   const before = [grokPath, codexPath, claudePath].map(path => readFileSync(path));
-  const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("reserved") });
-  const secondaryPort = reservation.port;
-  reservation.stop(true);
   writeFileSync(join(fx.ocx, "config.json"), JSON.stringify({
-    port: secondaryPort, hostname: "127.0.0.1", codexAutoStart: false, syncResumeHistory: false,
+    port: 0, hostname: "127.0.0.1", codexAutoStart: false, syncResumeHistory: false,
     checkForUpdates: false, clientIntegrations: { codex: true, grok: true, "claude-desktop": false },
     claudeCode: { injectAgents: false, systemEnv: false }, providers: {}, defaultProvider: "openai",
   }));
-  const child = Bun.spawn([process.execPath, repoPath("src/cli/index.ts"), "start", "--port", String(secondaryPort)], {
+  const child = Bun.spawn([process.execPath, repoPath("src/cli/index.ts"), "start"], {
     cwd: fx.root, env: { ...process.env, NO_PROXY: "127.0.0.1,localhost" }, stdout: "pipe", stderr: "pipe",
   });
   trackChild(child);
@@ -742,6 +759,28 @@ test("a registry-only discovered owner vetoes shared writes end to end", async (
   await child.exited;
   expect([grokPath, codexPath, claudePath].map(path => readFileSync(path))).toEqual(before);
 }, 30_000);
+
+test("startup readiness follows the child signal across a wall-clock jump", async () => {
+  let stdout!: ReadableStreamDefaultController<Uint8Array>;
+  const out = new ReadableStream<Uint8Array>({ start(controller) { stdout = controller; } });
+  const err = new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } });
+  const capture = captureStartupChildOutput(out, err);
+  const child = { pid: 123, exitCode: null, exited: new Promise<number>(() => {}) };
+  const startedAt = Date.now();
+  const clock = spyOn(Date, "now").mockReturnValue(startedAt);
+  try {
+    const ready = capture.waitForStartup(child);
+    clock.mockReturnValue(startedAt + 90_000);
+    await Promise.resolve();
+    stdout.enqueue(new TextEncoder().encode("Client startup work complete.\n"));
+    stdout.close();
+    await ready;
+    expect(capture.snapshot().startupComplete).toBe(true);
+  } finally {
+    clock.mockRestore();
+    await capture.finish();
+  }
+});
 
 test("startup diagnostics drain both pipes before runtime publication", async () => {
   const fx = fixture();
@@ -789,7 +828,24 @@ test("startup diagnostics include both child tails and exit state on publication
   expect(failure).toContain('"exitCode":2');
   expect(failure).toContain(`"pid":${child.pid}`);
   expect(failure).toContain("lastOutputAgoMs");
+  await expect(capturedChildren.get(child)!.waitForStartup(child)).rejects.toThrow('"exitCode":2');
 });
+
+for (const failure of ["stdout EOF", "stdout read failure"] as const) {
+  test(`startup readiness rejects ${failure} without a completion signal`, async () => {
+    const stdout = new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new TextEncoder().encode("before-startup"));
+      if (failure === "stdout EOF") controller.close();
+      else controller.error(new Error("fixture pipe failure"));
+    } });
+    const stderr = new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } });
+    const output = captureStartupChildOutput(stdout, stderr);
+    const child = { pid: 123, exitCode: null, exited: new Promise<number>(() => {}) };
+    await expect(output.waitForStartup(child)).rejects.toThrow("child ended before live client startup");
+    expect(output.snapshot().startupComplete).toBe(false);
+    expect(output.snapshot().stdout.readFailed).toBe(failure === "stdout read failure");
+  });
+}
 
 test("startup diagnostics preserve split UTF-8 and startup markers before tail eviction", async () => {
   const bytes = new TextEncoder().encode("한글 Client startup work complete.");
@@ -806,7 +862,9 @@ test("startup diagnostics preserve split UTF-8 and startup markers before tail e
       controller.close();
     },
   });
-  const output = await captureStartupChildOutput(stdout, stderr).finish();
+  const capture = captureStartupChildOutput(stdout, stderr);
+  await capture.waitForStartup({ pid: 123, exitCode: null, exited: new Promise<number>(() => {}) });
+  const output = await capture.finish();
   expect(output.startupComplete).toBe(true);
   expect(output.stdout.tail).toBe("z".repeat(8192));
   expect(output.stderr.tail).toBe("오류");

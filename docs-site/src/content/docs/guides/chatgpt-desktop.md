@@ -261,10 +261,11 @@ restart transaction.
 
 ### Failure behavior and known limits
 
-When the platform is not macOS, the OpenCodex runtime is missing, or the filter
-self-test fails, the launcher runs the original binary with untouched stdout. A
-missing bundled app-server binary is the exception: there is nothing to fall back
-to, so the launcher exits with an error (see below).
+The launcher verifies the executable before every start, including Desktop respawns.
+If stdout filtering is unavailable or its self-test fails, the verified executable
+runs with untouched stdout. If executable verification fails or the OpenCodex
+validator is unavailable, the launcher exits with an error without starting the
+app-server. A missing bundled app-server binary also prevents startup (see below).
 A filter that passes the self-test and then dies mid-session closes the pipe.
 What the bundled app-server does after that has not been verified; it may get
 SIGPIPE or a write error and be respawned by Desktop through the same launcher.
@@ -274,8 +275,9 @@ remaining stream to raw bytes.
 
 The experiment depends on the bundled binary path, the app honoring
 `CODEX_CLI_PATH`, and current RPC field shapes. Updates may change these. A moved
-or removed OpenCodex installation fails the launcher preflight and runs the
-original binary. Run `ocx chatgpt launch` again after relocating the installation.
+or removed OpenCodex installation can leave the launcher unable to verify the
+executable, so it refuses startup. Run `ocx chatgpt launch` again after relocating
+the installation, or `ocx chatgpt restore` to remove the override.
 If an app update moves or removes the bundled app-server binary itself, the
 launcher cannot start it: it prints a message naming `ocx chatgpt launch` and
 `ocx chatgpt restore` on stderr and exits, and Desktop cannot start its
@@ -283,9 +285,20 @@ app-server until you run one of them. A single output line longer than 8 MiB is
 passed through unparsed rather than buffered.
 
 This standalone shim does not rewrite conversation metadata or route model calls.
-Other app gates or upstream refusals can still prevent sending. Evidence reported
-on an exhausted Plus account also used an intercept, so it does not establish
-that this shim alone resolves every desktop send lock.
+Other app gates or upstream refusals can still prevent sending. An attached launcher
+or a passing filter self-test does not prove that the app's gate data crosses this pipe.
+
+Reporter observations in [#6196](https://github.com/lidge-jun/opencodex/issues/6196)
+on October 2 and 13, 2026 describe an attached shim with Send still disabled at
+natural quota exhaustion. On Desktop 26.1007.30912 with OpenCodex 2.84.0, the
+reporter observed no eligible rate-limit RPC messages while the renderer's gate
+used a separate usage transport. This shim cannot rewrite data that never reaches
+its stdout filter. These are build-specific field reports, not a new live
+verification or proof that every Desktop build uses the same transport.
+
+The remaining signed-in composer behavior stays tracked in #6196. Earlier success
+with a combined shim/intercept configuration does not establish shim-only
+sufficiency, and does not establish the effectiveness of this fork’s optional intercept.
 
 ## Local-CA TLS intercept (experimental candidate)
 

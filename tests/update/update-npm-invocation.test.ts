@@ -6,12 +6,51 @@ import {
   npmInvocation,
   resolveNpmCommand,
 } from "../../src/update/npm-invocation.mjs";
+import { spawnedNpmOperation } from "../helpers/npm-operation";
 
 const cwd = "C:\\work\\untrusted-project";
 const trustedNpm = "C:\\Program Files\\nodejs\\npm.cmd";
 const systemCmd = "C:\\Windows\\System32\\cmd.exe";
 
 describe("Windows npm update invocation", () => {
+  test.each([
+    "SystemRoot", "SYSTEMROOT", "sYsTeMrOoT", "windir", "WINDIR", "WiNdIr",
+    "ComSpec", "COMSPEC", "cOmSpEc",
+  ])("resolves the command processor from a copied %s environment key", key => {
+    // A sanitized environment is a plain object, without Windows process.env's
+    // case-insensitive property access. The npm path itself resolves in every case.
+    const env = { ...{
+      PATH: "C:\\Program Files\\nodejs", PATHEXT: ".CMD",
+      [key]: key.toLowerCase() === "comspec" ? systemCmd : "C:\\Windows",
+    } };
+    const deps = { cwd, exists: (path: string) => path === trustedNpm };
+    expect(resolveNpmCommand("win32", env, deps)).toBe(trustedNpm);
+    expect(npmInvocation(["view", "pkg@latest", "version"], "win32", env, deps)?.file).toBe(systemCmd);
+  });
+
+  test("preserves exact shell-key and SystemRoot precedence in copied environments", () => {
+    const env = {
+      PATH: "C:\\Program Files\\nodejs", PATHEXT: ".CMD",
+      SystemRoot: "C:\\Windows", SYSTEMROOT: "D:\\OtherWindows",
+      windir: "E:\\OtherWindows", ComSpec: "F:\\OtherWindows\\cmd.exe",
+    };
+    const deps = { cwd, exists: (path: string) => path === trustedNpm };
+    expect(npmInvocation(["--version"], "win32", env, deps)?.file).toBe(systemCmd);
+    expect(npmInvocation(["--version"], "win32", {
+      PATH: env.PATH, PATHEXT: env.PATHEXT, ComSpec: systemCmd, COMSPEC: "D:\\OtherWindows\\cmd.exe",
+    }, deps)?.file).toBe(systemCmd);
+  });
+
+  test("refuses missing, relative or ambiguous copied command-processor locations", () => {
+    for (const shell of [{}, { SYSTEMROOT: "relative" }, { COMSPEC: "cmd.exe" },
+      { SYSTEMROOT: "C:\\Windows", systemroot: "D:\\OtherWindows" }]) {
+      const env = { PATH: "C:\\Program Files\\nodejs", PATHEXT: ".CMD", ...shell };
+      const deps = { cwd, exists: (path: string) => path === trustedNpm };
+      expect(resolveNpmCommand("win32", env, deps)).toBe(trustedNpm);
+      expect(npmInvocation(["--version"], "win32", env, deps)).toBeNull();
+    }
+  });
+
   test("ignores current-directory candidates and resolves npm from an absolute PATH entry", () => {
     const existing = new Set([
       `${cwd}\\npm.cmd`,
@@ -274,5 +313,44 @@ describe("Windows npm update invocation", () => {
       cwd: appDataNpmDir,
       exists: path => path === only,
     })).toBeNull();
+  });
+
+  describe("registry-query classification against real npmInvocation shapes", () => {
+    const query = ["view", "@bitkyc08/opencodex@latest", "version"];
+    const winEnv = {
+      PATH: "C:\\Program Files\\nodejs", PATHEXT: ".CMD", SystemRoot: "C:\\Windows",
+    };
+    const winDeps = { cwd, exists: (path: string) => path === trustedNpm };
+
+    test("the cmd /d /s /c wrapper still reports 'view' as the npm operation", () => {
+      const invocation = npmInvocation(query, "win32", winEnv, winDeps);
+      expect(invocation?.options.windowsVerbatimArguments).toBe(true);
+      expect(spawnedNpmOperation(invocation?.args ?? [], invocation?.options)).toBe("view");
+    });
+
+    test("a spaced npm path holding a bare 'view' word cannot forge the operation", () => {
+      const spacedViewNpm = "C:\\Program Files\\tools view area\\npm.cmd";
+      const env = {
+        PATH: "C:\\Program Files\\tools view area",
+        ProgramFiles: "C:\\Program Files", PATHEXT: ".CMD", SystemRoot: "C:\\Windows",
+      };
+      const deps = { cwd, exists: (path: string) => path === spacedViewNpm };
+      const invocation = npmInvocation(query, "win32", env, deps);
+      expect(invocation?.args.at(-1)).toContain("tools^ view^ area");
+      expect(spawnedNpmOperation(invocation?.args ?? [], invocation?.options)).toBe("view");
+      const install = npmInvocation(["install", "-g", "@bitkyc08/opencodex@latest"], "win32", env, deps);
+      expect(spawnedNpmOperation(install?.args ?? [], install?.options)).toBe("install");
+    });
+
+    test("installs — including a package literally named 'view' — are not queries", () => {
+      for (const args of [["install", "-g", "@bitkyc08/opencodex@latest"], ["install", "view"]]) {
+        const wrapped = npmInvocation(args, "win32", winEnv, winDeps);
+        expect(spawnedNpmOperation(wrapped?.args ?? [], wrapped?.options)).toBe("install");
+      }
+      // Bare POSIX argv: the operation is argv[0], so a 'view' value later cannot match.
+      expect(spawnedNpmOperation(npmInvocation(query, "linux")?.args ?? [])).toBe("view");
+      expect(spawnedNpmOperation(["install", "view"])).toBe("install");
+      expect(spawnedNpmOperation(["install", "-g", "pkg@latest"])).toBe("install");
+    });
   });
 });

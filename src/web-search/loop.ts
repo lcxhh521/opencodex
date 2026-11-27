@@ -12,6 +12,9 @@ import type { AttemptRecoveryKind } from "../usage/log";
 import { isTruncatedStopReason } from "../responses/truncated-stop-reason";
 import { bridgeToResponsesSSE } from "../bridge";
 import { guardEmptyToolCatalogStream, type ClientToolCatalogRestriction } from "../lib/empty-tool-catalog";
+import { mergeUsage } from "../server/responses/empty-completion-guard";
+import { markSidecarContextOverflow, sidecarLoopTerminalEvent, upstreamErrorCode, type SidecarLoopFailure } from "../server/responses/context-overflow";
+import { markVerifiedModelNotInPlanResponse, MODEL_NOT_IN_PLAN_CODE, UNDECLARED_TOOL_CALL_ERROR_CODE, verifiedPlanRefusalMessage } from "../lib/errors";
 import { runWebSearch, type SidecarOutcome, type SidecarOutcomeRecorder, type SidecarSettings } from "./executor";
 import { runAnthropicWebSearch } from "./anthropic-executor";
 import { runXaiWebSearch, type XaiSearchOptions } from "./xai-executor";
@@ -21,8 +24,9 @@ import type { WebSearchBackendId } from "./index";
 import { pacingHeaderDeadline } from "./header-deadline";
 import { redactSecretString } from "../lib/redact";
 import { readBoundedResponseBody } from "../lib/bounded-body";
-import { applyUpstreamRecoveryInit, fetchWithResetRetry, prepareSameTarget429Wait, isNonReplayableResponse, SendBudgetExhaustedError } from "../lib/upstream-retry";
+import { applyUpstreamRecoveryInit, fetchWithResetRetry, prepareSameTarget429Wait, isNonReplayableResponse, isSameTargetRetryHold, SendBudgetExhaustedError } from "../lib/upstream-retry";
 import { rateLimitRetryDelayMs } from "../providers/key-failover";
+import { RequestPacingQueueOverloadError } from "../providers/request-pacing";
 import {
   isTranslatorBudgetExceededError,
   TRANSLATOR_MAX_TURN_BYTES,
@@ -31,6 +35,13 @@ import {
 import { formatWebSearchResults } from "./format-result";
 import { parseStreamWithProgress, RoutedModelInactivityError, WebSearchStreamProtocolError, WebSearchAdapterEventError } from "./progress-stream";
 import { WEB_SEARCH_TOOL_NAME } from "./synthetic-tool";
+import { newSidecarSearchCellId, rememberSidecarSearch, restoreSidecarSearchResults } from "./sidecar-search-replay";
+import {
+  ADVISOR_TOOL_NAME,
+  MAX_ADVISOR_CONTINUATIONS_PER_REQUEST,
+  parseAdvisorQuestionArgs,
+  type AdvisorSidecarStep,
+} from "../server/responses/advisor-slot";
 
 const SSE_HEADERS = {
   "Content-Type": "text/event-stream",
@@ -41,6 +52,8 @@ const SSE_HEADERS = {
 
 interface WebSearchCall {
   id: string;
+  kind?: "advisor";
+  question?: string;
   // One or more queries the model batched into a single web_search call. Always length >= 0; an
   // empty array means the model called the tool with neither `query` nor `queries` (handled as an
   // empty-query placeholder).
@@ -77,7 +90,7 @@ function parseQueries(argsBuf: string): string[] {
  * (Codex never sees the synthetic tool); every other event — text, thinking, real tool calls, done —
  * is preserved in order.
  */
-export function scanEventsForWebSearch(events: AdapterEvent[]): {
+export function scanEventsForWebSearch(events: AdapterEvent[], options: { advisor?: boolean; clientAdvisorAllowed?: boolean } = {}): {
   calls: WebSearchCall[];
   passthrough: AdapterEvent[];
   hasRealToolCall: boolean;
@@ -87,20 +100,32 @@ export function scanEventsForWebSearch(events: AdapterEvent[]): {
   const passthrough: AdapterEvent[] = [];
   let hasRealToolCall = false;
   let hasMalformedToolCall = false;
+  let refusal: Extract<AdapterEvent, { type: "error" }> | undefined;
   let pending: { name: string; id: string; argsBuf: string; closed: boolean; events: AdapterEvent[]; providerMetadata?: OcxProviderOpaqueToolCallMetadata } | null = null;
   const isBlank = (value: string): boolean => value.trim().length === 0;
   const flushPending = (): void => {
     // A pending call that never saw tool_call_end is structurally malformed.
     if (pending && !pending.closed) hasMalformedToolCall = true;
-    if (pending && pending.name !== WEB_SEARCH_TOOL_NAME) {
+    const advisor = options.advisor === true && pending?.name === ADVISOR_TOOL_NAME;
+    if (pending && pending.name !== WEB_SEARCH_TOOL_NAME && !advisor) {
       passthrough.push(...pending.events);
       if (pending.closed && !isBlank(pending.id) && !isBlank(pending.name)) hasRealToolCall = true;
     }
     pending = null;
   };
   for (const e of events) {
+    if (refusal) {
+      if ((e.type === "done" || e.type === "incomplete" || e.type === "error") && e.usage) refusal.usage = e.usage;
+      continue;
+    }
     if (e.type === "tool_call_start") {
       flushPending();
+      if (e.name === ADVISOR_TOOL_NAME && !options.advisor && !options.clientAdvisorAllowed) {
+        refusal = { type: "error", status: 502, errorType: "upstream_error", code: UNDECLARED_TOOL_CALL_ERROR_CODE,
+          message: "routed provider emitted advisor outside the current iteration's permitted tool catalog" };
+        passthrough.push(refusal);
+        continue;
+      }
       if (isBlank(e.id) || isBlank(e.name)) hasMalformedToolCall = true;
       pending = { name: e.name, id: e.id, argsBuf: "", closed: false, events: [e], providerMetadata: e.providerMetadata };
     } else if (e.type === "tool_call_delta") {
@@ -117,8 +142,20 @@ export function scanEventsForWebSearch(events: AdapterEvent[]): {
       } else {
         pending.events.push(e);
         pending.closed = true;
-        if (pending.name === WEB_SEARCH_TOOL_NAME) {
+        const advisor = options.advisor === true && pending.name === ADVISOR_TOOL_NAME;
+        if (e.incomplete) {
+          hasMalformedToolCall = true;
+          if (!advisor) passthrough.push(...pending.events);
+        } else if (pending.name === WEB_SEARCH_TOOL_NAME) {
           calls.push({ id: pending.id, queries: parseQueries(pending.argsBuf), providerMetadata: pending.providerMetadata });
+        } else if (advisor) {
+          calls.push({
+            id: pending.id,
+            kind: "advisor",
+            queries: [],
+            question: parseAdvisorQuestionArgs(pending.argsBuf).question,
+            providerMetadata: pending.providerMetadata,
+          });
         } else {
           passthrough.push(...pending.events);
           if (!isBlank(pending.id) && !isBlank(pending.name)) hasRealToolCall = true;
@@ -147,6 +184,35 @@ export function hasVisibleAssistantText(events: AdapterEvent[]): boolean {
 
 async function* replay(events: AdapterEvent[]): AsyncGenerator<AdapterEvent> {
   for (const e of events) yield e;
+}
+
+/**
+ * Keeps the Responses bridge alive while an internal sidecar await is pending. Rejections retain
+ * their original error, and each timeout is cleared on completion, failure, or generator return.
+ */
+async function* withHeartbeats<T>(promise: Promise<T>): AsyncGenerator<AdapterEvent, T> {
+  const tracked = promise.then(value => ({ value }));
+  for (;;) {
+    let timer: number | undefined;
+    const heartbeat = new Promise<undefined>(resolve => { timer = setTimeout(resolve, 1_000); });
+    let result: { value: T } | undefined;
+    try { result = await Promise.race([tracked, heartbeat]); }
+    finally { if (timer) clearTimeout(timer); }
+    if (result) return result.value;
+    yield { type: "heartbeat" };
+  }
+}
+
+function terminalUsage(events: AdapterEvent[]): OcxUsage | undefined {
+  for (const e of events) if (e.type === "done" || e.type === "incomplete") return e.usage;
+  return undefined;
+}
+
+/** Hidden iterations add counters only: their checkpoint and raw wire usage are not the final terminal's. */
+function countersOnly(usage: OcxUsage | undefined): OcxUsage | undefined {
+  if (!usage) return undefined;
+  const { contextTotalTokens: _context, rawUsage: _raw, ...counters } = usage;
+  return counters;
 }
 
 /**
@@ -198,7 +264,11 @@ function extractIterationThinking(events: AdapterEvent[]): OcxThinkingContent[] 
     // Match the bridge: consecutive signature snapshots update one block. The next
     // semantic event (including an empty thinking-block start) closes that block.
     if (signature !== undefined && e.type !== "thinking_signature" && e.type !== "heartbeat") flushVisible();
-    if (e.type === "thinking_delta") {
+    if (e.type === "text_delta" && e.anthropicThinkingSignature) {
+      flushVisible();
+      flushRaw();
+      parts.push({ type: "thinking", thinking: e.text, signature: e.anthropicThinkingSignature });
+    } else if (e.type === "thinking_delta") {
       flushRaw();
       thinking += e.thinking;
     } else if (e.type === "reasoning_raw_delta") {
@@ -266,10 +336,19 @@ function jsonError(status: number, message: string, event?: Extract<AdapterEvent
 /** Hard provider/parse failure inside an iteration. The eager first iteration converts it to a
  *  non-200 jsonError; later (already-streaming) iterations surface it as an in-stream error event. */
 class LoopError extends Error {
-  constructor(readonly status: number, message: string, readonly event?: Extract<AdapterEvent, { type: "error" }>) {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly event?: Extract<AdapterEvent, { type: "error" }>,
+    readonly detail?: Pick<SidecarLoopFailure, "upstreamCode" | "nonReplayable" | "verifiedPlanRefusal">,
+  ) {
     super(message);
     this.name = "LoopError";
   }
+}
+
+function loopFailure(e: LoopError): SidecarLoopFailure {
+  return { status: e.status, message: e.message, ...(e.event ? { event: e.event } : {}), ...e.detail };
 }
 
 /**
@@ -278,6 +357,9 @@ class LoopError extends Error {
  */
 export interface WebSearchLoopDeps {
   parsed: OcxParsedRequest;
+  advisor?: AdvisorSidecarStep;
+  /** Chat delivery only; never copied into parsed generation options. */
+  chatRawReasoningVisible?: boolean;
   clientToolCatalogRestriction?: ClientToolCatalogRestriction;
   adapter: ProviderAdapter;
   incomingMeta: IncomingMeta;
@@ -304,6 +386,8 @@ export interface WebSearchLoopDeps {
   settings: SidecarSettings;
   maxSearches: number;
   forceEmptyResponseId?: boolean;
+  /** Responses inbound only: deliver a non-retryable upstream refusal as `response.failed`. */
+  terminalRefusalAsFailed?: boolean;
   abortSignal?: AbortSignal;
   recordSidecarOutcome?: SidecarOutcomeRecorder;
   beforeSidecarDispatch?: () => void;
@@ -327,6 +411,13 @@ export interface WebSearchLoopDeps {
   onFirstOutput?: () => void;
   /** Raw adapter usage at the terminal event, pre wire-normalization (see bridgeToResponsesSSE onUsage). */
   onUsage?: (usage: OcxUsage | undefined) => void;
+  proxyErrorContext?: object;
+  /**
+   * After an `on429` rotation, offered the usage of the hidden iterations the left credential
+   * served. Returning true means it was billed to that credential's attempt, so `onUsage` will not
+   * report it again.
+   */
+  onRotatedUsage?: (usage: OcxUsage) => boolean;
   /** Observe the exact adapter request selected for each routed-model iteration. */
   onRequestBuilt?: (request: AdapterRequest) => void;
   /** Request-scoped executor retains the core's selection binding across loop retries. */
@@ -391,10 +482,13 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
     ? Math.floor(deps.stallTimeoutSec * 1000)
     : 300_000;
 
+  // Put recorded results back into replayed search pairs before the first iteration (#7269).
+  restoreSidecarSearchResults(parsed);
   const messages: OcxMessage[] = [...parsed.context.messages];
   const replaySnapshots = new Set<AnthropicReplaySnapshot>();
   const loopT0 = Date.now();
-  const allTools = adapter.name === "anthropic" ? anthropicDeclaredTools(parsed) : parsed.context.tools ?? [];
+  let allTools = adapter.name === "anthropic" ? anthropicDeclaredTools(parsed) : parsed.context.tools ?? [];
+  let activeToolChoice = parsed.options.toolChoice;
   let forcedNudgeAdded = false;
   let emptyNudgeAdded = false;
   let searchesExecuted = 0;
@@ -416,8 +510,14 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
 
   // Hard iteration bound (termination safety net); forceAnswer normally ends the loop sooner.
   // One iteration beyond the forced answer is reserved for its empty-answer recovery below.
-  const HARD_CAP = maxSearches + 3;
+  const HARD_CAP = maxSearches + 3 + (deps.advisor ? MAX_ADVISOR_CONTINUATIONS_PER_REQUEST : 0);
   let emptyAnswerRetries = 0;
+  // Every iteration re-sends the full context, but only the last one's terminal reaches the bridge.
+  // Search-calling passes and the discarded empty forced answer are summed here and added to what
+  // onUsage reports, so the request log meters what was actually sent. The client-facing terminal
+  // keeps the last iteration's usage: Codex and Claude Code size the context window from it, and
+  // a sum would read as a context several times larger and trigger early auto-compaction.
+  let hiddenUsage: OcxUsage | undefined;
   let accountRefusalOutputStarted = false;
   const connectTimeoutMs = deps.connectTimeoutMs ?? 200_000;
   const routedModelStallTimeoutMs = deps.routedModelStallTimeoutMs ?? 200_000;
@@ -425,6 +525,8 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
   interface IterationResponse {
     response: Response;
     responseAdapter: ProviderAdapter;
+    clientAdvisorAllowed: boolean;
+    syntheticAdvisorAllowed: boolean;
     recover?: (error: WebSearchAdapterEventError) => Promise<IterationResponse | undefined>;
   }
   type IterationSplit = ReturnType<typeof scanEventsForWebSearch> & {
@@ -459,9 +561,11 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         // through the adapter formatter or the generic transport error, which could expose its
         // raw message. A parent/client cancellation still owns the request lifecycle as 499.
         if (signal.aborted) throw new LoopError(499, "client closed request during web-search");
-        throw new LoopError(prepared.response.status, `Provider error ${prepared.response.status}`);
+        throw new LoopError(prepared.response.status, `Provider error ${prepared.response.status}`, undefined,
+          { nonReplayable: isNonReplayableResponse(prepared.response) });
       }
       let formatted = "";
+      let upstreamCode: string | undefined;
       if (body.displaySafe && !body.truncated && body.text.trim() && prepared.responseAdapter.formatErrorBody) {
         try {
           formatted = prepared.responseAdapter.formatErrorBody(
@@ -471,8 +575,18 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
           ).trim();
         } catch { /* formatter hooks are best-effort; unsafe raw text is never the fallback */ }
       }
+      if (body.displaySafe && !body.truncated) upstreamCode = upstreamErrorCode(body.text);
+      // A verified plan refusal keeps its fixed copy, code and provenance through this envelope, so a
+      // combo or policy can still move past it; an unverified echo of the code stays an ordinary failure.
+      const planMessage = body.displaySafe && !body.truncated ? verifiedPlanRefusalMessage(prepared.response, body.text) : undefined;
+      if (planMessage !== undefined) {
+        throw new LoopError(400, `Provider error 400: ${planMessage}`,
+          { type: "error", status: 400, message: planMessage, errorType: "invalid_request_error", code: MODEL_NOT_IN_PLAN_CODE },
+          { upstreamCode: MODEL_NOT_IN_PLAN_CODE, nonReplayable: isNonReplayableResponse(prepared.response), verifiedPlanRefusal: true });
+      }
       const suffix = formatted ? `: ${formatted.slice(0, 400)}` : "";
-      throw new LoopError(prepared.response.status, `Provider error ${prepared.response.status}${suffix}`);
+      throw new LoopError(prepared.response.status, `Provider error ${prepared.response.status}${suffix}`, undefined,
+        { upstreamCode, nonReplayable: isNonReplayableResponse(prepared.response) });
     }
   };
 
@@ -507,7 +621,9 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
     }
     const iterParsed: OcxParsedRequest = {
       ...parsed, stream: true,
-      ...(recoveringEmptyAnswer ? { options: { ...parsed.options, toolChoice: "none" as const } } : {}),
+      options: recoveringEmptyAnswer
+        ? { ...parsed.options, toolChoice: "none" as const }
+        : { ...parsed.options, toolChoice: activeToolChoice },
       context: { ...parsed.context, messages: iterMessages, tools: recoveringEmptyAnswer && !preserveAnthropicPrefix ? [] : allTools },
     };
     // One cumulative header deadline spans key rotations and reset sends, excluding local pacing.
@@ -590,7 +706,19 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
           request.releaseBodyObservation?.();
         }
         bindAnthropicRejectionResponse(request, response);
-        return { response, responseAdapter: requestAdapter };
+        const iterTools = iterParsed.context.tools ?? [];
+        const toolAllowed = toolChoiceToolPredicate(iterParsed.options.toolChoice, iterTools);
+        const clientAdvisorAllowed = iterTools.some(tool => !tool.advisor && !tool.namespace
+          && tool.name === ADVISOR_TOOL_NAME && toolAllowed(tool));
+        const declaredAdvisor = iterTools.find(tool => tool.advisor && tool.name === ADVISOR_TOOL_NAME);
+        // Exhaustion removes the declaration, but its paired limit result still belongs
+        // to the sidecar. A tools-disabled recovery revokes that permission too.
+        const advisorCandidate = declaredAdvisor ?? { name: ADVISOR_TOOL_NAME };
+        const syntheticAdvisorAllowed = !!deps.advisor && !recoveringEmptyAnswer
+          && (!!declaredAdvisor || deps.advisor.exhausted())
+          && toolChoiceToolPredicate(iterParsed.options.toolChoice,
+            declaredAdvisor ? iterTools : [...iterTools, advisorCandidate])(advisorCandidate);
+        return { response, responseAdapter: requestAdapter, clientAdvisorAllowed, syntheticAdvisorAllowed };
       };
 
       const recover = async (error: WebSearchAdapterEventError): Promise<IterationResponse | undefined> => {
@@ -620,7 +748,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
       // Same-target 429 wait-and-retry (opt-in `retryOn429`) BEFORE key rotation: a primary-key
       // rate-limit blip replays on the SAME key; rotation only runs after attempts exhaust.
       while (
-        prepared.response.status === 429
+        prepared.response.status === 429 && !isSameTargetRetryHold(prepared.response)
         && rateLimitRetryPolicy !== null
         && rateLimitRetries < rateLimitRetryPolicy.attempts
       ) {
@@ -662,6 +790,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         const rotated = await deps.on429(prepared.response.headers.get("retry-after"), prepared.response.headers,
           iterParsed, prepared.response);
         if (!rotated) break;
+        if (hiddenUsage && deps.onRotatedUsage?.(hiddenUsage)) hiddenUsage = undefined;
         const retainRefusal = prepared.response.status === 403
           && deps.incomingMeta?.providerName === "google-antigravity" && rotated.recoveryKind === "oauth-account-403";
         // Keep the bounded refusal readable until the sibling actually returns headers.
@@ -703,7 +832,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         throw new LoopError(504, `Provider response-header timeout after ${connectTimeoutMs}ms during web-search`);
       }
       if (signal.aborted) throw new LoopError(499, "client closed request during web-search");
-      if (error instanceof LoopError) throw error;
+      if (error instanceof LoopError || error instanceof RequestPacingQueueOverloadError) throw error;
       throw new LoopError(502, `Provider unreachable: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       headerDeadline.clear();
@@ -747,6 +876,8 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         inactivityTimeoutMs: routedModelStallTimeoutMs,
         translatorBudget,
         preserveAdapterError: deps.thinkingRecovery !== undefined,
+        // A pass that fails was still billed; the error path reports it with the hidden passes.
+        onErrorUsage: usage => { hiddenUsage = mergeUsage(hiddenUsage, usage); },
       })) {
         if (event.type === "done") {
           anthropicReplay = takeAnthropicReplay(event);
@@ -759,7 +890,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         // Codex show only `Working` until both Kiro attempts had finished (often 30-40 seconds).
         // Tool events remain buffered below, so the decision to invoke the hosted sidecar is still
         // atomic and no search call can escape before its stream has validated successfully.
-        else if (event.type === "text_delta" && event.phase === "commentary") { accountRefusalOutputStarted = true; yield event; }
+        else if (event.type === "text_delta" && event.phase === "commentary" && !event.anthropicThinkingSignature) { accountRefusalOutputStarted = true; yield event; }
         else if (liveWindowOpen && LIVE_STREAMABLE.has(event.type)) {
           // Live events are ALSO buffered: the scanner still needs them for thinking extraction
           // and the forced-answer output check; only the terminal replay skips them (by count).
@@ -799,11 +930,55 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
       if (terminal.code === "translation_buffer_limit") {
         throw new TranslatorBudgetExceededError("retained_collectors", TRANSLATOR_MAX_TURN_BYTES);
       }
-      throw new LoopError(502, terminal.message);
+      // Keep an adapter's own overflow verdict; every other terminal stays a generic 502.
+      throw new LoopError(502, terminal.message, terminal.code === "context_length_exceeded" ? terminal : undefined);
     }
     deps.thinkingRecovery?.observeIteration(events);
-    return { ...scanEventsForWebSearch(events), streamedPassthroughCount, events, anthropicReplay };
+    return { ...scanEventsForWebSearch(events, { advisor: prepared.syntheticAdvisorAllowed, clientAdvisorAllowed: prepared.clientAdvisorAllowed }), streamedPassthroughCount, events, anthropicReplay };
   };
+
+  /**
+   * Consults through the shared Advisor step and appends the paired result to the worker history.
+   * The synthetic call stays private, and the loop's abort signal prevents a cancelled result from
+   * being replayed. Anthropic reuses its lossless assistant message instead of appending another.
+   */
+  async function* runAdvisorCall(call: WebSearchCall, precedingThinking: OcxThinkingContent[], appendAssistant: boolean): AsyncGenerator<AdapterEvent> {
+    const advisor = deps.advisor;
+    if (!advisor) throw new LoopError(502, "advisor call arrived without an advisor sidecar");
+    if (appendAssistant) messages.push({
+      role: "assistant",
+      content: [
+        ...precedingThinking,
+        {
+          type: "toolCall" as const,
+          id: call.id,
+          name: ADVISOR_TOOL_NAME,
+          arguments: call.question === undefined ? {} : { question: call.question },
+          ...(cloneProviderOpaqueToolCallMetadata(call.providerMetadata)
+            ? { providerMetadata: cloneProviderOpaqueToolCallMetadata(call.providerMetadata) }
+            : {}),
+        },
+      ],
+      timestamp: Date.now(),
+    });
+    const consultParsed: OcxParsedRequest = {
+      ...parsed,
+      context: { ...parsed.context, messages },
+    };
+    const consulted = yield* withHeartbeats(advisor.consultCall(
+      consultParsed,
+      { ...call, name: ADVISOR_TOOL_NAME },
+      signal,
+    ));
+    if (signal.aborted) throw new LoopError(499, "client closed request during advisor consultation");
+    messages.push(consulted.message);
+    if (advisor.exhausted()) {
+      allTools = allTools.filter(tool => !tool.advisor && tool.name !== ADVISOR_TOOL_NAME);
+      if ((typeof activeToolChoice === "object" && activeToolChoice !== null
+        && "name" in activeToolChoice && activeToolChoice.name === ADVISOR_TOOL_NAME)
+        || (activeToolChoice === "required" && allTools.length === 0)) activeToolChoice = "auto";
+    }
+  }
 
   // Execute one model-requested web_search call. The call may batch several queries (native
   // `action.search.queries`); each query runs as its own sidecar search (budget-aware), but they are
@@ -814,6 +989,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
   async function* runSearchCall(call: WebSearchCall, precedingThinking: OcxThinkingContent[] = [], appendAssistant = true): AsyncGenerator<AdapterEvent> {
     const results: { query: string; outcome: SidecarOutcome }[] = [];
     let beganCell = false;
+    const cellItemId = newSidecarSearchCellId();
     if (call.queries.length === 0) {
       // The model called web_search with neither query nor queries — count it against the budget
       // (loop-bounding) exactly as the old empty-query placeholder did, but emit no cell.
@@ -835,7 +1011,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         // Real sidecar search. Open the cell once, before the first real query runs.
         if (!beganCell) {
           beganCell = true;
-          yield { type: "web_search_call_begin", id: call.id };
+          yield { type: "web_search_call_begin", id: call.id, itemId: cellItemId };
         }
         // F5: the anthropic sidecar authenticates with its own stored OAuth — it never touches the
         // ChatGPT forward headers and must NOT record a Codex/OpenAI pool outcome.
@@ -910,12 +1086,15 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
     });
     // One aggregated tool result. isError only when EVERY query failed (a partial success is usable).
     const allFailed = results.every(r => !!r.outcome.error);
+    const resultText = formatWebSearchResults(results, !!parsed._structuredOutput);
     messages.push({
       role: "toolResult", toolCallId: call.id, toolName: WEB_SEARCH_TOOL_NAME,
-      content: formatWebSearchResults(results, !!parsed._structuredOutput),
+      content: resultText,
       isError: allFailed, timestamp: now,
     });
     if (beganCell) {
+      // The client sees only the cell; keep the result so its replay can carry it (#7269).
+      rememberSidecarSearch(parsed, cellItemId, { id: call.id, arguments: callArgs }, resultText);
       // The cell is "completed" if any query produced a usable result, else "failed". `queries`
       // carries every attempted query so Codex renders the native plural label.
       const anySuccess = results.some(r => !r.outcome.error);
@@ -931,7 +1110,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         }
       }
       yield {
-        type: "web_search_call_end", id: call.id,
+        type: "web_search_call_end", id: call.id, itemId: cellItemId,
         queries: call.queries,
         status: anySuccess ? "completed" : "failed",
         ...(sources.length > 0 ? { sources } : {}),
@@ -947,7 +1126,12 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
     firstPrepared = await prepareIterationDrained(false);
   } catch (e) {
     if (abortSignal) abortSignal.removeEventListener("abort", linkAbort);
-    if (e instanceof LoopError) return jsonError(e.status, e.message, e.event);
+    if (e instanceof LoopError) {
+      const failure = loopFailure(e);
+      const failed = markSidecarContextOverflow(jsonError(e.status, e.message, e.event), failure);
+      if (failure.verifiedPlanRefusal) markVerifiedModelNotInPlanResponse(failed);
+      return failed;
+    }
     if (e instanceof SendBudgetExhaustedError) return jsonError(429, e.message,
       { type: "error", message: e.message, errorType: "rate_limit_error", code: e.code, retryable: false });
     throw e;
@@ -996,7 +1180,11 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
           // limit-reached result instead of failing the turn (#6464: stripping
           // the declaration makes some models emit the raw call as visible
           // text).
-          const shouldLoop = split.calls.length > 0 && !split.hasRealToolCall;
+          // A refused iteration ends the turn even when it carried a search call: running the
+          // search would send the refused context back to the model (#7148).
+          const shouldLoop = split.calls.length > 0 && !split.hasRealToolCall && !split.hasMalformedToolCall
+            && !split.passthrough.some(event => event.type === "incomplete" || event.type === "error"
+              || (event.type === "done" && isTruncatedStopReason(event.stopReason)));
           if (!shouldLoop) {
             // #1001: a forced-answer pass that ends `done` must have produced
             // usable output — never a malformed tool call, and never silence.
@@ -1026,6 +1214,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
                   stopReason: terminalEvent.stopReason,
                   eventTypes: [...new Set(split.passthrough.map(event => event.type))],
                 }));
+                hiddenUsage = mergeUsage(hiddenUsage, terminalEvent.usage);
                 if (!split.hasMalformedToolCall && !split.hasRealToolCall && emptyAnswerRetries === 0) {
                   emptyAnswerRetries++;
                   console.warn("[web-search-loop] empty forced answer — retrying once with tool calls disabled");
@@ -1048,7 +1237,21 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
             yield* replay(split.passthrough.slice(split.streamedPassthroughCount));
             return;
           }
+          hiddenUsage = mergeUsage(hiddenUsage, terminalUsage(split.passthrough));
+          if (split.calls.some(call => call.kind === "advisor")) {
+            const continuationError = deps.advisor!.beginLeg();
+            if (continuationError) {
+              // All legs are already in hiddenUsage; attaching it to the error would
+              // make the bridge's onUsage callback add and report those legs again.
+              if (hiddenUsage) deps.onUsage?.(hiddenUsage);
+              yield continuationError;
+              return;
+            }
+          }
           // The thinking that led to the search belongs to the FIRST call's assistant replay turn.
+          for (const event of split.passthrough.slice(split.streamedPassthroughCount)) {
+            if (event.type === "text_delta" && event.anthropicThinkingSignature) yield event;
+          }
           const preserveAnthropicHistory = prepared.responseAdapter.name === "anthropic";
           if (preserveAnthropicHistory) {
             if (!split.anthropicReplay) throw new LoopError(502, "Anthropic search history cannot be replayed losslessly");
@@ -1070,7 +1273,8 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
             for (const call of split.calls) {
               const original = originalCalls.find(block => block.id === call.id);
               if (!original) throw new LoopError(502, "Anthropic search replay tool identity changed");
-              call.queries = parseQueries(JSON.stringify(original.input));
+              if (call.kind === "advisor") call.question = parseAdvisorQuestionArgs(JSON.stringify(original.input)).question;
+              else call.queries = parseQueries(JSON.stringify(original.input));
             }
             bindAnthropicReplay(message, split.anthropicReplay);
             messages.push(message);
@@ -1078,9 +1282,13 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
           const iterationThinking = preserveAnthropicHistory ? [] : extractIterationThinking(split.passthrough);
           for (const [callIndex, call] of split.calls.entries()) {
             accountRefusalOutputStarted = true;
-            yield* runSearchCall(call, callIndex === 0 ? iterationThinking : [], !preserveAnthropicHistory);
+            if (call.kind === "advisor") yield* runAdvisorCall(call, callIndex === 0 ? iterationThinking : [], !preserveAnthropicHistory);
+            else yield* runSearchCall(call, callIndex === 0 ? iterationThinking : [], !preserveAnthropicHistory);
           }
+          if (split.calls.some(call => call.kind === "advisor")) yield { type: "assistant_boundary" };
         } catch (e) {
+          // The bridge reports no usage for either error; the iterations already sent still count.
+          if (hiddenUsage) deps.onUsage?.(hiddenUsage);
           if (isTranslatorBudgetExceededError(e)) {
             yield {
               type: "error",
@@ -1092,14 +1300,18 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
           } else {
             if (e instanceof SendBudgetExhaustedError) yield { type: "error", status: 429,
               errorType: "rate_limit_error", code: e.code, message: e.message, retryable: false };
-            else yield e instanceof LoopError && e.event ? e.event
+            // A later iteration's overflow ends the turn as the main path's terminal
+            // context_length_exceeded, so Codex compacts instead of resending (#7316).
+            else yield (e instanceof LoopError ? sidecarLoopTerminalEvent(loopFailure(e)) : undefined)
+              ?? (e instanceof LoopError && e.event ? e.event
               : e instanceof LoopError && deps.thinkingRecovery
                 ? { type: "error", status: e.status, errorType: "upstream_error", message: e.message }
-                : { type: "error", message: e instanceof Error ? e.message : String(e) };
+                : { type: "error", message: e instanceof Error ? e.message : String(e) });
           }
           return;
         }
       }
+      if (hiddenUsage) deps.onUsage?.(hiddenUsage);
       yield { type: "error", message: "web-search loop exceeded its iteration cap" };
     } finally {
       for (const snapshot of replaySnapshots) snapshot.release();
@@ -1117,15 +1329,17 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
       internalAbort.abort("client closed responses stream");
     }, undefined,
     {
-      translatorBudget,
+      translatorBudget, proxyErrorContext: deps.proxyErrorContext,
       replayCacheScope: parsed._reasoningReplayScope,
       ...(deps.clientToolCatalogRestriction ? { ...deps.clientToolCatalogRestriction, enforceDeclaredToolNames: false } : {}),
       ...(deps.forceEmptyResponseId ? { responseId: "" } : {}),
+      ...(deps.terminalRefusalAsFailed ? { terminalRefusalAsFailed: true } : {}),
       hideThinkingSummary: parsed.options.hideThinkingSummary,
+      chatRawReasoningVisible: deps.chatRawReasoningVisible,
       hideRawReasoning: parsed.options.hideRawReasoning,
       ...(deps.stallTimeoutSec !== undefined ? { stallTimeoutSec: deps.stallTimeoutSec } : {}),
       ...(deps.onFirstOutput ? { onFirstOutput: deps.onFirstOutput } : {}),
-      ...(deps.onUsage ? { onUsage: deps.onUsage } : {}),
+      ...(deps.onUsage ? { onUsage: (usage: OcxUsage | undefined) => deps.onUsage?.(mergeUsage(countersOnly(hiddenUsage), usage)) } : {}),
       ...(deps.onCompletedResponse ? { onCompletedResponse: deps.onCompletedResponse } : {}),
     },
   );

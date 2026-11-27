@@ -1,12 +1,20 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { restartCodexDesktopApp, type DesktopAppRestartIo } from "../../src/codex/desktop-app-restart";
+import { dirname, join } from "node:path";
+import { listCodexDesktopShellPids, restartCodexDesktopApp, type DesktopAppRestartIo } from "../../src/codex/desktop-app-restart";
+import {
+  codexCliUpdateSelectionGate,
+  beginCodexCliSelectionParentWrite,
+  createWorkerCommitWindow, createCodexCliUpdateFence,
+} from "../../src/codex/cli-update-selection-gate";
+import { classifyDesktopPicker, readCodexCatalogBinding, readCodexDesktopPickerState } from "../../src/codex/desktop-app/picker-freshness";
+import type { DesktopAppAdapter, DesktopProcess } from "../../src/codex/desktop-app/types";
 import { windowsDesktopAppAdapter } from "../../src/codex/desktop-app/windows";
 import { handleDesktopAppRestart } from "../../src/cli/restart-scope";
 import { setTrustedWindowsElevationExecutablesForTests } from "../../src/lib/windows-elevation";
+import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 /**
  * #2292: the desktop restart is the one path in the CLI that terminates a user's
@@ -524,5 +532,176 @@ describe("#2557 a failed probe is not an absent app", () => {
     const script = probe!.args[probe!.args.length - 1]!;
     expect(script).toContain("SilentlyContinue'\n");
     expect(script).not.toContain("SilentlyContinue' $root");
+  });
+});
+
+describe("desktop picker freshness inputs (#4761)", () => {
+  const install = { id: "fixture", root: "/Applications/ChatGPT.app", relaunch: "fixture" };
+  const shellExe = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT";
+  const helperExe = "/Applications/ChatGPT.app/Contents/Frameworks/Helper";
+  function fixtureAdapter(listed: DesktopProcess[] | null, discovered = true): DesktopAppAdapter {
+    const refuse = () => { throw new Error("a read-only probe must not act"); };
+    return {
+      discover: () => discovered ? install : null,
+      listProcesses: () => listed,
+      isShell: entry => entry.executable === shellExe,
+      ancestryPids: () => [],
+      requestQuit: refuse,
+      forceStop: refuse,
+      captureRelaunchContext: refuse,
+      relaunch: refuse,
+    };
+  }
+  const exec = () => { throw new Error("the fixture adapter never execs"); };
+  const listed: DesktopProcess[] = [
+    { pid: 10, parentPid: 1, createdAt: "a", executable: shellExe },
+    { pid: 11, parentPid: 10, createdAt: "b", executable: helperExe },
+    { pid: 12, parentPid: 10, createdAt: "c", executable: shellExe },
+  ];
+
+  test("lists only root shells, and null when discovery or the probe fails", () => {
+    expect(listCodexDesktopShellPids({ adapter: fixtureAdapter(listed), execFile: exec })).toEqual([10]);
+    expect(listCodexDesktopShellPids({ adapter: fixtureAdapter([]), execFile: exec })).toEqual([]);
+    expect(listCodexDesktopShellPids({ adapter: fixtureAdapter(null), execFile: exec })).toBeNull();
+    expect(listCodexDesktopShellPids({ adapter: fixtureAdapter(listed, false), execFile: exec })).toBeNull();
+  });
+
+  test("does not mistake a newer shell for proof that it loaded the current binding", () => {
+    // The shell may have loaded catalog A before an earlier sync rebound config.toml to
+    // the already-existing catalog B. B's older mtime cannot distinguish that case.
+    expect(classifyDesktopPicker([2_000, 3_000], 1_000)).toBe("unknown");
+    expect(classifyDesktopPicker([2_000, 1_000], 1_000)).toBe("stale");
+    expect(classifyDesktopPicker([500], 1_000)).toBe("stale");
+    expect(classifyDesktopPicker([500, null], 1_000)).toBe("stale");
+    expect(classifyDesktopPicker([null, 500], 1_000)).toBe("stale");
+    expect(classifyDesktopPicker([1_000, null], 1_000)).toBe("stale");
+    expect(classifyDesktopPicker([null, null], 1_000)).toBe("unknown");
+    expect(classifyDesktopPicker([], 1_000)).toBe("not_running");
+    expect(classifyDesktopPicker([], null)).toBe("not_running");
+    expect(classifyDesktopPicker(null, 1_000)).toBe("unknown");
+    expect(classifyDesktopPicker([2_000, null], 1_000)).toBe("unknown");
+    expect(classifyDesktopPicker([null, 2_000], 1_000)).toBe("unknown");
+    expect(classifyDesktopPicker([2_000], null)).toBe("unknown");
+  });
+
+  test("reads shell start times and the bound catalog's mtime through its seams", () => {
+    const read = (binding: string | null, catalogMtimeMs: number | null, starts: Map<number, number | null>) => readCodexDesktopPickerState({
+      adapter: fixtureAdapter(listed), execFile: exec,
+      readStartMs: pids => { expect(pids).toEqual([10]); return starts; },
+      catalogBinding: () => binding,
+      catalogMtimeMs: path => { expect(path).toBe("/codex/opencodex-catalog.json"); return catalogMtimeMs; },
+    });
+    const bound = "/codex/opencodex-catalog.json";
+    expect(read(bound, 1_000, new Map([[10, 5_000]]))).toBe("unknown");
+    expect(read(bound, 9_000, new Map([[10, 5_000]]))).toBe("stale");
+    expect(read(bound, 1_000, new Map([[10, null]]))).toBe("unknown");
+    expect(read(bound, null, new Map([[10, 5_000]]))).toBe("unknown");
+    // No model_catalog_json: the shell shows Codex's own roster, which no local file dates.
+    expect(read(null, 1_000, new Map([[10, 5_000]]))).toBe("unknown");
+  });
+
+  test("the catalog binding is the configured model_catalog_json, never the default-path fallback", () => {
+    const home = mkdtempSync(join(tmpdir(), "ocx-picker-binding-"));
+    const previous = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = home;
+    try {
+      expect(readCodexCatalogBinding()).toBeNull();
+      writeFileSync(join(home, "config.toml"), 'model = "gpt-5.5"\n');
+      writeFileSync(join(home, "opencodex-catalog.json"), "{}\n");
+      expect(readCodexCatalogBinding()).toBeNull();
+      writeFileSync(join(home, "config.toml"), 'model_catalog_json = "opencodex-catalog.json"\n');
+      expect(readCodexCatalogBinding()).toBe(join(realpathSync.native(home), "opencodex-catalog.json"));
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previous;
+      removeTreeWithRetry(home);
+    }
+  });
+
+  test("an armed test process without an injected executor never probes the real app", () => {
+    const previous = process.env.OCX_TEST_HOME_GUARD;
+    process.env.OCX_TEST_HOME_GUARD = "1";
+    try {
+      expect(readCodexDesktopPickerState({ adapter: fixtureAdapter(listed) })).toBe("unknown");
+    } finally {
+      if (previous === undefined) delete process.env.OCX_TEST_HOME_GUARD;
+      else process.env.OCX_TEST_HOME_GUARD = previous;
+    }
+  });
+});
+
+describe("the cli-update selection gate covers the whole restart ladder", () => {
+  test("CLI commit window refuses the real desktop restart caller before quit, then releases it", () => {
+    const calls: Call[] = [];
+    const io = scriptedIo({
+      discovery: DISCOVERY,
+      processes: "1000 900 2026-08-22T10:00:00.000Z",
+      calls,
+    });
+    const window = createWorkerCommitWindow({
+      gate: codexCliUpdateSelectionGate(),
+      fence: createCodexCliUpdateFence(),
+    });
+    let held = false;
+    try {
+      held = window.tryEnter();
+      expect(held).toBe(true);
+      const denied = withTrustedExes(() => restartCodexDesktopApp(io));
+      expect(denied).toEqual({
+        attempted: false, stopped: [], surviving: [], relaunch: "skipped",
+        reason: "selection_mutation_busy",
+      });
+      expect(existsSync(io.lock!.lockPath!)).toBe(false);
+      expect(calls.some(call => call.file === TASKKILL ||
+        /CloseMainWindow|Start-Process|OpenCodexPackageActivation/.test(call.args.join(" ")))).toBe(false);
+
+      window.exit();
+      held = false;
+      calls.length = 0;
+      // Same caller/lock path, plus explicit absence checks: same-PID reentry alone
+      // would NOT prove lock release.
+      const allowed = withTrustedExes(() => restartCodexDesktopApp(io));
+      expect(allowed).toEqual({
+        attempted: true, stopped: [1000], surviving: [], relaunch: "started",
+      });
+      expect(calls.filter(call => call.args.join(" ").includes("CloseMainWindow"))).toHaveLength(1);
+      expect(calls.some(call => call.args.join(" ").includes("Start-Process"))).toBe(true);
+      expect(calls.some(call => call.file === TASKKILL)).toBe(false);
+
+      expect(existsSync(io.lock!.lockPath!)).toBe(false);
+      const parent = beginCodexCliSelectionParentWrite();
+      try { expect(parent.entered).toBe(true); }
+      finally { if (parent.entered) parent.exit(); }
+    } finally {
+      if (held) window.exit();
+      removeTreeWithRetry(dirname(io.lock!.lockPath!));
+    }
+  });
+
+  test("a lock-acquisition throw still releases the process-wide selection gate", () => {
+    // Regression for the gate-then-lock ordering: the lock's own mkdir/write
+    // can throw, and before the fix that throw sat outside the try/finally and
+    // left the shared gate held for the rest of the process. A lock path whose
+    // parent is a regular file makes that acquisition throw deterministically.
+    const dir = mkdtempSync(join(tmpdir(), "ocx-desktop-restart-gate-"));
+    try {
+      const blocker = join(dir, "not-a-directory");
+      writeFileSync(blocker, "fixture");
+      const calls: Call[] = [];
+      const io = scriptedIo({
+        discovery: DISCOVERY,
+        processes: "1000 900 2026-08-22T10:00:00.000Z",
+        calls,
+      });
+      io.lock = { lockPath: join(blocker, "lock") };
+      expect(() => withTrustedExes(() => restartCodexDesktopApp(io))).toThrow();
+      // No discovery/quit/relaunch ran, and the gate is free again.
+      expect(calls).toHaveLength(0);
+      const parent = beginCodexCliSelectionParentWrite();
+      try { expect(parent.entered).toBe(true); }
+      finally { if (parent.entered) parent.exit(); }
+    } finally {
+      removeTreeWithRetry(dir);
+    }
   });
 });

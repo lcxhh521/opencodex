@@ -29,6 +29,7 @@ import {
   NATIVE_GPT6_LUNA_MODEL,
   NATIVE_GPT6_SOL_MODEL,
   NATIVE_GPT61_SOL_MODEL,
+  NATIVE_GPT61_TERRA_MODEL,
   NATIVE_MAIN_DRAIN_SENTINEL_MODELS,
   SELF_DESCRIBED_NATIVE_OPENAI_MODELS,
   hasNativeOpenAiCapabilityMetadata,
@@ -139,7 +140,7 @@ test("GPT-6 Sol, Luna and Astra keep their 272k default and 872k long window", (
     expect(nativeOpenAiContextTier(slug)).toEqual({ defaultWindow: 272_000, longWindow: 872_000 });
     expect(nativeOpenAiContextWindow(slug, { modelWindows: { [slug]: 872_000 } })).toBe(872_000);
     expect(entries.find(entry => entry.slug === slug)).toMatchObject({
-      context_window: 272_000, max_context_window: 272_000, auto_compact_token_limit: 244_800,
+      context_window: 272_000, max_context_window: 872_000, auto_compact_token_limit: 244_800,
     });
   }
 });
@@ -189,12 +190,13 @@ describe("gpt-6-astra-minor is an account-gated capability alias of gpt-6-astra"
 });
 
 describe("roster-pinned-models.json", () => {
-  test("holds GPT-6 Sol, GPT-6 Luna and GPT-6.1 Sol, verbatim rows", () => {
+  test("holds GPT-6 Sol/Luna and GPT-6.1 Sol/Terra verbatim rows", () => {
     const roster = readRows("src/codex/data/roster-pinned-models.json");
-    expect(roster.map(row => row.slug)).toEqual([NATIVE_GPT6_SOL_MODEL, NATIVE_GPT6_LUNA_MODEL, NATIVE_GPT61_SOL_MODEL]);
+    expect(roster.map(row => row.slug)).toEqual([NATIVE_GPT6_SOL_MODEL, NATIVE_GPT6_LUNA_MODEL, NATIVE_GPT61_SOL_MODEL, NATIVE_GPT61_TERRA_MODEL]);
     expect(efforts(roster[0])).toEqual(SOL_LADDER);
     expect(efforts(roster[1])).toEqual(LUNA_LADDER);
     expect(efforts(roster[2])).toEqual(SOL_LADDER);
+    expect(efforts(roster[3])).toEqual(SOL_LADDER);
   });
 
   test("never shadows a slug already in upstream-models.json", () => {

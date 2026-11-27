@@ -9,6 +9,8 @@ import {
   rewriteOcxCompactionsForNativeReplay,
 } from "../../src/codex/ocx-compaction-history";
 import { encodeCompactionSummary, SUMMARY_PREFIX } from "../../src/responses/compaction";
+import { encodeRetainedCompaction } from "../../src/responses/retained-compaction";
+import { applyReasoningRetention } from "../../src/responses/reasoning-retention";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 describe("OpenCodeX compaction history recovery", () => {
@@ -53,6 +55,21 @@ describe("OpenCodeX compaction history recovery", () => {
     expect(result.content.endsWith("\n")).toBe(true);
   });
 
+  test("structured v2 recovery keeps reasoning separate for another compaction", () => {
+    const retained = applyReasoningRetention([{ type: "reasoning", summary: [{ type: "summary_text", text: "Exact original reasoning." }] }], { archiveDir: "/unused" });
+    const reasoning = retained.retainedReasoning!.map(item => item.content[0]!.text);
+    const source = JSON.stringify({ type: "compacted", payload: { replacement_history: [
+      { type: "compaction", encrypted_content: encodeRetainedCompaction("summary", reasoning) },
+    ] } });
+    const result = rewriteOcxCompactionsForNativeReplay(source);
+    const history = JSON.parse(result.content).payload.replacement_history;
+    expect(result.replaced).toBe(1);
+    expect(history).toHaveLength(2);
+    expect(history[0].content[0].text).not.toContain("Exact original reasoning.");
+    expect(history[1].content[0].text).toBe(reasoning[0]);
+    expect(applyReasoningRetention(history, { archiveDir: "/unused" }).retainedReasoning).toEqual(retained.retainedReasoning);
+  });
+
   test("is byte-stable when no repairable compaction exists", () => {
     const source = `${JSON.stringify({
       type: "compacted",
@@ -62,15 +79,17 @@ describe("OpenCodeX compaction history recovery", () => {
     expect(rewriteOcxCompactionsForNativeReplay(source)).toEqual({ content: source, replaced: 0 });
   });
 
-  test("backs up and atomically repairs one database-selected rollout", () => {
+  test.each([false, true])("backs up and atomically repairs one database-selected rollout (long paths: %s)", longPaths => {
     const root = mkdtempSync(join(tmpdir(), "ocx-compaction-recovery-"));
     try {
       const codexHome = join(root, "codex");
-      const rolloutDir = join(codexHome, "sessions", "2026", "09", "07");
-      const backupRoot = join(root, "backups");
+      const segment = longPaths ? "long-path-".repeat(18) : "07";
+      const rolloutDir = join(codexHome, "sessions", "2026", "09", segment);
+      const backupRoot = join(root, "backups", segment);
       mkdirSync(rolloutDir, { recursive: true });
       const threadId = "01a018e6-242f-7801-81b8-ffc0a5c6d589";
       const rolloutPath = join(rolloutDir, `rollout-fixture-${threadId}.jsonl`);
+      if (longPaths) expect(rolloutPath.length).toBeGreaterThan(260);
       const original = `${JSON.stringify({
         type: "compacted",
         payload: {

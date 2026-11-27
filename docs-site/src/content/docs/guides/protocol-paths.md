@@ -102,7 +102,7 @@ These switches stage the new paths. Each defaults to off except `antigravityDire
 | `managedMessagesNative` | A Messages request whose route is a direct, key-authenticated Anthropic provider is sent as Messages instead of through the bridge. Routes that need bridge-only behaviour (a pinned effort, blocked-skill elision, the web-search sidecar, vision preprocessing, synthetic rows) stay on the bridge. |
 | `managedMessagesNativeOAuth` | Native Messages for the unpooled `anthropic` OAuth provider on `api.anthropic.com`. Effective only together with `managedMessagesNative`; a pooled Anthropic OAuth account set stays on the bridge. |
 | `directEncoders` | For a non-Responses upstream, the answer to a Chat or Messages client is encoded directly from the adapter's events instead of through the internal Responses stream. The request side is unchanged. |
-| `antigravityDirect` | **On by default**; set it to `false` to turn it off. A Chat or Messages request whose route is one Google Antigravity provider skips the internal Responses body in both directions: the conversation is decoded from the client body straight into what the Google adapter compiles from, and the answer is encoded directly as with `directEncoders`. The path reads `chat -> ir -> other` or `messages -> ir -> other`. Request settings (model, effort, limits, tool choice) still pass through the usual policies, so account rotation, effort rules and usage are unchanged. Combos, policies, a hosted web-search tool, images for a model marked text-only, a model the shadow-call intercept could rewrite, and text the proxy rewrites (a skills catalog, a generated-image link) stay on the bridge, and the log row names the reason. |
+| `antigravityDirect` | **On by default**; set it to `false` to turn it off. A Chat or Messages request whose route is one Google Antigravity provider skips the internal Responses body in both directions: the conversation is decoded from the client body straight into what the Google adapter compiles from, and the answer is encoded directly as with `directEncoders`. The path reads `chat -> ir -> other` or `messages -> ir -> other`. Request settings (model, effort, limits, tool choice) still pass through the usual policies, so account rotation, effort rules and usage are unchanged. Combos, policies, a hosted web-search tool, images for a model marked text-only, a model the shadow-call intercept could rewrite, and text the proxy rewrites (a skills catalog, a generated-image link) stay on the bridge, and the log row names the reason. On a Chat request the decoded conversation counts toward the shared translation budget, so a request whose retained IR exceeds it is refused with HTTP 413 and `translation_buffer_limit` before anything goes upstream. |
 | `shadowPlan` | At the end of each Chat or Messages request, the plan a preview would have predicted is compared with the path the request took; a disagreement adds `planMismatch: true` to the log row's path record. No second request is sent. |
 
 Change them with the CLI or by editing `protocols` in `config.json`
@@ -160,5 +160,11 @@ These paths still use the internal Responses bridge or are not covered:
   top-level fields outside its allowlist without a feature effect, and does not apply
   `claudeCode.stabilizePromptCache`.
   A recognized Claude Code client keeps `context-management-2025-06-27` together with its
-  `context_management` body field. Dropped beta names appear once in the proxy log as
-  `anthropic-beta-dropped=<names>`.
+  `context_management` body field. For first-party Anthropic key and OAuth requests, any native
+  Messages client can send `thinking-binding-controls-2026-08-01` with `thinking.block_binding`
+  on adaptive or enabled thinking. The proxy strips that nested field when the beta is absent or
+  the destination does not support it, preserving the rest of the thinking configuration. Cloud
+  vendor endpoints and third-party compatible providers do not inherit first-party beta support.
+  Pairing uses the final header, including operator-configured betas; a beta alone is valid for
+  [thinking transformation diagnostics](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking).
+  Dropped beta names appear once in the proxy log as `anthropic-beta-dropped=<names>`.

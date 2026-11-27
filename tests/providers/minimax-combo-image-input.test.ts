@@ -9,7 +9,7 @@ import { isModelVisionSidecarConsumer } from "../../src/vision/eligibility";
 import type { CatalogModel, OcxConfig, OcxProviderConfig } from "../../src/types";
 
 const M3 = "MiniMax-M3";
-const PREVIEW = "MiniMax-M3.1-Flash-Preview";
+const PREVIEW = "MiniMax-M3.1-Flash";
 const REGIONS = ["minimax", "minimax-cn"] as const;
 const originalFetch = globalThis.fetch;
 
@@ -77,6 +77,10 @@ describe("MiniMax Coding Plan Combo image input", () => {
         expect(comboImagesSupported(
           [{ provider: region, model: M3 }, { provider: "other", model: "blind" }],
           [...rows, { provider: "other", id: "blind", inputModalities: ["text"] }],
+        )).toBe(true); // a text-only member is covered by the Vision Sidecar
+        expect(comboImagesSupported(
+          [{ provider: region, model: M3 }, { provider: "other", model: "listener" }],
+          [...rows, { provider: "other", id: "listener", inputModalities: ["audio"] }],
         )).toBe(false);
       }
     }

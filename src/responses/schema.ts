@@ -1,4 +1,5 @@
 import * as z from "zod/v4";
+import { isCompactionItemType } from "./compaction";
 
 const inputTextSchema = z.object({ type: z.literal("input_text"), text: z.string() });
 const plainTextSchema = z.object({ type: z.literal("text"), text: z.string() });
@@ -26,10 +27,9 @@ const inputFileBlockSchema = z.object({
   file_data: z.string().optional(),
 });
 // codex-rs protocol/src/models.rs sends audio as input_audio with an audio_url, in
-// both user content and tool output. Accepting the block keeps a legitimate audio turn
-// out of the malformed-item catch-all. The translated IR records only its PRESENCE —
-// there is no audio carrier and no adapter-level refusal; a typed unsupported-modality
-// signal reaching final adapter dispatch remains a recorded residual.
+// both user content and tool output. The translated IR preserves supported inline
+// WAV/MP3 bytes and the Chat adapter sends them as input_audio; other wires and
+// unsupported formats are refused at the final translated-adapter boundary.
 const inputAudioBlockSchema = z.object({
   type: z.literal("input_audio"),
   audio_url: z.string().min(1),
@@ -75,6 +75,28 @@ const reasoningItemSchema = z.object({
   // Round-tripped opaque payload (native OpenAI encryption OR the proxy's ocxr1 envelope).
   encrypted_content: z.string().optional(),
 });
+
+/** A native v1 replacement history may establish replay provenance only after body success. */
+export const nativeCompactResponseSchema = z.object({
+  status: z.literal("completed").optional(),
+  error: z.null().optional(),
+  output: z.array(z.union([
+    userMessageItemSchema.required({ content: true }),
+    systemMessageItemSchema.required({ content: true }),
+    assistantMessageItemSchema.required({ content: true }),
+    reasoningItemSchema,
+    z.object({
+      type: z.string().refine(isCompactionItemType),
+      encrypted_content: z.string().refine(value => value.trim().length > 0),
+    }),
+  ])).min(1).refine(items => items.some(item => {
+    if (isCompactionItemType(item.type)) return true;
+    if (!("role" in item)) return false;
+    return typeof item.content === "string" ? item.content.trim().length > 0
+      : item.content.some(part => "text" in part && part.text.trim().length > 0);
+  })),
+});
+
 const functionCallItemSchema = z.object({
   type: z.literal("function_call"),
   id: z.string().optional(),
@@ -140,12 +162,15 @@ const builtinToolSchema = z.object({ type: z.string() }).loose();
  */
 export const HOSTED_TOOL_TYPES = [
   "web_search", "web_search_preview", "file_search", "computer_use_preview",
-  "code_interpreter", "image_generation", "mcp",
+  "code_interpreter", "image_generation", "mcp", "tool_search", "computer_use", "image_gen",
 ] as const;
 
 const hostedToolType = z.enum(HOSTED_TOOL_TYPES);
 
-const allowedToolEntrySchema = z.object({ type: z.string(), name: z.string().optional() });
+const allowedToolEntrySchema = z.union([
+  z.object({ type: z.literal("mcp"), server_label: z.string().min(1), name: z.string().nullable().optional() }),
+  z.object({ type: z.string(), name: z.string().optional() }),
+]);
 
 export const toolChoiceSchema = z.union([
   z.literal("auto"),
@@ -158,6 +183,7 @@ export const toolChoiceSchema = z.union([
 ]);
 
 export const reasoningConfigSchema = z.object({
+  enabled: z.boolean().optional(),
   effort: z.string().optional(),
   summary: z.enum(["auto", "concise", "detailed", "none"]).optional(),
 });

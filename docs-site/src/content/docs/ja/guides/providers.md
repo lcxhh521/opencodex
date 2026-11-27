@@ -57,7 +57,9 @@ Codex login を Pool モードで使うと、Providers の概要には任意の 
 [`retryOn429`](/ja/reference/configuration/)（同一キーでの 429 リトライ）は API キー プロバイダー
 （`authMode: "key"`）のみに適用されます。OAuth・forward・ローカル プリセットは除外されます —
 同じトークンを再送すべきではなく、ローカルランタイムには保存すべきリモートキーがありません。
-オプトインです: オプションが無ければ無効、オブジェクトがあれば `enabled: false` でない限り有効です。
+ドキュメントに記載された宛先固有のデフォルトを除き、オプトインです。正規の Mistral Chat は、既存のリクエスト全体の送信枠の範囲内で、粘り強いリトライポリシー（再送 6 回、フォールバック間隔 10 秒）を使います。`enabled: false` を含む明示的な `retryOn429` 設定が優先されます。Mistral プリセットは、渡されたプロンプトキャッシュキーもデフォルトで転送します。`promptCacheKey: false` で転送を無効にできます。キャッシュアフィニティは再利用の可能性を高めますが、キャッシュヒットを保証せず、トークンスループットの制限もなくしません。
+
+Mistral は Studio キーと Vibe キーの両方に 1 つの API キー プロバイダーを使います。キーの種類とプランの許容量は [Mistral の API キーのドキュメント](https://docs.mistral.ai/admin/identity-access/api-keys)に記載されています。プロキシはキーからサブスクリプションのティアを推測しません。すべてのモデルで、上流が明示した `Retry-After` の期限は、同じ認証情報とモデルでの呼び出し間で共有されます。リトライ時刻のない 429 は、有効な分単位カウンターが容量の枯渇を示す場合、または拒否されたクエリの実測コストが残りトークンを超えつつ公表された全許容量には収まる場合に、控えめな 60 秒の回復待機を開始することがあります。これはローカルの回復ポリシーであり、サーバーのリセット時刻を正確に予測するものではありません。正常なトラフィックでは、次のクエリのキャッシュやコストを予測しません。待機後に回復プローブを 1 回だけ送り、成功すれば通常のトラフィックに戻ります。欠落、不正な形式、利用権ゼロ、月間枠の枯渇、全許容量超過といった根拠からは、リセットを作り出したり履歴をコンパクトしたりしません。`requestPacing: { "enabled": false }` または `retryOn429: { "respectRetryAfter": false }` で共有ペーシングを無効にします。同じキーでの再送について、Mistral のリトライ時刻が `retryOn429.maxIntervalMs` を超える場合、プロキシは早すぎる再送をせず、429 とリトライのヒントを返します。ラウンドロビンのキー選択が有効な場合、待機中のリクエストはキーのクールダウンを再確認して代替キーのペーシング容量を確保し、出力前のキー拒否はリクエストの既存の送信上限内で正常なキーに切り替えて回復できます。コンテキストウィンドウとモデルごとのコンパクション設定は独立したままです。
 
 ## 1. ChatGPT ログイン(forward / パススルー)
 
@@ -101,6 +103,7 @@ ocx login google-antigravity
 ocx login cursor       # Cursor 専用 PKCE ログイン
 ocx login command-code # Command Code のブラウザ OAuth (または ~/.commandcode/auth.json を取り込み)
 ocx login devin       # Cognition/Devin: Devin CLI の資格情報を優先インポート、なければ Auth0 ブラウザサインイン
+ocx login dsh-account # DeepSeek Harness Desktop (~/.dsh/.credentials.yaml の許可を取り込み)
 ocx login github-copilot  # GitHub デバイスフロー → Copilot トークン (Copilot Pro/Business)
 ocx login codex        # Codex アカウントプール (別名: chatgpt, openai / プロキシの起動が必要)
 ocx logout <provider>
@@ -117,6 +120,7 @@ ocx logout <provider>
 | `google-antigravity` | `google` | `https://daily-cloudcode-pa.googleapis.com` | Google OAuth を Cloud Code Assist wire で使用。ライブ探索は認証済みの CCA `v1internal:fetchAvailableModels` エンドポイントを使用し、ログイン中のアカウントで利用可能な agent モデルのみを公開します。管理されたカタログはフォールバックとして残ります。 |
 | `cursor` | `cursor` | `https://api2.cursor.sh` | 実験的 PKCE ログイン、HTTP/2 トランスポート、アカウント別モデル探索をサポート。 |
 | `devin` | `devin` | `https://server.codeium.com` | 実験的な非公式 Cognition/Devin ブリッジ。ログインはまず、インストール済み Devin CLI が保持する認証情報を取り込みます（`devin auth login` が `devin-session-token` を自身の `credentials.toml` に書き込みます）。なければ Auth0 のブラウザサインインを開き、貼り付けたトークンを `RegisterUser` で長期 API キーに交換します。`ocx login devin-cli` は非推奨エイリアスとして引き続き使えます。モデル一覧は `GetCascadeModelConfigs` でアカウントごとに取得し、ストリーミングは Connect-RPC 上の `runTurn` 経路のみを使います。ダッシュボードのプリセットには既定で含まれません。 |
+| `dsh-account` | `dsh-account` | `https://api.deepseek.com/anthropic` | 実験的なインポート優先アカウントプロバイダー。インストールおよびサインイン済みの DeepSeek Harness (DSH) Desktop アカウントを再利用します。明示的なインポート時に `~/.dsh/.credentials.yaml` から厳格に読み取り専用で資格情報を読み込みます。DeepSeek API キー課金とは完全に独立しています。 |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | 実験的。GitHub デバイスフロー + `copilot_internal` 交換（VS Code OAuth クライアント）。有効な Copilot サブスクリプションが必要で、公式のサードパーティ API ではありません。 |
 
 Google Antigravity のアカウント・プロバイダーのクォータ確認は、モデル一覧へのフォールバックも含め、固定の Google エンドポイントを使用します。その宛先では透過 Fake-IP DNS に対応し、TLS 検証、リダイレクト拒否、プライベートアドレス検査を維持します。カスタム base URL はモデル要求にのみ適用されます。`NO_PROXY` は直接接続のポリシーを維持します。
@@ -161,7 +165,7 @@ opt-in した上流がこのフィールドを拒否しても、opencodex はフ
 
 認証情報に固定アカウント ID やメールがある OAuth プロバイダーはログインを複数保持できます。
 Providers ページでアカウントを追加し、別アカウントをログアウトせずにアクティブアカウントだけを切り替えられます。
-アカウント識別情報がない Kimi 認証情報は通常のログインではアクティブスロットを差し替えますが、明示的な **アカウントを追加** では既存スロットを保持し、別の新しいスロットをアクティブにします。Kiro アカウントはプロファイル ARN をキーに保存されます。
+アカウント識別情報がない Kimi 認証情報は通常のログインではアクティブスロットを差し替えますが、明示的な **アカウントを追加** では既存スロットを保持し、別の新しいスロットをアクティブにします。Kiro アカウントはプロファイル ARN と、取得できる場合はサインインしたユーザーのメールアドレスを組み合わせて識別されます。同じ組織プロファイルを共有するユーザーも、それぞれ別の認証情報を保持できます。
 `chatgpt` は Codex アカウントプールに別の保存場所があり、常に単一スロットのみ書き込みます。トークンは `~/.opencodex/auth.json` に保存され、
 `/api/oauth/accounts` はマスク済みメタデータのみを返します。
 
@@ -180,6 +184,8 @@ cat accounts.json | ocx account import google-antigravity --format cockpit-tools
 
 ### Kiro 認証情報の取り込み
 
+ダッシュボードでは **AWS IAM Identity Center** を選び、組織の AWS アクセスポータル URL と SSO リージョンを入力すると、CLI や SSH を使わずにアカウントを追加できます。ブラウザーでデバイスコードを承認し、複数の Kiro プロファイルがある場合は保存するものを選択します。以下の CLI 手順は **Kiro CLI** の選択肢に適用されます。
+
 Kiro のログインには Kiro CLI が必要です。Unix では `curl -fsSL https://cli.kiro.dev/install | bash`、Windows PowerShell では `irm 'https://cli.kiro.dev/install.ps1' | iex` でインストールしてから、先に `kiro-cli login` でサインインしてください。`kiro-cli` セッションがない場合、`ocx login kiro` は貼り付けたアクセストークンまたは `KIRO_ACCESS_TOKEN` 環境変数にフォールバックします。
 
 通常の `ocx login kiro` 取り込みは CLI の SQLite データベースを読み取り専用で開き、データベース、WAL、SHM を変更しません。
@@ -191,9 +197,20 @@ Kiro のログインには Kiro CLI が必要です。Unix では `curl -fsSL ht
 
 ロールバックはスナップショットがある場合にのみ可能なため、セッションストアが存在するのに取得できない場合（ファイルが読めない、スキーマの不一致、トークン選択があいまい）、`KIROCLI_DB_PATH` / `KIRO_CLI_DB_FILE` が実際の CLI ストアと異なるインポート先を指す場合、またはプライマリ CLI データベースに認識できるトークン行がない場合、**アカウントを追加**は `kiro-cli` のログアウトを拒否します。通常の `kiro-cli` データパス上の壊れたデータベースを修復または削除し、インポート専用セレクタが設定されていれば解除してから再試行してください。既存の `kiro-cli` セッションがまったくない環境には影響しません。
 
+### DeepSeek Account (DSH)
+
+`dsh-account` は、インストールおよびサインイン済みの DeepSeek Harness (DSH) Desktop アプリケーションの認証済みアカウント資格情報を再利用する、実験的なインポート優先アカウントプロバイダーです。
+
+- **DeepSeek API キーから独立:** `dsh-account` はユーザーの認証済み DeepSeek セッションクォータ（通常/ボーナスウォレット残高および総支出）を使用しますが、`deepseek` プロバイダーはプラットフォーム API キー残高から課金されます。この2つの資格情報ドメインおよびルーティングは厳格に分離されており、相互にフォールバックすることはありません。
+- **明示的インポートのみ:** OpenCodeX は DeepSeek Harness がインストールされサインインされているか（`~/.dsh/.credentials.yaml`）を検出しますが、ユーザーの明示的な操作（`ocx login dsh-account` または Web ダッシュボードでのインポートクリック）なしにトークンを自動的にコピー、インポート、または使用することはありません。
+- **DSH 資格情報ストアへの読み取り専用:** OpenCodeX は `~/.dsh/.credentials.yaml` を厳格に読み取り専用として扱います。OpenCodeX が DeepSeek Harness に属するファイルの書き込み、変更、削除、またはアクセス権の変更を行うことは決してありません。
+- **隔離された資格情報の複製とログアウト:** インポート時、OpenCodeX は DeepSeek の信頼できる認証エンドポイント（`/auth-api/v0/users/current`）に対してトークンを検証し、OpenCodeX 認証ストアに独自の複製を保存します。OpenCodeX でアカウントをログアウトまたは削除しても、OpenCodeX のローカル複製が削除されるだけであり、上流のリモートセッションログアウトがトリガーされたり、DeepSeek Harness Desktop からサインアウトされたりすることはありません。
+- **バックグラウンドトークン自動ローテーションなし・401 時の再インポート:** DSH セッショングラントには自動バックグラウンド更新エンドポイントがありません。上流から HTTP 401（`ACCOUNT_TOKEN_INVALID`）が返された場合、OpenCodeX はアカウントを `needsReauth` としてマークし、ルーティングを停止します。アクセスを再開するには、ユーザーが `ocx login dsh-account` で明示的に再インポートする必要があります。
+- **サードパーティ免責事項:** OpenCodeX は、サードパーティクライアントによるセッショングラントの再利用について、DeepSeek 公式からの承認や保証を主張するものではありません。
+
 ## 3. API キーカタログ
 
-opencodex には組み込みプリセットが 104 個含まれています。キー方式 85、OAuth 15、ローカル 3、
+opencodex には組み込みプリセットが 106 個含まれています。キー方式 85、OAuth 17、ローカル 3、
 デフォルト ChatGPT 転送プリセット 1 です。ダッシュボードの **Add provider** ピッカーはキー発行ページを開き、
 入力したキーを検証した後保存します(検証はプロバイダー固有です)。主な項目は以下のとおりです:
 
@@ -241,13 +258,13 @@ Cline IDE/CLI のみで API からは使えません。`minimax/minimax-m2.5` �
 | Novita AI | `https://api.novita.ai/openai/v1` |
 | Together | `https://api.together.xyz/v1` |
 | Fireworks | `https://api.fireworks.ai/inference/v1` |
-| Moonshot (Kimi API) · Kimi (coding) | `https://api.moonshot.ai/v1` · `https://api.kimi.com/coding/v1` |
+| Moonshot (Kimi API) · Kimi (coding) | `https://api.moonshot.ai/v1` · `https://api.kimi.com/coding/v1`。`moonshot` API の既定モデルは `kimi-k3.1-pro` です。公式 API の保存済み `kimi-k2.5` 選択はこのモデルへ移行します。 |
 | Hugging Face | `https://router.huggingface.co/v1` |
 | NVIDIA NIM | `https://integrate.api.nvidia.com/v1` |
 | Z.AI (GLM Coding) | `https://api.z.ai/api/coding/paas/v4` |
 | Zhipu AI (BigModel) | `https://open.bigmodel.cn/api/paas/v4` |
 | [BigModel Coding Plan — Responses (静的モデル一覧)](/guides/providers/#bigmodel-coding-plan-over-responses) | `https://open.bigmodel.cn/api/v1` |
-| Qwen Cloud | トークンプラン(デフォルト): `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` · 従量課金: `https://dashscope.aliyuncs.com/compatible-mode/v1` · またはカスタム |
+| Qwen Cloud | トークンプラン(デフォルト): `https://token-plan.maas.qwencloudapi.com/compatible-mode/v1` · 従量課金: `https://dashscope.aliyuncs.com/compatible-mode/v1` · またはカスタム |
 | Tencent Cloud Coding Plan | `https://api.lkeap.cloud.tencent.com/coding/v3` |
 | SiliconFlow | `https://api.siliconflow.cn/v1` |
 | Volcengine Ark · Coding Plan · Agent Plan | `https://ark.cn-beijing.volces.com/api/v3` · `https://ark.cn-beijing.volces.com/api/coding/v3` · `https://ark.cn-beijing.volces.com/api/plan/v3` |
@@ -267,13 +284,20 @@ Chat Completions モデル（および Responses 専用で Responses にルー�
 [OpenGateway ダッシュボード](https://opengateway.ai/api-keys)でキーを作成し、
 `ocx provider add opengateway` を実行するか、ダッシュボードで **OpenGateway** を選択してください。
 Chat リクエストは設定済みの Bearer キーを使います。公開一覧はキーの有効性を検証しません。
+Responses では OpenGateway がネイティブのカスタムツール呼び出しの再送を拒否するため、プリセットはコードモードの `exec` など Codex のカスタムツールを送信前に関数ツールへ変換します。
+ツール結果のコンテンツ配列はテキストとして送り、画像は対応するツール結果グループの後に保持します。refusal や不透明なコンテンツなど、サポートされない結果パートは送信前に明示的なクライアント入力エラーとして拒否します。
+画像の詳細度 `original` はゲートウェイが受け付ける `high` に変換し、画像のバイトはそのまま保ちます。
+ネイティブ Responses ルートは、テキストのみの空の完了を成功として返す前に検査します。
+出力予算を使い切った場合は `max_output_tokens` を伴う `incomplete` になり、プロキシは要求された予算を増やしません。予算が残っていて安全に再送できる空の完了は、既存の送信上限の範囲内で 1 回だけ再試行することがあります。明示的な `emptyCompletionRetry: false` または `OCX_EMPTY_COMPLETION_RETRY=0` でこの再試行を無効にします。テキスト、refusal、ツールの動作、未知のストリームイベントがあると再送せず、元のストリームを保持します。この保護は他のプロバイダーやそのリトライのデフォルトを変更しません。
+再送には明示的な `store: false`、完全な入力、クライアント実行のツールのみが必要です。`web_search` などのホスト型ツールがあると、ツールイベントが観測されていなくても自動再送しません。
 
-**OpenCode Zen**（`opencode-zen`）とキー不要の **OpenCode Free** プリセットは
-`https://opencode.ai/zen/v1` を共有します。このゲートウェイ上の無料モデルは、しばしばおおよそ毎分 15–20 リクエストの短時間レート制限に当たります（コミュニティ計測。OpenCode は RPM を公表しません）。Zen は `Retry-After` / `X-RateLimit-*` ヘッダーなしの汎用 429 を返すことがあります。これはキー不要デスクトップ枠（`opencode-free` で Big Pickle/無料モデル約 200 回 / 5 時間）とは別です。Zen がそのような 429 で `Retry-After` を省略した場合、opencodex はクライアント向けエラーに案内を足し、合成 `Retry-After` を付けます（上流の `Retry-After` があればそれが優先されます）。同一キーの待機再試行は [`retryOn429`](/ja/reference/configuration/) でオプトインします。
+**OpenCode Zen**（`opencode-zen`）は [opencode.ai/auth](https://opencode.ai/auth) の API キーで `https://opencode.ai/zen/v1` を使用します。無料モデルは毎分約 15–20 リクエストの短時間レート制限に当たることがあります（コミュニティ計測。OpenCode は RPM を公表していません）。レート制限 429 に `Retry-After` がない場合、opencodex は案内と合成 `Retry-After` を追加し、有効な上流ヘッダーを優先します。同一キーの再試行は [`retryOn429`](/ja/reference/configuration/) で有効にします。
 
-**キー不要の `opencode-free` 枠は、現在サードパーティのクライアントに閉じられています。** Zen は `x-opencode-session` ヘッダーを伴わないリクエストをすべて拒否し、エラータイプ `MissingSessionID` と "OpenCode's free tier can only be used in OpenCode" というメッセージを返します。関門はヘッダーの有無だけを見るため、プロキシは値をでっち上げれば通過できますが、opencodex はそうしません。セッション識別子とバージョン付きの `opencode/<version>` User-Agent を作って送ることは、自分が OpenCode クライアントであると主張することであり、OpenCode はこのキー不要の枠についてサードパーティ連携の契約を公開していません。その方法で得た HTTP 200 は許可ではなく、突破された関門にすぎません。そこで opencodex は回避せずに制限を報告します。`opencode-free` へのリクエストは、上流の関門を説明するエラーを返します。
+正規の `opencode-zen` プロバイダーで API キー認証と公式ルート `https://opencode.ai/zen/v1` または `https://opencode.ai/inference/v1` を使用すると、Gemini は既定の `googleMode: ai-studio` で Google ネイティブ API を自動的に使用します。Zen のモデル ID は、`-tiered` 接尾辞のない Flash ID もそのまま保持します。Claude は `googleMode` に関係なく Anthropic Messages を使用します。保存済み設定の読み込み時、これらのネイティブモデルの適格な旧 Chat/Responses オーバーライドと、適格な Responses 専用 `image_generation` ホストツール設定のみを無視します。カスタムプロバイダー、キー認証以外のルート、その他の設定は変更しません。
 
-同じモデルに至るサポートされた経路は、[opencode.ai/auth](https://opencode.ai/auth) で発行した OpenCode Zen API キーを使う **`opencode-zen`** プリセットです。OpenCode が後にキー不要の枠へのサードパーティ経路を公開すれば、opencodex もそれに従えます。それまでこのプリセットは制限を記録する役割を担います。上流の規約: [opencode.ai/docs/zen](https://opencode.ai/docs/zen/)。
+**`opencode-free` のサポートは削除されました。** OpenCode の上流無料枠の制限により、すべてのモデルが `403 permission_denied` を返すためです（[#7255](https://github.com/lidge-jun/opencodex/issues/7255)）。既存設定の読み込み時は該当項目と依存するモデル参照をメモリ上で無効にし、プロセスごとに一度警告します。読み込み時にファイルは変更しません。次回の設定保存時に、これらの項目と参照は config.json から削除されます。保存前に元のファイルが隣の `config.json.pre-opencode-free-removal.bak` に自動保存されます。その名前が使用中なら一意の名前のコピーを作成します。バイトが同一の独立したコピーは、所有者のみがアクセスできることを検証できる場合に限り再利用し、それ以外は隣に保護された新しいコピーを作成します。既存ファイルは上書きしません。初回の読み込みが重なると、同一の保護されたコピーが複数残る場合があります。警告には復元用コピーのパスが表示されます。ダウングレード後などに、そのコピーを config.json に上書きして復元できます。コピーに失敗した場合は、すぐに config.json をコピーするよう警告されます。既定のプロバイダーだった場合、標準の OpenAI OAuth 経路を既定にします。`opencode-go`、API キー付きの `opencode-zen`、または別のプロバイダーを使用してください。[OpenCode Zen 規約](https://opencode.ai/docs/zen/)。 パッシブ読み取りではメモリ内の無効化のみを行い、コピーの作成や警告は行いません。
+
+正常な Claude Desktop の割り当てと既定値は保持されます。ソースモデルの許可リストが空になるルールは無効になり、注入モデルが削除された場合はネイティブサブエージェント同期も無効になります。その後の設定保存では、削除済み参照を復元せず、正常な同時編集を保持します。
 
 大半は bearer キーと共に `openai-chat` アダプターを使い、**Xiaomi MiMo**（`xiaomi`）などの
 Anthropic 互換プリセットは `anthropic` アダプター（`x-api-key`）を使います。Xiaomi には
@@ -443,6 +467,9 @@ Sol/Terra/Luna をフォールバックリストに入れています。
 | Codex ログイン(Pool または Direct) | `gpt-5.6-*` | 922,000 |
 | OpenAI (API キー) | `openai-apikey/gpt-5.6-*` と `*-pro` | 922,000 (max input 922,000) |
 | OpenRouter | `openrouter/openai/gpt-5.6-sol`、`openrouter/openai/gpt-5.6-terra`、`openrouter/openai/gpt-5.6-luna` | 922,000 |
+| Codex | `gpt-6.1-terra` | 500,000 / 872,000 |
+| OpenAI API | `openai-apikey/gpt-6.1-terra` | 1,050,000 (128,000 max output) |
+| OpenRouter | `openrouter/openai/gpt-6.1-terra` | 1,050,000 |
 | Cursor | `cursor/gpt-5.6-sol`、`cursor/gpt-5.6-terra`、`cursor/gpt-5.6-luna` | 1,000,000 |
 
 ネイティブ GPT-5.6 項目は固定の上流推論段階に従います。例えば Luna には
@@ -462,7 +489,7 @@ Amazon Bedrock ネイティブ API のような、これらの実装のいずれ
 Gateway** は URL にアカウント + ゲートウェイ ID を埋める必要があります。
 
 Copilot は混在 wire カタログを提供します。モデル（`gpt-5.3-codex`、`gpt-5.4`、
-`gpt-5.4-mini`、`gpt-5.5`、`gpt-5.6-luna`、`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-6-astra`, `grok-4.5`, `grok-4.6`, `mai-code-1.1-flash`, `mai-code-1-flash-picker`）はエージェント
+`gpt-5.4-mini`、`gpt-5.5`、`gpt-5.6-luna`、`gpt-5.6-sol`、`gpt-5.6-terra`、 `gpt-6.1-sol`、 `gpt-6.1-terra`、 `gpt-6-astra`, `grok-4.5`, `grok-4.6`, `mai-code-1.1-flash`, `mai-code-1-flash-picker`）はエージェント
 通信の `/chat/completions` を拒否するため、opencodex はこれらのモデルを組み込みデフォルトで
 Responses API 経由にルーティングし、他の Copilot モデルはすべて chat completions のままです。
 優先順位は次のとおりです: ハード wire ピン → 明示的な

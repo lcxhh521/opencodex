@@ -1,14 +1,19 @@
+import { flushLinkDiagnostics, recordLinkDiagnostic } from "../link/diagnostics";
 import { existsSync } from "node:fs";
 import type { Server } from "bun";
 import { siblingRuntimeField, withSiblingMarker } from "../codex/sibling-start";
 import { issueSiblingHandoff } from "../codex/sibling-handoff";
 import { loadConfig } from "../config";
 import { removePid, removeRuntimePort, writePid, writeRuntimePort, type RuntimePortState } from "../config/process-state";
+import { currentServingCommand } from "../config/serving-runtimes";
 import { installCrashGuards } from "../lib/crash-guard";
+import { observeLocalCredentials } from "../local-credentials/runtime-observation";
+import { verifiedHomeConnection } from "./link-connection";
 import { createLocalAttestationSecret } from "../lib/local-management-attestation";
 import { loadServiceTokenFromFile, serviceApiTokenFingerprint } from "../lib/service-secrets";
 import { handledSignalExitCode } from "../lib/handled-signal-exit";
 import {
+  CLIENT_RESTART_REBIND_WAIT_MS,
   DESKTOP_RESTART_EXIT_CODE,
   DESKTOP_SUPERVISED_ENV,
   DESKTOP_SUPERVISED_PORT_WAIT_MS,
@@ -19,15 +24,31 @@ import type { ReplacementStartRequest } from "../server/restart-replacement";
 import type { OcxClientConnectionConfig } from "../types";
 import { createLinkKeySource } from "./link-ingress";
 import { HOME_INITIATED_LINK_TUNNEL } from "./link-relay";
+import { clientInitiatedLinkReadiness, createHomeInitiatedLinkReadiness } from "./link-readiness";
 import { createClientLinkSupervisor, type ClientLinkSupervisor } from "./link-tunnel";
 import { clientLinkStatePath, isChildInitiatedLink, recordChildInitiatedLink } from "./link-state";
 import { startMachineListener, type MachineListenerDeps } from "./machine-listener";
 import { isLinkConnection, readClientConnectionState } from "./state";
+import { withClientLifecycleSync } from "./lifecycle-lock";
+import { clientRestartRollbackAction, clientRestartSupervisor, createClientRestartController, type ClientRestartController } from "./runtime-restart";
+import { createLinkParityReporter, type LinkParityReporter } from "./link-parity-reporter";
+import { restoreLinkClientRouting } from "./stop-routing";
+import { markClientRuntimeStopping, markClientRuntimeStoppingWithRetry } from "./sync-runtime";
 
 let activeServer: Server<unknown> | null = null;
 let activePort: number | null = null;
 let activeSupervisor: ClientLinkSupervisor | null = null;
+let activeReporter: LinkParityReporter | null = null;
 let recycleScheduled = false;
+let recycleTimer: ReturnType<typeof setTimeout> | undefined;
+let recycleFlight: Promise<void> | null = null;
+let clientStopping = false;
+
+/**
+ * When this runtime's process started (OCX-6, P5): what `/healthz` reports as `startedAt` and the
+ * Child reports to its Home. A Home settings apply recorded after it means this runtime predates it.
+ */
+export const CLIENT_RUNTIME_STARTED_AT = new Date(Date.now() - process.uptime() * 1000).toISOString();
 
 /**
  * How long link mode waits for its configured port: the budget a hard-pinned `ocx start --port`
@@ -53,6 +74,8 @@ export interface ClientRuntimeIo {
   /** Link-mode port budget; defaults to {@link LINK_PORT_WAIT_MS}. */
   portWaitMs?: number;
   startListener?: typeof startMachineListener;
+  /** Which supervisor owns this process for a bound restart; tests replace the production check. */
+  restartSupervisor?: () => Promise<"service" | "desktop" | null>;
 }
 
 export interface StandaloneRecycleIo {
@@ -77,7 +100,9 @@ export function clientRuntimeRecord(
   port: number,
   attestationSecret: string = createLocalAttestationSecret(),
 ): RuntimePortState {
-  return { pid, port, hostname: "127.0.0.1", attestationSecret, ...siblingRuntimeField() };
+  let command: string[] | undefined;
+  try { command = currentServingCommand(); } catch { /* no reliable relaunch identity; update admission fails closed */ }
+  return { pid, port, hostname: "127.0.0.1", attestationSecret, ...(command ? { command } : {}), ...siblingRuntimeField(), ...(clientStopping ? { clientStopping: true as const } : {}) };
 }
 
 export function standaloneRecycleEnv(
@@ -106,12 +131,15 @@ export function standaloneRecycleEnv(
 }
 
 export function scheduleStandaloneRecycle(disconnectedTokenFingerprint: string): void {
-  if (recycleScheduled) return;
+  if (recycleScheduled || clientStopping) return;
   recycleScheduled = true;
-  const timer = setTimeout(() => {
-    void recycleStandalone(disconnectedTokenFingerprint);
+  recycleTimer = setTimeout(() => {
+    recycleTimer = undefined;
+    if (clientStopping) return;
+    recycleFlight = recycleStandalone(disconnectedTokenFingerprint).finally(() => { recycleFlight = null; });
+    void recycleFlight.catch(error => { if (!clientStopping) throw error; });
   }, 50);
-  if (typeof timer === "object" && "unref" in timer) timer.unref();
+  if (typeof recycleTimer === "object" && "unref" in recycleTimer) recycleTimer.unref();
 }
 
 function configuredTcpPort(): number | undefined {
@@ -151,6 +179,7 @@ export async function recycleStandalone(
     console.warn(`[client] listener stop failed: ${error instanceof Error ? error.message : String(error)}`);
   }
   cleanup();
+  await flushLinkDiagnostics();
   // Recycling back to standalone after `ocx disconnect` must actually bring a standalone
   // proxy back, under every launch shape.
   //
@@ -214,7 +243,7 @@ export async function bindClientListener(
     preferred: number;
     explicitPort: boolean;
     configuredPort: number;
-  } & Pick<MachineListenerDeps, "linkStatus" | "linkKeySource" | "linkTunnel">,
+  } & Pick<MachineListenerDeps, "linkStatus" | "linkKeySource" | "linkTunnel" | "linkReadiness" | "linkConnectionGeneration" | "restart">,
   io: ClientRuntimeIo = {},
 ): Promise<{ server: Server<unknown>; port: number }> {
   const { linkMode } = request;
@@ -254,6 +283,9 @@ export async function bindClientListener(
         ...(request.linkStatus ? { linkStatus: request.linkStatus } : {}),
         ...(request.linkKeySource ? { linkKeySource: request.linkKeySource } : {}),
         ...(request.linkTunnel ? { linkTunnel: request.linkTunnel } : {}),
+        ...(request.linkReadiness ? { linkReadiness: request.linkReadiness } : {}),
+        ...(request.linkConnectionGeneration ? { linkConnectionGeneration: request.linkConnectionGeneration } : {}),
+        ...(request.restart ? { restart: request.restart } : {}),
       });
       return { server, port: server.port ?? port };
     } catch (error) {
@@ -286,54 +318,193 @@ export async function startClientRuntime(
   if (linkMode && state.value.link) {
     try { recordChildInitiatedLink(state.value.link.linkId); } catch { /* the sidecar check below still applies */ }
   }
-  const supervisor = linkMode && existsSync(clientLinkStatePath())
-    ? createClientLinkSupervisor({
-      onLinkEnded: () => scheduleStandaloneRecycle(state.value.tokenFingerprint),
-      linkKey,
-    })
-    : null;
+  const supervised = linkMode && existsSync(clientLinkStatePath());
   // A Child with no sidecar and no record of joining itself was connected by its Home over
   // `ssh -R`; that link keeps 2.67.0's unproven forward. A Child-initiated link that lost its
   // sidecar gets no gate at all, so the relay refuses it.
-  const homeInitiated = linkMode && !supervisor && !!state.value.link
+  const homeInitiated = linkMode && !supervised && !!state.value.link
     && !isChildInitiatedLink(state.value.link.linkId);
-  const { server, port: boundPort } = await bindClientListener({
-    state: state.value,
-    linkMode,
-    preferred,
-    explicitPort: options.port !== undefined,
-    configuredPort: config.port,
-    ...(linkMode ? { linkStatus: () => supervisor?.status() ?? { kind: "stopped" as const }, linkKeySource: linkKey } : {}),
-    ...(supervisor ? { linkTunnel: supervisor } : homeInitiated ? { linkTunnel: HOME_INITIATED_LINK_TUNNEL } : {}),
-  }, io);
-  activeServer = server;
-  activePort = boundPort;
-  activeSupervisor = supervisor;
-  supervisor?.start();
-  installCrashGuards();
-  writePid(process.pid);
-  writeRuntimePort(clientRuntimeRecord(process.pid, boundPort));
-  options.afterPublish?.();
+  // One secret for the life of this process: a rollback republishes the same identity.
+  const attestationSecret = createLocalAttestationSecret();
+  // The local-credential observer lives exactly while this process serves (status attestation).
+  let credentialObservation: { stop(): void } | null = null;
+
+  // Bind, start a fresh tunnel supervisor and publish. Runs once at start and again when a failed
+  // restart rolls back (OCX-6); the stopped supervisor cannot be started twice, so each call builds one.
+  // The port this process actually serves on; a rollback binds exactly this one again.
+  let servedPort = preferred;
+  // Returns false only for a rollback whose connection changed while it was binding: the new
+  // listener is then closed unpublished and the caller recycles.
+  const serve = async (rollback?: { port: number; portWaitMs: number }): Promise<boolean> => {
+    const supervisor = supervised
+      ? createClientLinkSupervisor({
+        diagnostic: recordLinkDiagnostic,
+        onLinkEnded: () => scheduleStandaloneRecycle(state.value.tokenFingerprint),
+        linkKey,
+      })
+      : null;
+    // What `/readyz` reports about the link: the supervisor's tunnel, or for a Home-initiated
+    // link the shared relay preflight. A link with neither refuses every relayed request.
+    const link = state.value.link;
+    const linkReadiness: MachineListenerDeps["linkReadiness"] = !linkMode ? undefined
+      : supervisor ? () => clientInitiatedLinkReadiness(supervisor.status())
+      : homeInitiated && link && linkKey
+        ? createHomeInitiatedLinkReadiness({ target: { tunnelPort: link.tunnelPort, linkId: link.linkId, apiKeyId: state.value.apiKeyId }, linkKey })
+        : () => ({ ready: false, reason: "tunnel_unavailable" });
+    const { server, port: boundPort } = await bindClientListener({
+      state: state.value,
+      linkMode,
+      // A rollback takes back exactly the port it gave up: never the preferred one, never another.
+      preferred: rollback?.port ?? preferred,
+      explicitPort: rollback !== undefined || options.port !== undefined,
+      configuredPort: config.port,
+      restart: { attestationSecret, startedAt: CLIENT_RUNTIME_STARTED_AT, request: () => restartController.request() },
+      ...(linkMode ? { linkStatus: () => activeSupervisor?.status() ?? { kind: "stopped" as const }, linkKeySource: linkKey } : {}),
+      ...(supervisor ? { linkTunnel: supervisor } : homeInitiated ? { linkTunnel: HOME_INITIATED_LINK_TUNNEL } : {}),
+      ...(linkReadiness ? { linkReadiness } : {}),
+      ...(supervisor ? { linkConnectionGeneration: () => supervisor.connectionGeneration() }
+        : homeInitiated && link ? { linkConnectionGeneration: () => verifiedHomeConnection(link.linkId) } : {}),
+    }, rollback === undefined ? io : { ...io, portWaitMs: rollback.portWaitMs });
+    const publish = (): void => {
+      activeServer = server;
+      activePort = boundPort;
+      servedPort = boundPort;
+      activeSupervisor = supervisor;
+      supervisor?.start();
+      credentialObservation ??= observeLocalCredentials();
+      writePid(process.pid);
+      writeRuntimePort(clientRuntimeRecord(process.pid, boundPort, attestationSecret));
+      if (linkMode && state.value.link && linkKey) {
+        activeReporter = createLinkParityReporter({ connection: state.value, linkKey, runtimeStartedAt: CLIENT_RUNTIME_STARTED_AT });
+        activeReporter.start();
+      }
+    };
+    if (!rollback) {
+      publish();
+      return true;
+    }
+    // A rollback publishes under the client lifecycle lock, after rechecking the connection there,
+    // so a disconnect or connect that committed during the bind can never be served over. A lock
+    // held by such an operation counts as a change.
+    let published = false;
+    try {
+      published = withClientLifecycleSync(() => {
+        if (clientRestartRollbackAction(state.value, readClientConnectionState()) === "recycle") return false;
+        publish();
+        return true;
+      });
+    } catch {
+      published = false;
+    }
+    if (!published) {
+      try { await server.stop(true); } catch { /* never published */ }
+    }
+    return published;
+  };
+
+  // Stop everything this process serves, giving in-flight requests up to `drainMs`.
+  const stopServing = async (drainMs: number): Promise<void> => {
+    credentialObservation?.stop();
+    credentialObservation = null;
+    activeReporter?.stop();
+    activeReporter = null;
+    try {
+      await activeSupervisor?.stop();
+    } catch (error) {
+      console.warn(`[client] link supervisor stop failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    activeSupervisor = null;
+    const server = activeServer;
+    activeServer = null;
+    if (!server) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.resolve(server.stop(false)),
+        new Promise<void>(resolve => { timer = setTimeout(resolve, drainMs); }),
+      ]);
+    } catch { /* closed below */ } finally {
+      if (timer) clearTimeout(timer);
+    }
+    try { await server.stop(true); } catch { /* already closed */ }
+  };
 
   let shuttingDown = false;
+  const restartController: ClientRestartController = createClientRestartController({
+    stopping: () => shuttingDown,
+    supervisor: io.restartSupervisor ?? clientRestartSupervisor,
+    stop: stopServing,
+    spawnReplacement: async deadlineAt => {
+      const { replacementStartEnvironment } = await import("../server/management/system-restart");
+      const { spawnReplacementStart } = await import("../server/restart-replacement");
+      await spawnReplacementStart(
+        { port: activePort ?? config.port, waitForHealth: true, env: replacementStartEnvironment(true), notReady: "terminate" },
+        { deadlineAt },
+      );
+    },
+    resume: async () => {
+      // The connection may have changed while the replacement was starting (`ocx disconnect`, a
+      // new connect). Serving the old one again would be a stale runtime nothing recycles; hand
+      // off to the recycle, which starts whatever the durable state now calls for.
+      if (clientRestartRollbackAction(state.value, readClientConnectionState()) === "recycle") {
+        await recycleStandalone(state.value.tokenFingerprint);
+        return;
+      }
+      if (!(await serve({ port: servedPort, portWaitMs: CLIENT_RESTART_REBIND_WAIT_MS }))) {
+        await recycleStandalone(state.value.tokenFingerprint);
+      }
+    },
+    exitProcess: async code => {
+      try { await flushLinkDiagnostics(); }
+      finally { process.exit(code); }
+    },
+  });
+
+  installCrashGuards();
+  // serve() publishes the pid and runtime record; the ownership lease is released only after it.
+  await serve();
+  options.afterPublish?.();
+
   const shutdown = (signal?: NodeJS.Signals) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    clientStopping = true;
+    if (recycleTimer) { clearTimeout(recycleTimer); recycleTimer = undefined; }
+    const fenceSync = () => {
+      if (!linkMode) return true;
+      try { markClientRuntimeStopping({ pid: process.pid, port: servedPort, attestationSecret }); return true; }
+      catch { return false; }
+    };
+    let syncFenced = fenceSync();
     void (async () => {
+      // An accepted restart owns its replacement and rollback. A successful handoff exits
+      // inside that flight; a rollback finishes before this signal tears the runtime down.
+      if (restartController.hasHandoff()) await restartController.settled().catch(() => {});
+      if (recycleFlight) await recycleFlight.catch(() => {});
+      // A rollback may have republished its runtime record while shutdown joined it.
+      syncFenced = !linkMode || await markClientRuntimeStoppingWithRetry({ pid: process.pid, port: servedPort, attestationSecret });
+      credentialObservation?.stop();
+      credentialObservation = null;
+      activeReporter?.stop();
+      activeReporter = null;
       try {
-        await supervisor?.stop();
+        await activeSupervisor?.stop();
       } catch (error) {
         console.warn(`[client] link supervisor stop failed: ${error instanceof Error ? error.message : String(error)}`);
       }
       activeSupervisor = null;
+      const restored = linkMode ? restoreLinkClientRouting(state.value, { syncFenced }) : null;
+      if (restored && !restored.success) console.error(`[client] ${restored.message}`);
       try {
-        server.stop(true);
+        activeServer?.stop(true);
       } catch (error) {
         console.warn(`[client] listener stop failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
-        cleanup();
+        // Keep stopping admission visible through the last await. Cleanup and exit are adjacent.
+        try { await flushLinkDiagnostics(); } finally { cleanup(); }
         // launchd relaunches only unsuccessful exits; an external signal must still count.
-        process.exit(handledSignalExitCode(signal));
+        if (restored?.success === false) process.exit(1);
+        else process.exit(handledSignalExitCode(signal));
       }
     })();
   };

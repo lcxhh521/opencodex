@@ -164,14 +164,17 @@ Combo 失敗分為**跳轉**失敗與**終端**失敗。
 | --- | --- |
 | HTTP 401、403、404、408、429 或任何 5xx | 冷卻目標並跳到下一個合格目標。 |
 | 分類為認證、訂閱、配額、限流、過載或上游伺服器錯誤 | 冷卻目標並跳轉，即使單靠狀態碼不足。 |
-| 客戶端取消（499）、`origin_rejected`、cyber-policy 拒絕、上下文溢出或其他無效請求 | 停止並回傳錯誤；另一個目標不會讓請求變為有效。 |
-| 結構化 HTTP 400，明確拒絕 `user`、對 `reasoning.effort`/`reasoning_effort` 回傳不支援值，或回傳模型特定影像輸入拒絕（`param: input`） | 在輸出開始前跳轉到下一個符合條件的目標，且不記錄冷卻時間；參見下方選用參數相容性。 |
+| 客戶端取消（499）、`origin_rejected`、cyber-policy 拒絕、其他無效請求 | 停止並回傳錯誤；另一個目標不會讓請求變為有效。 |
+| 輸出前確認的上下文超限（包括 HTTP 400） | 不冷卻該目標，嘗試下一個尚未嘗試的合格目標；耗盡後回傳第一個確認的 HTTP 400 上下文錯誤（其他狀態碼的上下文拒絕也會切換到下一個目標，但不會被保留）。 |
+| 結構化 HTTP 400，明確拒絕 `user`、對 `reasoning.effort`/`reasoning_effort` 回傳不支援值、回傳模型特定影像輸入拒絕（`param: input`），或拒絕該路由無法讀取的輸入媒體（`unsupported_input_modality`） | 在輸出開始前跳轉到下一個符合條件的目標，且不記錄冷卻時間；參見下方選用參數相容性。 |
 | 由行程內轉接器（`runTurn`）執行的 Responses 回合中，目前請求未宣告的第一個工具呼叫（在任何輸出與不可重播的副作用之前） | 讓該目標進入冷卻，並以相同的工具目錄跳轉到下一個目標。出現可見輸出或不可重播的副作用之後，拒絕即為最終結果。Chat Completions 與 Anthropic Messages 請求不受影響。 |
 | 任何其他未分類錯誤 | 停止並回傳錯誤。 |
 
 跳轉的目標在沒有設定 `cooldownMs` 時使用上游回退冷卻：請求速率限制代碼 `1302`/`1305` 為 5 秒，用量額度耗盡（不論 HTTP 狀態，包括 502）或憑證/計費失敗為 10 分鐘，其他情況為 60 秒。若上游回應包含有效的 `Retry-After` 值，opencodex 改用它；Codex 重設標頭與設定的 `cooldownMs` 優先於這些回退值。接受數字秒與 HTTP-date 值。明確的上游 `Retry-After` 最長為 24 小時；重設推導、設定與回退冷卻最長為 10 分鐘。
 
-目前請求永不重試同一已嘗試目標。後續請求會略過它直到冷卻到期。若無合格目標剩餘，代理回傳 HTTP 503 並帶 `error.code = "combo_unavailable"`。
+目前請求永不重試同一已嘗試目標。後續請求會略過它直到冷卻到期。若尚未嘗試任何目標且沒有合格目標，代理回傳 HTTP 503 並帶 `error.code = "combo_unavailable"`。
+
+確認 HTTP 400 上下文拒絕後，若合格目標或傳送預算耗盡，會以 `context_length_exceeded` 回傳第一個此類拒絕，優先於後續可重試錯誤（包括配額錯誤）。這也適用於剩餘目標無法重播推理或缺少計費使用同意的情況。取消、後續致命拒絕和明確的備援政策拒絕仍會立即停止；不會向未獲同意的計費目標傳送請求。
 
 :::note
 Failover 是刻意受限的。它有助於目標特定的可用性、認證、配額與過載失敗；不會隱藏呼叫者錯誤或策略拒絕。
@@ -221,7 +224,7 @@ Codex v2 子代理有一個重要限制（[issue #92](https://github.com/lidge-j
 
 ### 儀表板
 
-開啟本機儀表板並選擇 **Combos**。該工作區可建立、編輯、重新命名與移除 combo，且其目標 picker 會排除已停用的模型與巢狀 combo。
+開啟本機儀表板並選擇 **Combos**。該工作區可建立、編輯、重新命名與移除 combo。模型選擇器包含隱藏模型；顯示／隱藏設定僅影響對外模型清單，不影響 Combo 內部選擇，選取隱藏模型也不會將其對外顯示。目標選擇器仍排除已停用的供應商、巢狀 combo 與僅提供決策服務的 JEV 供應商。
 
 每個目標也會顯示即時額度徽章：**可用**、**額度已用盡**或**額度未知**。只有當每個可用目標均有目前有效的伺服器確認，顯示其所設定憑證的推論限額已耗盡時，編輯器才會因配額而停用儲存與建立。僅供顯示的帳戶、模型、搜尋與 MCP 配額，以及缺失或已過期的路由依據，都不會觸發此限制。此限制會在適用的重設時間或資料有效期限結束時解除，並在頁面變為作用中或可見狀態時重新檢查；重新整理會同時重新載入 Combo 資料與配額。
 
@@ -236,7 +239,7 @@ ocx combo set <id> --targets provider/model[:weight],...
 ocx combo remove <id> --yes
 ```
 
-`set` 也接受 `--strategy`、`--sticky`、`--effort`、`--alias` 與 `--rename-from`。用 `-` 作為 `--effort` 或 `--alias` 的值可清除該欄位。`create` 與 `update` 為 `set` 的別名；`delete` 為 `remove` 的別名；且相同子指令在 `ocx route combo` 下也可用。
+`set` 也接受 `--strategy`、`--sticky`、`--effort`、`--alias`、`--display-name`、`--description` 與 `--rename-from`。用 `-` 作為 `--effort`、`--alias`、`--display-name` 或 `--description` 的值可清除該欄位。`create` 與 `update` 為 `set` 的別名；`delete` 為 `remove` 的別名；且相同子指令在 `ocx route combo` 下也可用。
 
 ### 管理 API
 
@@ -275,6 +278,7 @@ Combo 儲存於頂層 `combos` 物件中，以 combo id 為 key：
 | `defaultEffort` | 否 | `null` | `low`、`medium`、`high`、`xhigh`、`max` 或 `ultra`；僅在呼叫者省略 effort 且目標宣告支援時套用。 |
 | `reasoningEffortMode` | 否 | `"strict"` | `strict` 或 `adaptive`；選擇混合能力交集及目標層級控制正規化。 |
 | `alias` | 否 | 無 | 可選的修剪後公開模型 id；使用上述別名規則。空值儲存為無別名。 |
+| `description` | 否 | 無 | 僅供 catalog 顯示的列描述，最多 128 個字元且不含控制字元。未設定時保留產生的 `Routed via opencodex → combo (combo).` 文字。 |
 
 ## 疑難排解
 
@@ -292,10 +296,14 @@ Combo id 未知。回應為 HTTP 404 並帶 type `invalid_request_error`。執�
 
 ### 為什麼 failover 在第一個錯誤後就停止了？
 
-該錯誤是終端的而非目標特定的。修正無效輸入、縮減過大的上下文、處理策略拒絕，或更正被拒的請求來源。Combo 對那些情況不會跳轉。
+該錯誤是終端的而非目標特定的。修正無效輸入、處理策略拒絕，或更正被拒的請求來源。Combo 對那些情況不會跳轉。
 
 ## 選用參數相容性
 
-一般 400 錯誤仍會終止請求，但明確拒絕 `user`、對 `reasoning.effort`/`reasoning_effort` 回傳不支援值，或回傳模型特定影像輸入拒絕（`param: input`）的結構化錯誤，可讓 combo 在輸出開始前嘗試下一個符合條件的目標，而不記錄冷卻時間。安全政策拒絕、取消及已開始的輸出仍不可重播。
+一般 400 錯誤仍會終止請求，但明確拒絕 `user`、對 `reasoning.effort`/`reasoning_effort` 回傳不支援值、回傳模型特定影像輸入拒絕（`param: input`），或拒絕該路由無法讀取的輸入媒體（`unsupported_input_modality`）的結構化錯誤，可讓 combo 在輸出開始前嘗試下一個符合條件的目標，而不記錄冷卻時間。安全政策拒絕、取消及已開始的輸出仍不可重播。
 
 [Canonical compatibility details](/guides/combos/#request-local-target-compatibility).
+
+## 冷卻復原預約
+
+透過 `cooldownReprobe: { enabled: true }` 啟用的復原嘗試只屬於預約它的請求；其他請求仍受已儲存的冷卻限制。預約會在冷卻等待與 JEV 選擇期間保留。目標在等待期間重新可用時，只要其冷卻紀錄沒有變更，就仍可重試；新的冷卻紀錄會使該目標的預約失效。成功後，只清除實際回應目標未變更的冷卻紀錄；未嘗試的目標與新的失敗仍保留冷卻。供應商停用、配額、請求資格與取消檢查仍然生效。請參閱[設定與限制](/guides/combos/#retry-all-cooled-targets-opt-in)。

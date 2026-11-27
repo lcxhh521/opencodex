@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { connect, createServer, type Socket } from "node:net";
+import { connect, createServer, Socket } from "node:net";
 import { CLAUDE_INTERCEPT_HOSTS, isLoopbackTarget, parseConnectRequestLine, startConnectProxy, type ConnectProxyHandle } from "../../src/claude/intercept/connect-proxy";
 import { startClaudeInterceptListener, rewriteInterceptedRequest } from "../../src/claude/intercept/listener";
 import { createLocalInterceptCa, issueLocalInterceptLeaf } from "../../src/claude/intercept/local-ca";
@@ -180,18 +180,22 @@ test("pending async choice holds pipelined bytes, then connects; rejection falls
   const echo = await startEchoUpstream();
   cleanups.push(echo.close);
   let settle!: (choice: { kind: "intercept"; port: number }) => void;
+  // Resolved inside selectTunnel itself: the proxy has parsed CONNECT and is now holding the
+  // pipelined bytes. A fixed sleep only guessed at that moment and called an unset settle when
+  // the proxy had not consulted the choice yet.
+  const consulted = Promise.withResolvers<void>();
   let dialCount = 0;
   const proxy = await startConnectProxy(0, {
     interceptPort: 1,
     authToken: AUTH_TOKEN,
     selectTunnel: host => host === "claude.ai"
-      ? new Promise(resolve => { settle = resolve; })
+      ? new Promise(resolve => { settle = resolve; consulted.resolve(); })
       : Promise.reject(new Error("decision failed")),
     dialUpstream: () => { dialCount += 1; return connect({ host: "127.0.0.1", port: echo.port }); },
   });
   cleanups.push(proxy.close);
   const delayed = tunnelPayload(proxy.port, "claude.ai", "pending");
-  await Bun.sleep(20);
+  await consulted.promise;
   expect(dialCount).toBe(0);
   settle({ kind: "intercept", port: echo.port });
   expect(await delayed).toContain("echo:pending");
@@ -322,12 +326,12 @@ test("isLoopbackTarget covers mapped, unspecified and shorthand loopback literal
 });
 
 test("a dead upstream yields 502 instead of a hung tunnel", async () => {
-  const dead = await startEchoUpstream();
-  await dead.close();
   const proxy = await startConnectProxy(0, {
     interceptPort: 1,
     authToken: AUTH_TOKEN,
-    dialUpstream: () => connect({ host: "127.0.0.1", port: dead.port }),
+    // A closed listener's port can be reassigned, even to this proxy. Fail a real socket
+    // asynchronously instead, so this always exercises dial failure before establishment.
+    dialUpstream: () => new Socket().destroy(new Error("connect ECONNREFUSED")),
   });
   cleanups.push(proxy.close);
   expect(await rawRequest(proxy.port, `CONNECT gone.example:443 HTTP/1.1\r\n${AUTH_HEADER}\r\n`)).toStartWith("HTTP/1.1 502");

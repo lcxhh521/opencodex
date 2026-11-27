@@ -301,6 +301,22 @@ const SCENARIOS: Record<string, { events: AdapterEvent[]; options?: ToolOptions 
 };
 
 describe("direct Messages encoder matches bridge + converter (stream)", () => {
+  test.each([["length", "max_tokens"], ["refusal", "refusal"]] as const)(
+    "explicit %s incomplete stops with %s on both paths", async (reason, stopReason) => {
+      const events: AdapterEvent[] = [
+        { type: "text_delta", text: "partial" }, { type: "incomplete", reason, usage },
+      ];
+      const frames = await expectStreamParity(events);
+      expect(frames.at(-1)!.event).toBe("message_stop");
+      expect(frames.at(-2)!.data).toMatchObject({
+        delta: { stop_reason: stopReason }, usage: { output_tokens: 30 },
+      });
+      const folded = await expectFoldParity(events);
+      expect(folded.status).toBe(200);
+      expect(folded.body.stop_reason).toBe(stopReason);
+    },
+  );
+
   for (const [name, scenario] of Object.entries(SCENARIOS)) {
     test(name, async () => {
       await expectStreamParity(scenario.events, scenario.options);
@@ -328,13 +344,13 @@ describe("direct Messages fold matches bridge + collector (non-stream)", () => {
       code: "context_length_exceeded", message: "Synthetic input limit", retryable: false }];
     const frames = await expectStreamParity(events);
     expect(frames).toEqual([{ event: "error", data: { type: "error", error: {
-      type: "invalid_request_error", code: "context_length_exceeded", message: "prompt is too long: Synthetic input limit",
+      type: "invalid_request_error", code: "context_length_exceeded", message: "prompt is too long: The request exceeds the model's context window.",
     } } }]);
     const response = await foldAnthropicMessage(replay(events), directOptions());
     expect(response.status).toBe(400);
     expect(response.headers.has("retry-after")).toBe(false);
     expect(await response.json()).toEqual({ type: "error", error: {
-      type: "invalid_request_error", code: "context_length_exceeded", message: "prompt is too long: Synthetic input limit",
+      type: "invalid_request_error", code: "context_length_exceeded", message: "prompt is too long: The request exceeds the model's context window.",
     } });
   });
 

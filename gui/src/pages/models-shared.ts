@@ -2,6 +2,7 @@ import type { TFn, TKey } from "../i18n/shared";
 import type { ProviderDiscoverySummary } from "../models-groups";
 import { modelVisible, type ProviderModelMap } from "../model-visibility";
 import { formatNamespacedModelId } from "../provider-icons";
+import type { ShadowCallSourceOption } from "./shadow-call-source";
 
 export type StorageLike = Pick<Storage, "getItem" | "setItem">;
 
@@ -166,6 +167,29 @@ export interface ShadowCallData {
   model: string;
   /** Source models the runtime actually intercepts. Older runtimes omit it. */
   sourceModels?: string[];
+  /** Runtime-owned source inventory; older runtimes omit it. */
+  sourceModelOptions?: ShadowCallSourceOption[];
+}
+
+/**
+ * Message for a rejected shadow-call save.
+ *
+ * The endpoint returns HTTP 400 for several distinct validation failures, so the status alone
+ * cannot tell the operator what to change. The stable `code` decides the message; an older
+ * runtime or a proxy error page without one falls back to the neutral save failure instead of
+ * claiming the replacement target is wrong. A failed fetch stays a network error and never
+ * reaches this mapping.
+ */
+export function shadowCallSaveErrorKey(code: unknown): TKey {
+  if (code === "shadow_call_target_invalid") return "models.shadowCallTargetInvalid";
+  if (code === "shadow_call_source_invalid") return "models.shadowCallSourceInvalid";
+  return "models.shadowCallSaveFailed";
+}
+
+/** The global auto-review (approval reviewer) override the Models settings panel writes. */
+export interface AutoReviewData {
+  enabled: boolean;
+  model: string;
 }
 
 export const CAP_OPTIONS = Array.from({ length: 18 }, (_, i) => 100_000 + i * 50_000); // 100k … 950k
@@ -187,6 +211,24 @@ export const NATIVE_CAP_OPTION_SET = new Set(NATIVE_CAP_OPTIONS);
 export const CUSTOM_OPTION = "custom";
 export const THREAD_OPTIONS = [4, 8, 16, 32, 64, 128, 256, 500, 1000];
 export const THREAD_OPTION_SET = new Set(THREAD_OPTIONS);
+
+/**
+ * The /api/v2 maxConcurrentThreadsPerSession field is expressed in the ACTIVE backend's
+ * units: the [agents] keys (v1/base/hybrid, enabled:false) count child agents, while
+ * the V2 storage counts the root agent's own slot too (total = children + 1). The
+ * control always presents the logical child count, so only the V2-total case translates
+ * across the root slot. A stored V2 total of 1 is root-only and displays zero
+ * children, even though new child-limit edits must be at least 1. This display
+ * conversion is independent of the backend's V2-to-V1 migration clamp.
+ */
+export function threadLimitToChildCount(limit: number, v2Enabled: boolean): number {
+  return v2Enabled ? Math.max(0, limit - 1) : limit;
+}
+
+export function childCountToThreadLimit(children: number, v2Enabled: boolean): number {
+  return v2Enabled ? children + 1 : children;
+}
+
 export const PAGE = 60; // rows rendered per provider before a "show more"
 
 export const COLLAPSED_KEY_V2 = "ocx-models-collapsed:v2";
@@ -230,6 +272,27 @@ export function activeModelOptions(
   return options;
 }
 
+/**
+ * Narrow the catalog options to the routed rows an auto-review override may name.
+ *
+ * The reviewer selector has to resolve to a provider-namespaced catalog row; native rows are
+ * dropped because Codex's own default already covers them and choosing one would pin the
+ * subscription model the override exists to avoid. A value saved before its row left the list
+ * stays selectable, or the control would read back blank and the next save would erase it.
+ */
+export function routedModelOptions(
+  visible: readonly { value: string; label: string }[],
+  models: readonly ModelRow[],
+  saved?: string,
+): { value: string; label: string }[] {
+  const native = new Set(models.filter(model => model.native === true).map(model => model.namespaced));
+  const options = visible.filter(option => !native.has(option.value));
+  if (saved && !options.some(option => option.value === saved)) {
+    options.push({ value: saved, label: visible.find(option => option.value === saved)?.label ?? saved });
+  }
+  return options;
+}
+
 /** `null` = no preference yet → caller should default to all groups collapsed. */
 export function readCollapsedProviders(storage: StorageLike = localStorage): Set<string> | null {
   try {
@@ -251,4 +314,31 @@ export function writeCollapsedProviders(collapsed: Set<string>, storage: Storage
   } catch {
     /* quota / private-mode */
   }
+}
+
+/**
+ * Parse a context-window field: a number, `null` for "unset", or `undefined` when the text is
+ * not usable. Separators are cosmetic, so "64,000" and "64_000" and "64000" are one value.
+ *
+ * Safe-integer rather than integer: `Number.isInteger(1e100)` is true, the server rejects it,
+ * and accepting it here would turn a typo into a round-trip error instead of inline feedback.
+ *
+ * Module scope because it closes over nothing — rebuilding it every render is wasted work.
+ */
+export function parseContextWindowDraft(raw: string): number | null | undefined {
+  const normalized = raw.replace(/[_,\s]/g, "");
+  if (!normalized) return null;
+  const value = Number(normalized);
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+/** #2465 per-provider model-preset view, as `GET /api/model-presets` returns it. */
+export interface ModelPresetView {
+  mode: "preset" | "all" | "custom";
+  appliedVersion?: number;
+  availableVersion: number;
+  presetIds: string[];
+  presetCount: number;
+  totalCount: number;
+  fallback?: string;
 }

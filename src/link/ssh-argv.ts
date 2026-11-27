@@ -6,6 +6,8 @@
  * - HostKeyAlias=<alias> with UserKnownHostsFile=<link known_hosts> and
  *   GlobalKnownHostsFile=none: only a host key the user confirmed for this link is trusted,
  *   and the stored entry has the same form for every port and ProxyJump route.
+ * - HashKnownHosts=no: private probe records keep their alias-prefixed form even
+ *   when the user's normal SSH configuration hashes its own known_hosts file.
  * - KnownHostsCommand=none, VerifyHostKeyDNS=no and CheckHostIP=no: no other source of host-key
  *   trust (a helper command, DNS SSHFP records, IP entries) can stand in for the link file.
  *   Command-line options win over ~/.ssh/config, so a user config cannot re-enable them.
@@ -17,6 +19,7 @@
  */
 
 import { isAbsolute } from "node:path";
+import { POWERSHELL_ENCODED_MAX, windowsOcxArgv, windowsPinnedSyncArgv } from "./remote-windows";
 
 export type TunnelDirection = "R" | "L";
 
@@ -73,6 +76,7 @@ function commonOptions(alias: string, knownHostsFile: string, strict: "yes" | "a
     "-o", `StrictHostKeyChecking=${strict}`,
     "-o", `HostKeyAlias=${alias}`,
     "-o", `UserKnownHostsFile=${optionPath(knownHostsFile)}`,
+    "-o", "HashKnownHosts=no",
     "-o", "GlobalKnownHostsFile=none",
     "-o", "KnownHostsCommand=none",
     "-o", "VerifyHostKeyDNS=no",
@@ -142,6 +146,16 @@ export const REMOTE_PLATFORM_UNSUPPORTED = 125;
  * ocx as `"$@"` without another round of parsing. Desktop binaries precede PATH candidates;
  * each candidate must run --version successfully. A missing runnable ocx exits 127.
  */
+const REMOTE_OCX_CANDIDATES = `for candidate in "$HOME/.opencodex-desktop/bin/ocx" "/Applications/OpenCodex.app/Contents/MacOS/ocx" "/usr/bin/ocx"; do
+  try_ocx "$candidate" "$@"
+done
+remaining=$PATH
+while :; do
+  directory=\${remaining%%:*}
+  try_ocx "\${directory:-.}/ocx" "$@"
+  case "$remaining" in *:*) remaining=\${remaining#*:};; *) break;; esac
+done`;
+
 export const REMOTE_OCX_SCRIPT = `export PATH="$PATH:$HOME/.bun/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin"
 case "$(uname -s 2>/dev/null)" in Windows*|MSYS*|MINGW*|CYGWIN*) exit ${REMOTE_PLATFORM_UNSUPPORTED};; esac
 try_ocx() {
@@ -151,19 +165,11 @@ try_ocx() {
     exec "$executable" "$@"
   fi
 }
-for candidate in "$HOME/.opencodex-desktop/bin/ocx" "/Applications/OpenCodex.app/Contents/MacOS/ocx" "/usr/bin/ocx"; do
-  try_ocx "$candidate" "$@"
-done
-remaining=$PATH
-while :; do
-  directory=\${remaining%%:*}
-  try_ocx "\${directory:-.}/ocx" "$@"
-  case "$remaining" in *:*) remaining=\${remaining#*:};; *) break;; esac
-done
+${REMOTE_OCX_CANDIDATES}
 exit ${REMOTE_COMMAND_NOT_FOUND}`;
 
-export function remoteOcxArgv(args: readonly string[]): string[] {
-  return ["sh", "-c", REMOTE_OCX_SCRIPT, "ocx", ...args];
+export function remoteOcxArgv(args: readonly string[], platform: "posix" | "windows" = "posix"): string[] {
+  return platform === "windows" ? windowsOcxArgv(args) : ["sh", "-c", REMOTE_OCX_SCRIPT, "ocx", ...args];
 }
 
 export interface ProbeArgvOptions {
@@ -175,7 +181,7 @@ export interface ProbeArgvOptions {
 /**
  * First contact with a host that has no confirmed key. accept-new writes the offered key to the
  * temporary file; the caller reads it with `ssh-keygen -lf` and shows the fingerprint before
- * anything is trusted. The remote command is `true` and its result is not trusted either.
+ * anything is trusted. The remote command is a fixed cross-shell echo; it conveys no authorization.
  */
 export function buildProbeArgv(options: ProbeArgvOptions): string[] {
   const alias = assertSshAlias(options.alias);
@@ -184,7 +190,26 @@ export function buildProbeArgv(options: ProbeArgvOptions): string[] {
     ...commonOptions(alias, options.tempKnownHostsFile, "accept-new"),
     "-o", "ClearAllForwardings=yes",
     "--", alias,
-    "true",
+    "echo ocx-link-probe",
+  ];
+}
+
+/**
+ * Locale-independent Windows check for a host whose SSH shell is cmd.exe or PowerShell. Both run
+ * `cmd /c echo %OS%`, and cmd expands it to `Windows_NT` regardless of display language. The
+ * command is a fixed literal; a POSIX shell answers "command not found" and nothing else.
+ */
+export const WINDOWS_OS_PROBE = "cmd /c echo %OS%";
+
+/** Run WINDOWS_OS_PROBE against an already trusted (pinned or just-probed) host key only. */
+export function buildWindowsProbeArgv(options: { alias: string; knownHostsFile: string }): string[] {
+  const alias = assertSshAlias(options.alias);
+  return [
+    "ssh", "-T",
+    ...commonOptions(alias, options.knownHostsFile, "yes"),
+    "-o", "ClearAllForwardings=yes",
+    "--", alias,
+    WINDOWS_OS_PROBE,
   ];
 }
 
@@ -200,11 +225,69 @@ export function buildResolveArgv(alias: string): string[] {
 
 /** Emit only sh in command position; single-quote every argument for the remote shell. */
 export function quoteRemote(argv: readonly string[]): string {
-  if (argv[0] !== "sh") throw new LinkSshArgumentError("remote command must be sh");
+  if (argv[0] === "powershell.exe") {
+    if (argv.length !== 6 || argv.slice(1, 5).join(" ") !== "-NoLogo -NoProfile -NonInteractive -EncodedCommand"
+      || !/^[A-Za-z0-9+/]+={0,2}$/.test(argv[5] ?? "") || (argv[5]?.length ?? 0) > POWERSHELL_ENCODED_MAX) {
+      throw new LinkSshArgumentError("invalid encoded PowerShell command");
+    }
+    return argv.join(" ");
+  }
+  if (argv[0] !== "sh") throw new LinkSshArgumentError("remote command must be sh or encoded PowerShell");
   return argv.map((arg, index) => {
     if (arg.includes("\0")) throw new LinkSshArgumentError("remote argument contains NUL");
     // PowerShell treats a leading quoted word as an expression, not a command invocation.
     if (index === 0) return "sh";
     return `'${arg.replaceAll("'", `'"'"'`)}'`;
   }).join(" ");
+}
+
+const REMOTE_PINNED_SYNC_SCRIPT = `export PATH="$PATH:$HOME/.bun/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin"
+case "$(uname -s 2>/dev/null)" in Windows*|MSYS*|MINGW*|CYGWIN*) exit ${REMOTE_PLATFORM_UNSUPPORTED};; esac
+umask 077
+dir=$(mktemp -d "\${TMPDIR:-/tmp}/ocx-fanout.XXXXXXXX") || exit 127
+tmp=$dir/version; ready=$dir/ready
+trap 'rm -rf "$dir"' EXIT HUP INT TERM
+try_ocx() {
+  c=$1; shift
+  [ -x "$c" ] || return
+  ( ulimit -c 0; ulimit -f 1; exec "$c" --version ) >"$tmp" 2>/dev/null & vp=$!
+  ( sleep 10 & timer=$!; trap 'kill "$timer" 2>/dev/null; wait "$timer" 2>/dev/null; exit' TERM HUP INT; : > "$ready"; wait "$timer" 2>/dev/null; kill -9 "$vp" 2>/dev/null ) >/dev/null 2>&1 & watchdog=$!
+  while [ ! -f "$ready" ]; do kill -0 "$watchdog" 2>/dev/null || break; sleep 0.01 >/dev/null 2>&1; done
+  { wait "$vp"; status=$?; } 2>/dev/null
+  kill "$watchdog" 2>/dev/null; wait "$watchdog" 2>/dev/null; rm -f "$ready"
+  [ "$status" -eq 0 ] || return
+  bytes=$(wc -c < "$tmp" 2>/dev/null) || return
+  [ "$bytes" -le 256 ] 2>/dev/null || return
+  version=$(cat "$tmp"); version=\${version#opencodex }
+  printf '%s\\n' "$version" | awk '
+    function idlist(s,pre, n,a,i) {
+      n=split(s,a,/\\./); if (!n) return 0;
+      for(i=1;i<=n;i++) if(a[i]=="" || a[i] !~ /^[0-9A-Za-z-]+$/ || (pre && a[i] ~ /^[0-9]+$/ && length(a[i])>1 && substr(a[i],1,1)=="0")) return 0;
+      return 1
+    }
+    function cmp(a,b) { if(length(a)!=length(b)) return length(a)>length(b)?1:-1; return ("x" a)==("x" b)?0:(("x" a)>("x" b)?1:-1) }
+    NR==1 {
+      v=$0; if(length(v)>128) { result=2; next }
+      plus=index(v,"+"); if(plus) { build=substr(v,plus+1); v=substr(v,1,plus-1); if(!idlist(build,0)) {result=2; next} }
+      dash=index(v,"-"); if(dash) { pre=substr(v,dash+1); v=substr(v,1,dash-1); if(!idlist(pre,1)) {result=2; next} }
+      if(split(v,a,/\\./)!=3) { result=2; next }
+      for(i=1;i<=3;i++) if(a[i] !~ /^(0|[1-9][0-9]*)$/) { result=2; next }
+      c=cmp(a[1],"2"); if(!c)c=cmp(a[2],"93"); if(!c)c=cmp(a[3],"0"); if(c<0 || (!c && dash))result=1
+    }
+    NR>1 {result=2}
+    END {exit result}
+  ' 2>/dev/null
+  status=$?
+  if [ "$status" -eq 1 ]; then printf '%s\\n' 'ocx-fanout:child-ocx-lacks-expect-link' >&2; exit 121; fi
+  if [ "$status" -ne 0 ]; then printf '%s\\n' 'ocx-fanout:child-ocx-version-unknown' >&2; exit 121; fi
+  rm -rf "$dir"; trap - EXIT HUP INT TERM
+  printf 'ocx-fanout:selected:%s\\n' "$version" >&2
+  printf '%s\\n' 'ocx-fanout:stdout-begin'
+  exec "$c" sync --expect-link "$1" --json
+}
+${REMOTE_OCX_CANDIDATES}
+exit ${REMOTE_COMMAND_NOT_FOUND}`;
+
+export function remotePinnedSyncArgv(linkId: string, platform: "posix" | "windows" = "posix"): string[] {
+  return platform === "windows" ? windowsPinnedSyncArgv(linkId) : ["sh", "-c", REMOTE_PINNED_SYNC_SCRIPT, "ocx", linkId];
 }

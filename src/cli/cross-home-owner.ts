@@ -9,11 +9,15 @@ import { detectCodexRoutingDrift } from "../codex/routing-drift";
 import { readBoundedCodexConfig } from "../codex/inject/bounded-config-reader";
 import { currentExternalCodexModelProvider } from "../codex/inject";
 import { reconcileJournal } from "../codex/journal";
+import { shouldSyncCodexOnStart } from "../codex/desired-state";
+import { loadConfig } from "../config";
+import { updateTeardownHandoverPending } from "../update/teardown-handover";
 import { markSiblingStart, siblingOfLivePort } from "../codex/sibling-start";
 import { readClientConnectionState } from "../client/state";
 import { findManagedRegion, resolveGrokHome } from "../grok/inject";
 import { providerTableString } from "../codex/injected-marker";
 import { isLocalAttestationSecret } from "../lib/local-management-attestation";
+import { isProtectedHomeUnderTest } from "../lib/test-home-guard";
 import { readOwnerRegistry } from "../config/owner-registry";
 import {
   classifyHealthz,
@@ -25,6 +29,7 @@ import {
 } from "../server/proxy-liveness";
 import { directLocalHttpFetch } from "../server/direct-local-http";
 import type { RuntimePortState } from "../config/process-state";
+import { loopbackFamilyAvailability } from "./loopback-family";
 
 const MAX_HINT_BYTES = 256 * 1024;
 // Far above any real Grok config; discovery must not stall startup when Grok sync is off.
@@ -127,13 +132,19 @@ function loopbackPort(raw: string | null): number | null {
   }
 }
 
+type CrossHomeOwnerOptions = {
+  homeDir?: string;
+  io?: LivenessIo;
+  loopbackAvailabilityFn?: typeof loopbackFamilyAvailability;
+};
+
 /** Returns only a different process with an identity-checked /healthz response. */
-export async function findCrossHomeOwner(options: { homeDir?: string; io?: LivenessIo } = {}): Promise<number | null> {
+export async function findCrossHomeOwner(options: CrossHomeOwnerOptions = {}): Promise<number | null> {
   const verdict = await findCrossHomeOwnerDetailed(options);
   return verdict.kind === "owner" ? verdict.port : null;
 }
 
-export async function findCrossHomeOwnerDetailed(options: { homeDir?: string; io?: LivenessIo } = {}): Promise<CrossHomeOwnerVerdict> {
+export async function findCrossHomeOwnerDetailed(options: CrossHomeOwnerOptions = {}): Promise<CrossHomeOwnerVerdict> {
   const io = options.io ?? {};
   const nowFn = io.nowFn ?? Date.now;
   const timeoutMs = io.timeoutMs ?? START_OWNERSHIP_LIVENESS.timeoutMs ?? 1_500;
@@ -160,7 +171,7 @@ export async function findCrossHomeOwnerDetailed(options: { homeDir?: string; io
   };
 
   const defaultHome = join(options.homeDir ?? homedir(), ".opencodex");
-  recordHome(defaultHome);
+  if (options.homeDir !== undefined || !isProtectedHomeUnderTest(defaultHome)) recordHome(defaultHome);
   // The shared registry is what lets one custom home find another: every runtime
   // that published a runtime record registered its home beside the shared clients.
   const registry = readOwnerRegistry();
@@ -204,6 +215,8 @@ export async function findCrossHomeOwnerDetailed(options: { homeDir?: string; io
   }
 
   const queue = [...candidates];
+  const availability = new Map<string, ReturnType<typeof loopbackFamilyAvailability>>();
+  const checkAvailability = options.loopbackAvailabilityFn ?? loopbackFamilyAvailability;
   const probed = new Set<number>();
   for (const port of queue) {
     if (probed.has(port)) continue;
@@ -224,6 +237,11 @@ export async function findCrossHomeOwnerDetailed(options: { homeDir?: string; io
         noteIndeterminate(port, "ownership discovery ran out of its shared time budget");
         break;
       }
+      // Disabled loopback IPv6 can route ::1 off-host and time out. An ephemeral
+      // local bind proves address absence without treating an available family's
+      // timeout as empty. Unknown bind failures retain the existing probes.
+      if (!availability.has(hostname)) availability.set(hostname, checkAvailability(hostname));
+      if (availability.get(hostname) === "unavailable") continue;
       const identity = await proxyIdentityAt(port, { hostname }, probeIo);
       if (identity === null) {
         // A null identity is not "free": distinguish a unanimous connect refusal
@@ -291,33 +309,35 @@ export async function findCrossHomeOwnerDetailed(options: { homeDir?: string; io
 }
 
 /** Mark this process before any shared-client write when another home owns the clients. */
-export async function markCrossHomeSibling(): Promise<boolean> {
-  const verdict = await findCrossHomeOwnerDetailed();
+export async function markCrossHomeSibling(
+  options: Parameters<typeof findCrossHomeOwnerDetailed>[0] = {},
+): Promise<boolean> {
+  const verdict = await findCrossHomeOwnerDetailed(options);
   if (verdict.kind === "none") return false;
-  if (verdict.port === null) throw new Error("Shared-client owner could not be located; refusing startup before any shared-client write.");
   if (verdict.kind === "indeterminate") {
-    // Fail closed: an owner the reader could not verify still owns the shared
-    // writes. Marking the best port hint keeps every sibling gate engaged even
-    // while the answer stays unproven (#6198).
-    console.warn(
-      "A shared-client owner could not be verified (" + verdict.reason + "); "
-      + "treating this instance as a sibling so Codex, Grok and Claude configs are left alone.",
+    // A missed probe is not proof of a sibling topology. Refuse before publication
+    // so the service can retry discovery without freezing uncertainty for its lifetime.
+    throw new Error(
+      `Shared-client owner could not be verified (${verdict.reason}); `
+      + "refusing startup before any shared-client write. Retry startup after discovery recovers.",
     );
   }
-  const port = verdict.port;
-  markSiblingStart(port);
+  markSiblingStart(verdict.port);
   return true;
 }
 
 /** A live proxy in this home can publish its sibling owner even while that owner is down. */
-export async function markLiveHomeSibling(live: { pid: number | null; port: number }): Promise<boolean> {
+export async function markLiveHomeSibling(
+  live: { pid: number | null; port: number },
+  options: Parameters<typeof findCrossHomeOwnerDetailed>[0] = {},
+): Promise<boolean> {
   const runtime = readRuntimePort();
   if (live.pid !== null && runtime?.pid === live.pid && runtime.port === live.port
     && runtime.siblingOfPort !== undefined && runtime.siblingOfPort !== live.port) {
     markSiblingStart(runtime.siblingOfPort);
     return true;
   }
-  const verdict = await findCrossHomeOwnerDetailed();
+  const verdict = await findCrossHomeOwnerDetailed(options);
   if (verdict.kind === "none" || verdict.port === live.port) return false;
   if (verdict.port === null) throw new Error("Shared-client owner could not be located; refusing startup before any shared-client write.");
   markSiblingStart(verdict.port);
@@ -333,5 +353,14 @@ export function reconcileStartupJournal(): void {
   const clientState = readClientConnectionState();
   reconcileJournal(clientState.kind === "connected"
     ? { activeClientApiKeyId: clientState.value.apiKeyId }
-    : undefined);
+    : { adoptUpdateHandover: updateTeardownHandoverPending() && startupSyncEnabled() });
+}
+
+/**
+ * #7423: adoption keeps routing only for a startup that will re-publish it. A user who has
+ * since turned the Codex integration off gets the ordinary recovery, even with a stale
+ * handover receipt on disk; an unreadable config is treated the same way.
+ */
+function startupSyncEnabled(): boolean {
+  try { return shouldSyncCodexOnStart(loadConfig()); } catch { return false; }
 }

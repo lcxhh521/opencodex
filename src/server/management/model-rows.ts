@@ -39,6 +39,8 @@ import {
   type ExportModel,
 } from "../../clients/config-export/contracts";
 import { customRowExportMetadata } from "./model-row-export-metadata";
+import { attachExportAliasSelectors } from "../../clients/config-export/alias-selectors";
+import { resolveExportReasoningAxes } from "../../clients/config-export/reasoning-metadata";
 import { providerContextCap } from "../../providers/context-cap";
 import { isVisionReasoningEffort, modelRecordValue, sanitizeCodexReasoningEfforts } from "../../reasoning-effort";
 import { routedSlug, slugEquals } from "../../providers/slug-codec";
@@ -52,6 +54,7 @@ import { reconcileSuccessfulModelDiscoveries } from "../../providers/new-model-p
 import { initialModelSelectionPending, pendingModelSelectionProviders } from "../../providers/initial-model-selection";
 import { catalogFastRowEligible, fastRowId } from "../fast-row";
 import { knownEffortRowIds } from "../effort-row";
+import { visionSidecarConsumerClassifier } from "../../vision/eligibility";
 
 /**
  * One row of the `/api/models` list. Routed rows spread a `CatalogModel`, so the shape is
@@ -78,6 +81,15 @@ export type ManagementModelRow = Partial<CatalogModel> & {
    * one thing and saves another, so its own writes never appear to take.
    */
   inputModalitiesDeclared?: string[];
+  /**
+   * The runtime's verdict on whether the Vision Sidecar describes this model's images, from
+   * the same predicate the request path consults (legacy `noVisionModels`, registry
+   * enrichment, explicit declarations, custom rows). `inputModalitiesDeclared` cannot answer
+   * this: a model covered ONLY by legacy `noVisionModels` has no declaration while its
+   * advertised modalities are widened to image, so a client inferring consumer status from
+   * declared-vs-advertised modalities misclassifies the row after reload.
+   */
+  visionSidecarConsumer?: boolean;
   /** Exact stored context override, distinct from the effective catalog window. */
   contextWindowDeclared?: number;
   /**
@@ -94,9 +106,9 @@ export type ManagementModelRow = Partial<CatalogModel> & {
    */
   supportsTools?: boolean;
   /**
-   * True when a canonical source positively asserts reasoning (a non-empty effective ladder
-   * or delivered reasoning summaries). Absent means unknown, never "cannot reason": an empty
-   * ladder only says the effort is not adjustable.
+   * A canonical source's explicit capability, or positive evidence from reasoning efforts
+   * or delivered summaries. Absent means unknown; an empty ladder alone says only that
+   * effort is not adjustable, not that the model cannot reason.
    */
   supportsReasoning?: boolean;
   /**
@@ -450,9 +462,11 @@ export async function listManagementModelRows(
     const routed = m.provider !== "combo";
     // Resolved once each: the spread below used to evaluate the same helpers again for the guard.
     const reasoningEfforts = routed
-      ? effectiveModelReasoningEfforts(config, m.provider, m.id, m.reasoningEfforts, catalogLadders)
+      ? m.supportsReasoningEffort === false || m.supportsReasoning === false ? []
+        : effectiveModelReasoningEfforts(config, m.provider, m.id, m.reasoningEfforts, catalogLadders)
       : undefined;
     const defaultReasoningEffort = routed
+      && m.supportsReasoningEffort !== false && m.supportsReasoning !== false
       ? effectiveModelDefaultReasoningEffort(config, m.provider, m.id, m.defaultReasoningEffort, reasoningEfforts)
       : undefined;
     const inputModalitiesDeclared = routed ? declaredModelInputModalities(config, m.provider, m.id) : undefined;
@@ -496,6 +510,7 @@ export async function listManagementModelRows(
   // a hidden real `x--fast` must never become a synthetic selector for another model.
   const knownIds = config.fastRows === false ? new Set<string>() : knownEffortRowIds(config);
   for (const row of rows) knownIds.add(row.namespaced);
+  const isVisionSidecarConsumer = visionSidecarConsumerClassifier(config);
   return rows.map(row => {
     const pending = initialModelSelectionPending(config.providers[row.provider]);
     const modelCosts = Object.hasOwn(config.providers, row.provider)
@@ -513,12 +528,12 @@ export async function listManagementModelRows(
       });
     const supportsReasoning = row.exportMetadata?.supportsReasoning
       ?? row.supportsReasoning
-      ?? knownReasoningSupport({
-        reasoningEfforts: row.reasoningEfforts,
-        supportsReasoningSummaries: row.supportsReasoningSummaries,
-      });
+      ?? knownReasoningSupport(row);
     return {
       ...row,
+      // One shared definition with the request path: the GUI must not re-derive consumer
+      // status from declared-vs-advertised modalities (see the field doc above).
+      visionSidecarConsumer: isVisionSidecarConsumer(row.provider, row.id),
       ...(!row.native && modelCosts !== undefined && Object.hasOwn(modelCosts, row.id)
         ? { manualPricing: true } : {}),
       ...(pending ? { disabled: true, initialSelectionPending: true } : {}),
@@ -546,14 +561,8 @@ export function toExportModel(row: ManagementModelRow): ExportModel {
   const maxTokens = effective?.maxTokens ?? row.maxOutputTokens;
   const maxInputTokens = effective?.maxInputTokens ?? row.maxInputTokens;
   const inputModalities = effective?.inputModalities ?? row.inputModalities;
-  const reasoningEfforts = effective?.reasoningEfforts ?? row.reasoningEfforts;
-  // The projection is the authority on the default. When it exists, an absent default means
-  // NO declared default — falling back to the row would reintroduce the picker's synthetic
-  // medium/low value, which is exactly what this projection exists to keep out of exports.
-  // Rows without a projection (native-era shapes, hand-built rows) keep the row's own value.
-  const defaultReasoningEffort = effective !== undefined
-    ? effective.defaultReasoningEffort
-    : row.defaultReasoningEffort;
+  const { supportsThinkingToggle, supportsReasoningEffort, defaultThinkingEnabled,
+    reasoningEfforts, defaultReasoningEffort } = resolveExportReasoningAxes(effective, row);
   const supportsReasoningSummaries = effective?.supportsReasoningSummaries ?? row.supportsReasoningSummaries;
   // Projection first, then the row's own explicit boolean (an external producer may state
   // false, which is evidence), and only then derivation from positive evidence.
@@ -566,10 +575,8 @@ export function toExportModel(row: ManagementModelRow): ExportModel {
     });
   const supportsReasoning = effective?.supportsReasoning
     ?? row.supportsReasoning
-    ?? knownReasoningSupport({
-      reasoningEfforts: row.reasoningEfforts,
-      supportsReasoningSummaries: row.supportsReasoningSummaries,
-    });
+    ?? knownReasoningSupport({ ...row, supportsThinkingToggle, supportsReasoningEffort,
+      reasoningEfforts, supportsReasoningSummaries });
   return {
     namespaced: row.namespaced,
     provider: row.provider,
@@ -583,6 +590,9 @@ export function toExportModel(row: ManagementModelRow): ExportModel {
     ...(inputModalities ? { inputModalities } : {}),
     // An empty array is a declaration ("no rungs"), and `[]` is truthy: it survives here.
     ...(reasoningEfforts ? { reasoningEfforts } : {}),
+    ...(typeof supportsThinkingToggle === "boolean" ? { supportsThinkingToggle } : {}),
+    ...(typeof supportsReasoningEffort === "boolean" ? { supportsReasoningEffort } : {}),
+    ...(typeof defaultThinkingEnabled === "boolean" ? { defaultThinkingEnabled } : {}),
     ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
     // An explicit false is evidence and survives; only derivation is true-or-nothing.
     ...(typeof supportsTools === "boolean" ? { supportsTools } : {}),
@@ -662,7 +672,8 @@ export async function loadExportModels(
   // Management deliberately lists the full roster so hidden models can be enabled.
   // A client picker must also honor the provider selection, not just its blocklist.
   const visibleRouted = new Set(filterCatalogVisibleModels(rows.filter(row => !row.native), admitted));
-  const exported = rows.filter(row => !row.disabled && (row.native || visibleRouted.has(row))).map(toExportModel);
+  const projected = attachExportAliasSelectors(admitted, rows.map(toExportModel));
+  const exported = projected.filter((_, index) => !rows[index]!.disabled && (rows[index]!.native || visibleRouted.has(rows[index]!)));
   // Retain the FINAL projection, not an input to it. A preview that rebuilt from raw provider
   // caches would miss static and forward providers, which never populate one, and would skip the
   // retention, metadata, combo and filtering this function applies afterwards.

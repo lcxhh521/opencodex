@@ -18,7 +18,7 @@ import { repoPath } from "../helpers/repo-root";
 
 const runtime: DurableBunRuntime = { path: process.execPath, source: "override", overrideEnv: "OPENCODEX_BUN_PATH" };
 /** The service script writes a profile-located Bun as a %LOCALAPPDATA%/%USERPROFILE% token with batch escaping. */
-const bunLine = () => `set "OCX_BUN=${windowsEnvIndirectBatchValue(runtime.path, v => v.replace(/%/g, "%%").replace(/\^/g, "^^").replace(/"/g, ""))}"`;
+const bunLine = () => `set "OCX_BUN=${windowsEnvIndirectBatchValue(runtime.path, v => v.replace(/%/g, "%%").replace(/"/g, ""))}"`;
 const roots: string[] = [];
 const envKeys = ["OPENCODEX_HOME", "CODEX_HOME", BUN_RUNTIME_PATH_ENV, BUN_RUNTIME_SOURCE_ENV] as const;
 const originalEnv = envKeys.map(key => process.env[key]);
@@ -45,6 +45,7 @@ describe("service selected-runtime admission", () => {
       await expect(installServiceSafely("scheduler", () => { effects.push("install"); }, {
         ...deps, diagnose: () => { effects.push("diagnose"); return diagnostic; },
         managerOps: () => ({ status: () => "present", stop: () => { effects.push("stop"); } }),
+        killServiceWrappers: () => {},
         stopTrackedProxy: async () => { effects.push("proxy"); },
       })).rejects.toMatchObject({ code: "OCX_RUNTIME_PREFLIGHT_FAILED", reason });
       const home = join(temporary(), "absent-home");
@@ -90,10 +91,11 @@ describe("service selected-runtime admission", () => {
       assertRuntimeWritable: admitted => { order.push("preflight"); expect(admitted).toEqual(runtime); selected.path = "unprobed.exe"; },
       diagnose: () => diagnostic,
       managerOps: () => ({ status: () => "present", stop: () => { order.push("stop"); } }),
+      killServiceWrappers: () => { order.push("wrappers"); },
       stopTrackedProxy: async () => { order.push("proxy"); },
     });
     expect(selections).toBe(1);
-    expect(order).toEqual(["preflight", "stop", "proxy", "install"]);
+    expect(order).toEqual(["preflight", "stop", "wrappers", "proxy", "install"]);
   });
 
   for (const backend of ["scheduler", "native"] as const) {
@@ -138,6 +140,7 @@ describe("service selected-runtime admission", () => {
         const result = installServiceSafely(backend, ops.install, {
           ...admission, diagnose: () => ({ ...diagnostic, backend }),
           managerOps: () => ({ status: () => "present", stop: () => { order.push("stop"); } }),
+          killServiceWrappers: () => { order.push("wrappers"); },
           stopTrackedProxy: async () => { order.push("proxy"); },
         });
         if (refuses) {
@@ -146,8 +149,8 @@ describe("service selected-runtime admission", () => {
         } else {
           await result;
           expect(order).toEqual(backend === "scheduler"
-            ? ["preflight", "stop", "proxy", "ownership", "remove-native", "installer-stop", "assets", "/create", "/run", "state"]
-            : ["preflight", "stop", "proxy", "account", "native-config", "/query", "winsw", "state"]);
+            ? ["preflight", "stop", "wrappers", "proxy", "ownership", "remove-native", "installer-stop", "assets", "/create", "/run", "state"]
+            : ["preflight", "stop", "wrappers", "proxy", "account", "native-config", "/query", "winsw", "state"]);
           expect(JSON.parse(readFileSync(join(home, "state.json"), "utf8"))).toMatchObject({ backend, bunPath: runtime.path });
         }
         expect(probes).toBe(1); expect(selections).toBe(1);

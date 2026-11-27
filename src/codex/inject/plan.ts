@@ -9,6 +9,7 @@
  * post-transition bytes is what keeps the committed file from re-enabling the
  * flag the reconcile just turned off.
  */
+import { existsSync, readFileSync } from "node:fs";
 import { websocketsEnabled } from "../../config";
 import {
   HISTORY_RELABEL_STANDS_DOWN,
@@ -18,11 +19,12 @@ import {
   journaledInjectedOpenaiBaseUrl,
   journaledInjectedRealtimeWsBaseUrl,
   journaledInjectedRootWebSearch,
+  journaledInjectedSubagentDefaults,
   journaledReplacedRootWebSearch,
 } from "../journal";
 import { stripJournaledOpenaiBaseUrl } from "../injected-marker";
-import { CODEX_CONFIG_PATH, resolveCodexStateDbPath } from "../paths";
-import { transformManagedSubagentDefaults } from "../subagent-defaults";
+import { CODEX_CONFIG_PATH, CODEX_PROFILE_PATH, resolveCodexStateDbPath } from "../paths";
+import { transformManagedSubagentDefaults, type WrittenSubagentDefaults } from "../subagent-defaults";
 import type { OcxConfig } from "../../types";
 import type { CodexWriteCandidate } from "../write-coordination";
 import {
@@ -34,6 +36,7 @@ import {
   ensureFastModeFeature,
   ensureRootWebSearchDisabled,
   normalizeServiceTier,
+  preserveUnmanagedProfileKeys,
   removeProfileSection,
   setRootModelCatalogPath,
   setRootModelProvider,
@@ -42,7 +45,6 @@ import {
   stripExistingModelProvider,
   stripInjectedOpenaiBaseUrl,
   stripOpencodexCatalogPath,
-  stripRootContextWindowOverrides,
 } from "./config-toml";
 import { hasOcxProviderTable, removeOcxSection } from "./remove";
 import {
@@ -71,6 +73,11 @@ export interface CodexInjectionPlanOk {
   content: string;
   /** The exact string about to replace the profile file. */
   profileContent: string;
+  /**
+   * The profile bytes `profileContent` preserved keys from (null when absent).
+   * Re-checked under the write lock so an edit landing meanwhile is not overwritten.
+   */
+  profileSource: string | null;
   /** The resolved catalog path, never the raw option. */
   catalogPath: string | null;
   providerTableMode: boolean;
@@ -81,6 +88,8 @@ export interface CodexInjectionPlanOk {
   injectedRootWebSearch: string | null;
   /** The user-owned root `web_search` line this plan removed, for the journal to carry. */
   replacedRootWebSearch: string | null;
+  /** The marker-owned `[agents]` defaults this plan writes, for the journal to carry; null when none. */
+  injectedSubagentDefaults: WrittenSubagentDefaults | null;
   nativeSubagentDefaultsWarning: string | undefined;
   managedDefaultsMessage: string;
   /**
@@ -130,9 +139,12 @@ export function deriveCodexInjectionPlan(
   // root routing key: inserting that key ahead of a marker-owned first table
   // would otherwise separate the table marker from its header. Ambiguous
   // markers fail closed without writing config, profile, or journal state.
+  // A marked value that no longer matches the journaled write was edited by the
+  // user (#7425); it is adopted into the baseline instead of being cleaned.
   const nativeDefaultsBaseline = transformManagedSubagentDefaults(
     source,
     null,
+    journaledInjectedSubagentDefaults({ readOnly: ctx.journalReadOnly }),
   );
   if (!nativeDefaultsBaseline.ok) {
     return {
@@ -186,7 +198,8 @@ export function deriveCodexInjectionPlan(
   }
   content = removeProfileSection(content);
   content = stripExistingModelProvider(content);
-  content = stripRootContextWindowOverrides(content);
+  // A root `model_context_window` is never written by OpenCodex, so it is the user's choice and
+  // survives injection (#7425). Codex applies it to every model ahead of the catalog's windows.
   content = normalizeServiceTier(content);
   content = ensureFastModeFeature(content, config?.fastMode);
   // Codex's own web-search switch follows the sidecar's master switch. While the sidecar is off,
@@ -291,6 +304,7 @@ export function deriveCodexInjectionPlan(
   let managedDefaultsMessage = routingOwnershipWarning
     ? `  ⚠️ ${routingOwnershipWarning}\n`
     : "";
+  let injectedSubagentDefaults: WrittenSubagentDefaults | null = null;
   if (managedDefaults.ok) {
     content = managedDefaults.content;
     if (desiredSubagentDefaults && managedDefaults.conflicts.length > 0) {
@@ -299,6 +313,13 @@ export function deriveCodexInjectionPlan(
         .join(", ");
       nativeSubagentDefaultsWarning = `Native Codex sub-agent defaults were not injected: user-owned ${keys} preserved.`;
       managedDefaultsMessage = `  ⚠️ ${nativeSubagentDefaultsWarning}\n`;
+    } else if (desiredSubagentDefaults && !keptUserBaseUrl) {
+      injectedSubagentDefaults = {
+        default_subagent_model: desiredSubagentDefaults.model,
+        ...(desiredSubagentDefaults.reasoningEffort !== undefined
+          ? { default_subagent_reasoning_effort: desiredSubagentDefaults.reasoningEffort }
+          : {}),
+      };
     }
   } else {
     const action =
@@ -309,12 +330,16 @@ export function deriveCodexInjectionPlan(
     managedDefaultsMessage = `  ⚠️ ${nativeSubagentDefaultsWarning}\n`;
   }
 
-  const profileContent = buildProfileFileForTarget(
-    routingTarget,
-    catalogPath,
-    websocketsForRoutingTarget(config, routingTarget),
-    config?.fastMode,
-    config?.codexProviderDisplayName,
+  const profileSource = readCodexProfileSource();
+  const profileContent = preserveUnmanagedProfileKeys(
+    profileSource,
+    buildProfileFileForTarget(
+      routingTarget,
+      catalogPath,
+      websocketsForRoutingTarget(config, routingTarget),
+      config?.fastMode,
+      config?.codexProviderDisplayName,
+    ),
   );
   content = applyEol(content, eol);
 
@@ -381,6 +406,7 @@ export function deriveCodexInjectionPlan(
     baselineContent,
     content,
     profileContent,
+    profileSource,
     catalogPath,
     providerTableMode,
     keepRootOverrideAlongsideTable,
@@ -388,6 +414,7 @@ export function deriveCodexInjectionPlan(
     keptUserRealtimeWsBaseUrl,
     injectedRootWebSearch: webSearch.wroteValue,
     replacedRootWebSearch: webSearch.replacedUserLine,
+    injectedSubagentDefaults,
     nativeSubagentDefaultsWarning,
     managedDefaultsMessage,
     historyRelabelRefusal: observedHistoryRefusal,
@@ -398,4 +425,19 @@ export function deriveCodexInjectionPlan(
       catalogPath,
     },
   };
+}
+
+
+/**
+ * Current profile bytes, or null when absent. Read directly: a profile removed between an
+ * existence check and the read is simply absent. If it reappears before the write lock, the
+ * lock-time comparison refuses retryably; other read errors propagate.
+ */
+export function readCodexProfileSource(): string | null {
+  try {
+    return readFileSync(CODEX_PROFILE_PATH, "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return null;
+  }
 }
