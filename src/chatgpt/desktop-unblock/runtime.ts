@@ -41,6 +41,13 @@ export function chatgptPacFallbackEnabled(config: Pick<OcxConfig, "chatgptDeskto
   return chatgptUnblockEnabled(config) && config.chatgptDesktop?.pacFallback === true;
 }
 
+/** Whether the operator opted into letting the desktop draw on credits when the subscription
+ *  quota is exhausted: the credit-variant limit gates are lifted like plain-quota ones. Default
+ *  off — credits are real money, so the default keeps a credit-limited composer locked. */
+export function chatgptSpendCreditsEnabled(config: Pick<OcxConfig, "chatgptDesktop">): boolean {
+  return config.chatgptDesktop?.spendCredits === true;
+}
+
 /**
  * The listener port: `chatgptDesktop.port` when valid, else the public port plus the offset.
  * Throws when the derived port would leave the TCP range (a public port of 65336 or more);
@@ -199,7 +206,7 @@ export async function startChatgptUnblock<T = undefined>(options: StartChatgptUn
   const ca = await ensureLocalInterceptCaForStartup(configDir);
   const leaf = issueLocalInterceptLeaf(ca, [CHATGPT_INTERCEPT_HOST]);
   // The port must be the configured one, not ephemeral: the launcher's launch arguments name it.
-  const listener = startChatgptUnblockListener({ leaf, port });
+  const listener = startChatgptUnblockListener({ leaf, port, liftCredits: chatgptSpendCreditsEnabled(options.config) });
   let entryProxy: EntryProxyHandle | undefined;
   let pacRoute: ChatgptUnblockPacRoute | undefined;
   const pacFallback = chatgptPacFallbackEnabled(options.config);

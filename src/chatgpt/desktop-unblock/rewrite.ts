@@ -37,10 +37,13 @@ const SEND_LIMIT_FEATURE_NAME = "send";
 
 /**
  * `block_reason` values that describe the account's own usage quota. Anything else --
- * subscription, policy, a workspace or credit limit such as `workspace_owner_usage_limit_reached`,
- * or a reason this code has never seen -- is left in place.
+ * subscription, policy, or a reason this code has never seen -- is left in place. The
+ * workspace and credit variants join only when the operator opted into credits spending
+ * (`chatgptDesktop.spendCredits`): credits are real money, and the default keeps a
+ * credit-limited composer locked.
  */
 const QUOTA_BLOCK_REASONS = new Set(["usage_limit", "usage_limit_reached", "rate_limit_exceeded", "rate_limit_reached", "quota_exhausted"]);
+const CREDIT_BLOCK_REASONS = new Set(["workspace_member_credits_depleted", "workspace_owner_usage_limit_reached"]);
 
 /** Which part of the rewrite applies to a response. */
 export type RewriteSurface = "conversation" | "usage";
@@ -75,10 +78,11 @@ function isSendBlockedFeature(entry: unknown): entry is Record<string, unknown> 
   return isRecord(entry) && SEND_BLOCKED_FEATURE_NAMES.has(String(entry.name ?? ""));
 }
 
-/** Absent/empty reason is the plain usage-limit shape; otherwise the reason must say quota. */
-function isQuotaBlockReason(reason: unknown): boolean {
+/** Absent/empty reason is the plain usage-limit shape; otherwise the reason must say quota. A
+ *  credit-shaped reason counts too when the operator opted into credits spending. */
+function isQuotaBlockReason(reason: unknown, liftCredits: boolean): boolean {
   if (reason === undefined || reason === null || reason === "") return true;
-  return typeof reason === "string" && QUOTA_BLOCK_REASONS.has(reason);
+  return typeof reason === "string" && (QUOTA_BLOCK_REASONS.has(reason) || (liftCredits && CREDIT_BLOCK_REASONS.has(reason)));
 }
 
 function isExhaustedSendLimit(entry: unknown): boolean {
@@ -92,11 +96,11 @@ function isExhaustedSendLimit(entry: unknown): boolean {
  * arrays. Non-quota send blocks are kept and appended to `preserved`. Malformed entries are
  * kept: the rewrite owns removal of known-shaped blocks, not validation.
  */
-export function stripSendBlocks(value: unknown, preserved: PreservedSendBlock[] = []): RewriteResult {
+export function stripSendBlocks(value: unknown, preserved: PreservedSendBlock[] = [], liftCredits = false): RewriteResult {
   if (Array.isArray(value)) {
     let changed = false;
     const items = value.map(item => {
-      const result = stripSendBlocks(item, preserved);
+      const result = stripSendBlocks(item, preserved, liftCredits);
       changed ||= result.changed;
       return result.value;
     });
@@ -110,7 +114,7 @@ export function stripSendBlocks(value: unknown, preserved: PreservedSendBlock[] 
       const kept = child.filter(entry => {
         if (!isSendBlockedFeature(entry)) return true;
         const reason = entry.block_reason ?? entry.blockReason;
-        if (isQuotaBlockReason(reason)) return false;
+        if (isQuotaBlockReason(reason, liftCredits)) return false;
         preserved.push({ name: String(entry.name), reason: String(reason) });
         return true;
       });
@@ -140,6 +144,7 @@ export function stripSendBlocksFromJson(
   text: string,
   surface?: RewriteSurface,
   preserved: PreservedSendBlock[] = [],
+  liftCredits = false,
 ): string | null {
   let parsed: unknown;
   try {
@@ -150,11 +155,11 @@ export function stripSendBlocksFromJson(
   let value = parsed;
   let changed = false;
   if (surface !== "usage") {
-    const stripped = stripSendBlocks(value, preserved);
+    const stripped = stripSendBlocks(value, preserved, liftCredits);
     value = stripped.value;
     changed ||= stripped.changed;
   }
-  if (surface !== "conversation") changed = unlockRateLimitGate(value) || changed;
+  if (surface !== "conversation") changed = unlockRateLimitGate(value, { liftCredits }) || changed;
   return changed ? JSON.stringify(value) : null;
 }
 
@@ -168,13 +173,14 @@ export function stripSendBlocksFromSseLine(
   line: string,
   surface?: RewriteSurface,
   preserved: PreservedSendBlock[] = [],
+  liftCredits = false,
 ): string | null {
   const cr = line.endsWith("\r") ? "\r" : "";
   const body = cr ? line.slice(0, -1) : line;
   // `s`: a JSON string may legally hold U+2028/U+2029, which `.` would otherwise refuse.
   const match = /^(data: ?)(.*)$/s.exec(body);
   if (!match) return null;
-  const rewritten = stripSendBlocksFromJson(match[2]!, surface, preserved);
+  const rewritten = stripSendBlocksFromJson(match[2]!, surface, preserved, liftCredits);
   if (rewritten === null) return null;
   return `${match[1]}${rewritten}${cr}`;
 }

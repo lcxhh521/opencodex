@@ -9,6 +9,10 @@ export const chatgptDesktopSchema = z.object({
   cloudNetwork: z.boolean().optional(),
   appServerShim: z.boolean().optional(),
   unblockSend: z.boolean().optional(),
+  /** Opt in to letting the desktop draw on credits when the subscription quota is exhausted:
+   *  the credit-variant limit gates are lifted like plain-quota ones. Default off — credits
+   *  are real money, so the default keeps a credit-limited composer locked. */
+  spendCredits: z.boolean().optional(),
   pacFallback: z.boolean().optional(),
   port: z.number().int().min(1).max(65535).optional(),
 }).strict();

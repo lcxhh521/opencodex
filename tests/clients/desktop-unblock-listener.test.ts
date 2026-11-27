@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createServer } from "node:http";
 import {
   CHATGPT_UNBLOCK_IDENTITY_PATH,
   MAX_REWRITE_BODY_BYTES,
@@ -177,5 +178,196 @@ describe("chatgpt unblock relay body cap", () => {
     const { fetchImpl } = upstreamReturning(() => new Response(closedUsage("y".repeat(1024)), { headers: { "content-type": "application/json" } }));
     const res = await relayWithSendUnblock(new Request("https://chatgpt.com/backend-api/wham/usage"), UPSTREAM, fetchImpl);
     expect((await res.json() as { rate_limit: { allowed: boolean } }).rate_limit.allowed).toBe(true);
+  });
+});
+
+
+describe("chatgpt unblock read recovery", () => {
+  const messagesUrl = "https://chatgpt.com/backend-api/messaging/rooms/fixture/messages?limit=20";
+  const reset = () => new TypeError("The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()");
+
+  test("a room history read recovers when the upstream closes before sending headers", async () => {
+    const requests: { url: string | undefined; connection: string | undefined }[] = [];
+    const server = createServer((req, res) => {
+      requests.push({ url: req.url, connection: req.headers.connection });
+      if (requests.length === 1) { req.socket.destroy(); return; }
+      res.setHeader("content-type", "application/json");
+      res.end('{"items":[]}');
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address() as { port: number };
+      const res = await relayWithSendUnblock(new Request(messagesUrl), `http://127.0.0.1:${address.port}`);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe('{"items":[]}');
+      expect(requests).toHaveLength(2);
+      expect(requests[1]).toEqual({ url: "/backend-api/messaging/rooms/fixture/messages?limit=20", connection: "close" });
+    } finally {
+      await new Promise<void>(resolve => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      });
+    }
+  });
+
+  for (const method of ["GET", "HEAD"]) {
+    test(`${method} retries once with the keep-alive pool disabled`, async () => {
+      const attempts: RequestInit[] = [];
+      const fetchImpl = (async (_: RequestInfo | URL, init?: RequestInit) => {
+        attempts.push(init!);
+        if (attempts.length === 1) throw reset();
+        return new Response(method === "HEAD" ? null : "ok");
+      }) as typeof fetch;
+      const res = await relayWithSendUnblock(new Request(messagesUrl, { method }), UPSTREAM, fetchImpl);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(method === "HEAD" ? "" : "ok");
+      expect(attempts).toHaveLength(2);
+      expect(attempts[0]!.keepalive).toBeUndefined();
+      expect(attempts[1]!.keepalive).toBe(false);
+      expect(new Headers(attempts[1]!.headers).get("connection")).toBe("close");
+    });
+  }
+
+  test("a persistent reset stops after two sends", async () => {
+    let sends = 0;
+    const fetchImpl = (async () => { sends++; throw reset(); }) as unknown as typeof fetch;
+    const res = await relayWithSendUnblock(new Request(messagesUrl), UPSTREAM, fetchImpl);
+    expect(res.status).toBe(502);
+    expect(sends).toBe(2);
+  });
+
+  test("a read through a momentarily-refusing proxy recovers after the blip backoff", async () => {
+    // A consumer VPN core reconnecting its tunnel refuses every dial for a second or two;
+    // the relay waits it out instead of answering the desktop's own retry with a 502.
+    let attempts = 0;
+    const fetchImpl = (async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("Unable to connect");
+      return json({ ok: true });
+    }) as typeof fetch;
+    const res = await relayWithSendUnblock(new Request("https://chatgpt.com/backend-api/wham/accounts/check"), UPSTREAM, fetchImpl);
+    expect(res.status).toBe(200);
+    expect(attempts).toBe(2);
+  });
+
+  test("a read whose dial times out is not retried as a blip", async () => {
+    let attempts = 0;
+    const fetchImpl = (async () => {
+      attempts += 1;
+      throw new DOMException("The operation was timed out", "TimeoutError");
+    }) as unknown as typeof fetch;
+    const res = await relayWithSendUnblock(new Request("https://chatgpt.com/backend-api/wham/accounts/check"), UPSTREAM, fetchImpl);
+    // Timeouts are caller decisions: the desktop's own fetch deadline is the bound.
+    expect(res.status).toBe(502);
+    expect(attempts).toBe(1);
+  });
+
+  for (const method of ["POST", "PATCH", "DELETE"]) {
+    test(`${method} opts out of keep-alive pool and is never replayed after a reset`, async () => {
+      let sends = 0;
+      const bodies: string[] = [];
+      const inits: RequestInit[] = [];
+      const fetchImpl = (async (_: RequestInfo | URL, init?: RequestInit) => {
+        sends++;
+        inits.push(init!);
+        bodies.push(await new Response(init?.body).text());
+        throw reset();
+      }) as typeof fetch;
+      const res = await relayWithSendUnblock(new Request(messagesUrl, { method, body: "fixture" }), UPSTREAM, fetchImpl);
+      expect(res.status).toBe(502);
+      expect(sends).toBe(1);
+      expect(bodies).toEqual(["fixture"]);
+      expect(inits[0]!.keepalive).toBe(false);
+      expect(new Headers(inits[0]!.headers).get("connection")).toBe("close");
+    });
+  }
+
+  for (const path of [
+    "https://chatgpt.com/backend-api/messaging/rooms/fixture",
+    "https://chatgpt.com/backend-api/messaging/rooms/fixture/messages?limit=20",
+    "https://chatgpt.com/backend-api/tbo?limit=25&include_room_preview=false",
+  ]) {
+    test(`a Dot/TBO GET 404 on ${new URL(path).pathname} retries on a fresh connection and recovers`, async () => {
+      const attempts: RequestInit[] = [];
+      const fetchImpl = (async (_: RequestInfo | URL, init?: RequestInit) => {
+        attempts.push(init!);
+        if (attempts.length === 1) return json({ detail: "Not Found" }, { status: 404 });
+        return json({ ok: true });
+      }) as typeof fetch;
+      const res = await relayWithSendUnblock(new Request(path), UPSTREAM, fetchImpl);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true });
+      expect(attempts).toHaveLength(2);
+      expect(attempts[0]!.keepalive).toBeUndefined();
+      expect(attempts[1]!.keepalive).toBe(false);
+      expect(new Headers(attempts[1]!.headers).get("connection")).toBe("close");
+    });
+  }
+
+  test("a persistent Dot GET 404 stops after two fresh retries and returns 404 verbatim", async () => {
+    let sends = 0;
+    const fetchImpl = (async () => {
+      sends++;
+      return json({ detail: "Not Found" }, { status: 404 });
+    }) as unknown as typeof fetch;
+    const res = await relayWithSendUnblock(new Request(messagesUrl), UPSTREAM, fetchImpl);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ detail: "Not Found" });
+    expect(sends).toBe(3);
+  });
+
+  test("a 404 on an unrelated GET path or on a Dot POST is never retried", async () => {
+    let unrelatedSends = 0;
+    const unrelatedFetch = (async () => {
+      unrelatedSends++;
+      return json({ detail: "Not Found" }, { status: 404 });
+    }) as unknown as typeof fetch;
+    const res1 = await relayWithSendUnblock(new Request("https://chatgpt.com/backend-api/settings/user"), UPSTREAM, unrelatedFetch);
+    expect(res1.status).toBe(404);
+    expect(unrelatedSends).toBe(1);
+
+    let postSends = 0;
+    const postFetch = (async () => {
+      postSends++;
+      return json({ detail: "Not Found" }, { status: 404 });
+    }) as unknown as typeof fetch;
+    const res2 = await relayWithSendUnblock(new Request(messagesUrl, { method: "POST", body: "{}" }), UPSTREAM, postFetch);
+    expect(res2.status).toBe(404);
+    expect(postSends).toBe(1);
+  });
+
+  test("canceling a failed read during backoff prevents another send", async () => {
+    const abort = new AbortController();
+    let sends = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const fetchImpl = (async () => {
+      sends++;
+      timer = setTimeout(() => abort.abort(), 10);
+      throw reset();
+    }) as unknown as typeof fetch;
+    try {
+      await relayWithSendUnblock(new Request(messagesUrl, { signal: abort.signal }), UPSTREAM, fetchImpl);
+      expect(abort.signal.aborted).toBe(true);
+      expect(sends).toBe(1);
+    } finally { clearTimeout(timer); }
+  });
+
+  for (const status of [429, 502]) {
+    test(`an upstream HTTP ${status} passes through without retry`, async () => {
+      const { fetchImpl, targets } = upstreamReturning(() => new Response("upstream error", { status }));
+      const res = await relayWithSendUnblock(new Request(messagesUrl), UPSTREAM, fetchImpl);
+      expect(res.status).toBe(status);
+      expect(await res.text()).toBe("upstream error");
+      expect(targets).toHaveLength(1);
+    });
+  }
+
+  test("a reset after headers does not replay the history stream", async () => {
+    const { fetchImpl, targets } = upstreamReturning(() => new Response(new ReadableStream({
+      start(controller) { controller.error(reset()); },
+    })));
+    const res = await relayWithSendUnblock(new Request(messagesUrl), UPSTREAM, fetchImpl);
+    await expect(res.text()).rejects.toThrow("socket connection was closed unexpectedly");
+    expect(targets).toHaveLength(1);
   });
 });

@@ -49,6 +49,8 @@ describe("isConnectionResetError", () => {
     // Message-only match (no code property).
     expect(isConnectionResetError(new Error("The socket connection was closed unexpectedly."))).toBe(true);
     expect(isConnectionResetError(new Error("read: connection reset by peer"))).toBe(true);
+    // Bun's bare closed-pool sentence from a retired CONNECT tunnel (desktop chatgpt relay).
+    expect(isConnectionResetError(new Error("The connection was closed."))).toBe(true);
 
     expect(isConnectionResetError(new DOMException("Timeout elapsed", "TimeoutError"))).toBe(false);
     expect(isConnectionResetError(new DOMException("The operation was aborted", "AbortError"))).toBe(false);

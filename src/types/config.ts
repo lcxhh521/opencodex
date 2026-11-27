@@ -512,7 +512,7 @@ export interface OcxConfig {
    * `pacFallback` launches the intercepted app with a generated PAC instead of a resolver rule.
    * `cloudNetwork` enables the opaque cloud relay independently of shim and send-unblock behavior.
    */
-  chatgptDesktop?: { appServerShim?: boolean; unblockSend?: boolean; pacFallback?: boolean; cloudNetwork?: boolean; port?: number };
+  chatgptDesktop?: { appServerShim?: boolean; unblockSend?: boolean; pacFallback?: boolean; cloudNetwork?: boolean; port?: number; spendCredits?: boolean };
   port: number;
   /** Runtime topology role. Absence preserves the historical standalone behavior. */
   runtimeRole?: OcxRuntimeRole;

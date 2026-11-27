@@ -1,6 +1,7 @@
 import type { Server } from "bun";
 import type { PemKeyPair } from "../../claude/intercept/local-ca";
 import { forwardHeadersForUpstream } from "../../claude/intercept/listener";
+import { applyUpstreamRecoveryInit, cancelResponseBodyBestEffort, fetchWithProxyBlipRetry, fetchWithResetRetry, type UpstreamSendRecovery } from "../../lib/upstream-retry";
 import { rewriteSurfaceFor, stripSendBlocksFromJson, stripSendBlocksFromSseLine } from "./rewrite";
 import type { PreservedSendBlock, RewriteSurface } from "./rewrite";
 import { handleWebSocketUpgrade, isRelayableUpgrade } from "./ws-relay";
@@ -33,6 +34,33 @@ const RESPONSE_STRIP_HEADERS = new Set([
 
 /** Statuses that carry no body; constructing a Response with one throws. */
 const NULL_BODY_STATUSES = new Set([204, 205, 304]);
+
+/**
+ * Dot messaging and TBO read routes that can intermittently return 404 when a multi-node local
+ * proxy assigns a pooled CONNECT tunnel to a restricted exit. Retrying on fresh connections
+ * (`keepalive: false`) escapes the poisoned pool entry without ever replaying mutations.
+ */
+const DOT_404_FRESH_RETRY_MAX = 2;
+
+function dotRead404RetryCategory(pathname: string): string | null {
+  if (
+    pathname === "/backend-api/messaging/rooms"
+    || pathname.startsWith("/backend-api/messaging/rooms/")
+    || pathname === "/api/messaging/rooms"
+    || pathname.startsWith("/api/messaging/rooms/")
+  ) {
+    return "/messaging/rooms";
+  }
+  if (
+    pathname === "/backend-api/tbo"
+    || pathname.startsWith("/backend-api/tbo/")
+    || pathname === "/api/tbo"
+    || pathname.startsWith("/api/tbo/")
+  ) {
+    return "/tbo";
+  }
+  return null;
+}
 
 /**
  * Local-only path the listener answers itself, never relayed. The launch watcher and
@@ -76,6 +104,8 @@ export interface ChatgptUnblockListenerOptions {
   /** Test seam: where WebSocket upgrades dial instead of chatgpt.com through the configured proxy. */
   wsUpstream?: DialUpstreamOptions;
   diagnostics?: ChatgptUnblockDiagnostics;
+  /** Lift credit-variant limit gates too (chatgptDesktop.spendCredits), not just plain quota. */
+  liftCredits?: boolean;
 }
 
 function responseHeaders(source: Response): Headers {
@@ -94,13 +124,14 @@ function responseHeaders(source: Response): Headers {
 export function sseRewriteStream(options: {
   surface?: RewriteSurface;
   diagnostics?: ChatgptUnblockDiagnostics;
+  liftCredits?: boolean;
 } = {}): TransformStream<Uint8Array, Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let pending = "";
   const rewriteLine = (line: string): string | null => {
     const preserved: PreservedSendBlock[] = [];
-    const rewritten = stripSendBlocksFromSseLine(line, options.surface, preserved);
+    const rewritten = stripSendBlocksFromSseLine(line, options.surface, preserved, options.liftCredits);
     options.diagnostics?.record(preserved);
     return rewritten;
   };
@@ -183,6 +214,7 @@ export async function relayWithSendUnblock(
   upstreamBase: string,
   fetchImpl: typeof fetch = fetch,
   diagnostics?: ChatgptUnblockDiagnostics,
+  liftCredits = false,
 ): Promise<Response> {
   const url = new URL(req.url);
   if (url.pathname === CHATGPT_UNBLOCK_IDENTITY_PATH) {
@@ -192,15 +224,42 @@ export async function relayWithSendUnblock(
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
   let upstream: Response;
   try {
-    upstream = await fetchImpl(target, {
-      method: req.method,
-      headers: forwardHeadersForUpstream(req.headers),
-      body: hasBody ? req.body : undefined,
-      signal: req.signal,
-      redirect: "manual",
+    const doFetch = (recovery?: UpstreamSendRecovery) => fetchImpl(target, {
+      ...applyUpstreamRecoveryInit({
+        method: req.method,
+        headers: forwardHeadersForUpstream(req.headers),
+        body: hasBody ? req.body : undefined,
+        signal: req.signal,
+        redirect: "manual",
+      }, recovery),
       // @ts-expect-error -- streaming request bodies require half duplex under the fetch spec.
       duplex: "half",
     });
+    // Only GET/HEAD can recover a pre-header reset. A message send may already have run, so
+    // mutating requests opt out of Bun's keep-alive pool up front instead of gambling on a
+    // retired CONNECT tunnel that dies with ECONNRESET.
+    // The blip wrapper spaces its retries out for the seconds-long outage of a consumer VPN
+    // core reconnecting its tunnel; the reset retry inside stays immediate for dead pool
+    // entries, which a fresh dial answers without waiting.
+    upstream = hasBody ? await doFetch("connection-reset") : await fetchWithProxyBlipRetry(
+      () => fetchWithResetRetry(doFetch, { attempts: 2, replaySafe: true, abortSignal: req.signal, label: "chatgpt-unblock-read" }),
+      { delaysMs: [400, 1200], abortSignal: req.signal, label: "chatgpt-unblock-read" },
+    );
+    const dotCategory = !hasBody && upstream.status === 404 ? dotRead404RetryCategory(url.pathname) : null;
+    if (dotCategory !== null) {
+      let freshAttempts = 0;
+      const retryStart = Date.now();
+      while (upstream.status === 404 && freshAttempts < DOT_404_FRESH_RETRY_MAX && !req.signal.aborted) {
+        cancelResponseBodyBestEffort(upstream);
+        freshAttempts += 1;
+        upstream = await doFetch("connection-reset");
+      }
+      if (freshAttempts > 0) {
+        console.warn(
+          `[chatgpt-unblock] dot 404 fresh-tunnel retry (${dotCategory}): 404 -> ${upstream.status} after ${freshAttempts} retry(s) in ${Date.now() - retryStart}ms`,
+        );
+      }
+    }
   } catch (error) {
     return Response.json(
       { error: { message: `chatgpt unblock relay failed: ${error instanceof Error ? error.message : String(error)}` } },
@@ -228,12 +287,12 @@ export async function relayWithSendUnblock(
     if ("overflow" in read) return new Response(read.overflow, init);
     const text = read.text;
     const preserved: PreservedSendBlock[] = [];
-    const rewritten = stripSendBlocksFromJson(text, surface, preserved);
+    const rewritten = stripSendBlocksFromJson(text, surface, preserved, liftCredits);
     diagnostics?.record(preserved);
     return new Response(rewritten ?? text, init);
   }
   if (isEventStreamContentType(contentType) && upstream.body) {
-    return new Response(upstream.body.pipeThrough(sseRewriteStream({ surface, diagnostics })), init);
+    return new Response(upstream.body.pipeThrough(sseRewriteStream({ surface, diagnostics, liftCredits })), init);
   }
   return new Response(upstream.body, init);
 }
@@ -265,7 +324,7 @@ export function startChatgptUnblockListener(options: ChatgptUnblockListenerOptio
     },
     async fetch(req, server) {
       if (isRelayableUpgrade(req)) return handleWebSocketUpgrade(req, server, options.wsUpstream);
-      return relayWithSendUnblock(req, upstreamBase, options.fetchImpl, diagnostics);
+      return relayWithSendUnblock(req, upstreamBase, options.fetchImpl, diagnostics, options.liftCredits);
     },
   });
 }
